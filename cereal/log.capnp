@@ -2657,8 +2657,8 @@ struct Event {
     carStateSP @114 :Custom.CarStateSP;
     liveMapDataSP @115 :Custom.LiveMapDataSP;
     modelDataV2SP @116 :Custom.ModelDataV2SP;
-    mqttPubQueue @117 :MqttPubQueue;
-    mqttRecvQueue @118 :MqttRecvQueue;
+    mqttPubQueue @150 :MqttPubQueue;
+    mqttRecvQueue @151 :MqttRecvQueue;
     customReserved10 @136 :Custom.CustomReserved10;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
