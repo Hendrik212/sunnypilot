@@ -150,6 +150,10 @@ procs = [
   PythonProcess("statsd", "system.statsd", always_run),
   PythonProcess("feedbackd", "selfdrive.ui.feedback.feedbackd", only_onroad),
 
+  # mqtt
+  PythonProcess("mqttd", "system.mqttd.mqttd", only_offroad),
+  PythonProcess("mqttd_status", "system.mqttd.status", only_offroad),
+
   # debug procs
   NativeProcess("bridge", "cereal/messaging", ["./bridge"], notcar),
   PythonProcess("webrtcd", "system.webrtc.webrtcd", notcar),

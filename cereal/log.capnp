@@ -2389,6 +2389,20 @@ struct UploaderState {
   lastFilename @6 :Text;
 }
 
+struct MqttPubQueue {
+  publish @0 :Bool;
+  subscribe @1 :Bool;
+  topic @2 :Text;
+  content @3 :Text;
+  qos @4 :UInt8;
+  retain @5 :Bool;
+}
+
+struct MqttRecvQueue {
+  topic @0 :Text;
+  payload @1 :Text;
+}
+
 struct NavInstruction {
   maneuverPrimaryText @0 :Text;
   maneuverSecondaryText @1 :Text;
@@ -2643,6 +2657,8 @@ struct Event {
     carStateSP @114 :Custom.CarStateSP;
     liveMapDataSP @115 :Custom.LiveMapDataSP;
     modelDataV2SP @116 :Custom.ModelDataV2SP;
+    mqttPubQueue @117 :MqttPubQueue;
+    mqttRecvQueue @118 :MqttRecvQueue;
     customReserved10 @136 :Custom.CustomReserved10;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
