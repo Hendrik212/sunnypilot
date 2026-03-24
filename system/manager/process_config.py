@@ -154,8 +154,8 @@ procs = [
   PythonProcess("mqttd", "system.mqttd.mqttd", only_offroad),
   PythonProcess("mqttd_status", "system.mqttd.status", only_offroad),
 
-  # abrp ble
-  PythonProcess("abrp_ble", "system.abrp_ble.abrp_ble", always_run),
+  # abrp ble (disabled for now)
+  # PythonProcess("abrp_ble", "system.abrp_ble.abrp_ble", always_run),
 
   # debug procs
   NativeProcess("bridge", "cereal/messaging", ["./bridge"], notcar),
