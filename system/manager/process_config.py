@@ -138,8 +138,8 @@ procs = [
   PythonProcess("pandad", "selfdrive.pandad.pandad", always_run),
   PythonProcess("paramsd", "selfdrive.locationd.paramsd", only_onroad),
   PythonProcess("lagd", "selfdrive.locationd.lagd", only_onroad),
-  PythonProcess("ubloxd", "system.ubloxd.ubloxd", ublox, enabled=TICI),
-  PythonProcess("pigeond", "system.ubloxd.pigeond", ublox, enabled=TICI),
+  PythonProcess("ubloxd", "system.ubloxd.ubloxd", ublox, enabled=False),  # disabled: ttyHS0 used by abrp_ble
+  PythonProcess("pigeond", "system.ubloxd.pigeond", ublox, enabled=False),  # disabled: ttyHS0 used by abrp_ble
   PythonProcess("plannerd", "selfdrive.controls.plannerd", not_long_maneuver),
   PythonProcess("maneuversd", "tools.longitudinal_maneuvers.maneuversd", long_maneuver),
   PythonProcess("radard", "selfdrive.controls.radard", only_onroad),
@@ -154,8 +154,8 @@ procs = [
   PythonProcess("mqttd", "system.mqttd.mqttd", only_offroad),
   PythonProcess("mqttd_status", "system.mqttd.status", only_offroad),
 
-  # abrp ble (disabled - causes issues)
-  # PythonProcess("abrp_ble", "system.abrp_ble.abrp_ble", always_run),
+  # abrp ble
+  PythonProcess("abrp_ble", "system.abrp_ble.abrp_ble", always_run),
 
   # debug procs
   NativeProcess("bridge", "cereal/messaging", ["./bridge"], notcar),
