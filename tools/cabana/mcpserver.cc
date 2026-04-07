@@ -357,7 +357,7 @@ QJsonObject McpServer::handleResourcesList() {
   if (dbc_manager) {
     for (const auto &dbc_file : dbc_manager->allDBCFiles()) {
       if (dbc_file) {
-        QString name = dbc_file->name();
+        QString name = QString::fromStdString(dbc_file->name());
         QJsonObject resourceObj;
         resourceObj["uri"] = QString("dbc://%1").arg(name);
         resourceObj["name"] = QString("DBC: %1").arg(name);
@@ -387,7 +387,7 @@ QJsonObject McpServer::handleResourcesRead(const QJsonObject &params) {
     QString dbcName = uri.mid(6); // Remove "dbc://"
     if (dbc_manager) {
       for (const auto &dbc_file : dbc_manager->allDBCFiles()) {
-        if (dbc_file && dbc_file->name() == dbcName) {
+        if (dbc_file && QString::fromStdString(dbc_file->name()) == dbcName) {
           // Return DBC content as JSON
           QJsonObject dbcJson;
           dbcJson["name"] = dbcName;
@@ -437,7 +437,7 @@ QJsonObject McpServer::executeAnalyzeCanMessages(const QJsonObject &args) {
   QJsonObject result;
   result["time_range_requested"] = timeRange;
   result["total_events"] = static_cast<int>(stream->allEvents().size());
-  result["route_name"] = stream->routeName();
+  result["route_name"] = QString::fromStdString(stream->routeName());
 
   // Analyze message frequency and activity
   const auto &lastMessages = stream->lastMessages();
@@ -617,8 +617,8 @@ QJsonObject McpServer::executeGetRouteInfo(const QJsonObject &args) {
   QJsonObject result;
 
   if (stream) {
-    result["route_name"] = stream->routeName();
-    result["car_fingerprint"] = stream->carFingerprint();
+    result["route_name"] = QString::fromStdString(stream->routeName());
+    result["car_fingerprint"] = QString::fromStdString(stream->carFingerprint());
     result["is_live_stream"] = stream->liveStreaming();
     result["is_paused"] = stream->isPaused();
     result["current_time"] = stream->currentSec();
