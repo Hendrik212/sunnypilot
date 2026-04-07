@@ -16,6 +16,8 @@
 #include "tools/cabana/videowidget.h"
 #include "tools/cabana/tools/findsimilarbits.h"
 
+class McpServer;  // Forward declaration
+
 class MainWindow : public QMainWindow {
   Q_OBJECT
 
@@ -24,9 +26,11 @@ public:
   void toggleChartsDocking();
   void showStatusMessage(const QString &msg, int timeout = 0) { statusBar()->showMessage(msg, timeout); }
   void loadFile(const QString &fn, SourceSet s = SOURCE_ALL);
+  void setMcpServer(McpServer *server) { mcp_server = server; }
   ChartsWidget *charts_widget = nullptr;
 
 public slots:
+  void selectMessage(const MessageId &message_id);
   void selectAndOpenStream();
   void openStream(AbstractStream *stream, const QString &dbc_file = {});
   void closeStream();
@@ -98,6 +102,7 @@ protected:
   QAction *copy_dbc_to_clipboard = nullptr;
   QString car_fingerprint;
   QByteArray default_state;
+  McpServer *mcp_server = nullptr;
 };
 
 class HelpOverlay : public QWidget {

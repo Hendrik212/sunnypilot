@@ -1,4 +1,5 @@
 #include "tools/cabana/mainwin.h"
+#include "tools/cabana/mcpserver.h"
 
 #include <algorithm>
 #include <iostream>
@@ -299,6 +300,12 @@ void MainWindow::loadDBCFromOpendbc(const QString &name) {
   loadFile(QString("%1/%2").arg(OPENDBC_FILE_PATH, name));
 }
 
+void MainWindow::selectMessage(const MessageId &message_id) {
+  if (messages_widget) {
+    messages_widget->selectMessage(message_id);
+  }
+}
+
 void MainWindow::loadFromClipboard(SourceSet s, bool close_all) {
   closeFile(s);
 
@@ -331,6 +338,10 @@ void MainWindow::startStream(AbstractStream *stream, QString dbc_file) {
   can = stream;
   can->setParent(this);  // take ownership
   can->start();
+
+  if (mcp_server) {
+    mcp_server->setStream(can);
+  }
 
   loadFile(dbc_file);
   statusBar()->showMessage(tr("Stream [%1] started").arg(QString::fromStdString(can->routeName())), 2000);

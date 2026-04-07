@@ -2,6 +2,7 @@
 #include <QCommandLineParser>
 
 #include "tools/cabana/mainwin.h"
+#include "tools/cabana/mcpserver.h"
 #include "tools/cabana/streams/devicestream.h"
 #include "tools/cabana/streams/pandastream.h"
 #include "tools/cabana/streams/replaystream.h"
@@ -40,6 +41,8 @@ int main(int argc, char *argv[]) {
   cmd_parser.addOption({"data_dir", "local directory with routes", "data_dir"});
   cmd_parser.addOption({"no-vipc", "do not output video"});
   cmd_parser.addOption({"dbc", "dbc file to open", "dbc"});
+  cmd_parser.addOption({"mcp-server", "start MCP server on default port (3001)"});
+  cmd_parser.addOption({"mcp-port", "specify MCP server port", "port", "3001"});
   cmd_parser.process(app);
 
   AbstractStream *stream = nullptr;
@@ -84,5 +87,30 @@ int main(int argc, char *argv[]) {
   }
 
   MainWindow w(stream, cmd_parser.value("dbc"));
+
+  if (cmd_parser.isSet("mcp-server")) {
+    quint16 mcpPort = 3001;
+    if (cmd_parser.isSet("mcp-port")) {
+      QString portValue = cmd_parser.value("mcp-port");
+      bool ok;
+      mcpPort = portValue.toUShort(&ok);
+      if (!ok) {
+        qWarning() << "Invalid MCP server port" << portValue << ", using default 3001";
+        mcpPort = 3001;
+      }
+    }
+    McpServer *mcpServer = new McpServer(&w);
+    if (mcpServer->startServer(mcpPort)) {
+      if (stream) mcpServer->setStream(stream);
+      mcpServer->setDbcManager(dbc());
+      mcpServer->setMainWindow(&w);
+      w.setMcpServer(mcpServer);
+      qInfo() << "MCP server started on port" << mcpPort;
+    } else {
+      qWarning() << "Failed to start MCP server on port" << mcpPort;
+      delete mcpServer;
+    }
+  }
+
   return app.exec();
 }
