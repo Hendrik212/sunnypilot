@@ -510,7 +510,7 @@ QJsonObject McpServer::executeDecodeMessage(const QJsonObject &args) {
 
   if (msg) {
     result["message_name"] = QString::fromStdString(msg->name);
-    QJsonArray signals;
+    QJsonArray sigArray;
     for (const auto *sig : msg->getSignals()) {
       double val = 0;
       bool ok = sig->getValue(data.data(), data.size(), &val);
@@ -523,9 +523,9 @@ QJsonObject McpServer::executeDecodeMessage(const QJsonObject &args) {
       sigObj["size"] = sig->size;
       sigObj["factor"] = sig->factor;
       sigObj["offset"] = sig->offset;
-      signals.append(sigObj);
+      sigArray.append(sigObj);
     }
-    result["signals"] = signals;
+    result["signals"] = sigArray;
   } else {
     result["message_name"] = "unknown";
     result["signals"] = QJsonArray();
