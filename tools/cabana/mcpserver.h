@@ -59,12 +59,30 @@ private:
   QJsonObject executeGetRouteInfo(const QJsonObject &args);
   QJsonObject executeSelectMessage(const QJsonObject &args);
   QJsonObject executeCreateSignal(const QJsonObject &args);
+  QJsonObject executeAnalyzeSignalPatterns(const QJsonObject &args);
+
+  // Signal resolution: find a signal by name across all DBC files.
+  // Returns the Signal pointer and populates msg_id with the parent message.
+  struct ResolvedSignal {
+    const cabana::Signal *sig = nullptr;
+    MessageId msg_id = {};
+  };
+  ResolvedSignal resolveSignal(const QString &name) const;
+
+  // Parse hex message ID string → uint32_t. Throws on failure.
+  uint32_t parseHexId(const QString &str) const;
+
+  // Parse time_range string → (start, end) seconds. Supports "all", "120.5-135.2".
+  std::pair<double, double> parseTimeRange(const QString &str) const;
 
   // Utility functions
   QJsonArray getAvailableMessages();
   QJsonArray getSignalsForMessage(const QString &message_name);
   QString formatCanMessage(const CanEvent &event);
   QJsonObject createError(const QString &code, const QString &message);
+
+  // Wrap result in MCP content response
+  QJsonObject makeTextResponse(const QJsonValue &result);
 
   QTcpServer *server;
   QList<QTcpSocket*> clients;
