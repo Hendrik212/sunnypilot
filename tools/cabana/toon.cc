@@ -74,14 +74,19 @@ QString formatNumber(double v) {
   if (std::isnan(v) || std::isinf(v)) return "null";
   if (v == 0.0) return "0";  // handles -0
 
-  // Use enough precision to round-trip
-  QString s = QString::number(v, 'f', 17);
-  // Strip trailing zeros after decimal point
-  if (s.contains('.')) {
-    int i = s.size() - 1;
-    while (i > 0 && s[i] == '0') i--;
-    if (s[i] == '.') i--;  // remove the dot too if all fractional zeros
-    s.truncate(i + 1);
+  // Use 'g' format which picks the shorter of fixed/scientific,
+  // with enough precision to round-trip doubles. Then strip exponent if present.
+  QString s = QString::number(v, 'g', 15);
+  // If 'g' chose scientific notation, convert to fixed (TOON spec: no exponent)
+  if (s.contains('e') || s.contains('E')) {
+    s = QString::number(v, 'f', 10);
+    // Strip trailing zeros
+    if (s.contains('.')) {
+      int i = s.size() - 1;
+      while (i > 0 && s[i] == '0') i--;
+      if (s[i] == '.') i--;
+      s.truncate(i + 1);
+    }
   }
   return s;
 }

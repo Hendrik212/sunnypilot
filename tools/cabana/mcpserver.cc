@@ -610,7 +610,7 @@ QJsonObject McpServer::executeGetSignalValues(const QJsonObject &args) {
   for (int i = 0; i < numSamples; ++i) {
     double t = timeGrid[i];
     QJsonObject row;
-    row["ts"] = QString::number(t, 'f', 3).toDouble();  // round to ms
+    row["ts"] = std::round(t * 1000.0) / 1000.0;
 
     for (size_t s = 0; s < infos.size(); ++s) {
       auto &series = allSeries[s];
@@ -630,7 +630,7 @@ QJsonObject McpServer::executeGetSignalValues(const QJsonObject &args) {
         }
       }
       // Use signal name as column key
-      row[infos[s].name] = QString::number(val, 'f', 4).toDouble();
+      row[infos[s].name] = std::round(val * 10000.0) / 10000.0;
     }
     rows.append(row);
   }
