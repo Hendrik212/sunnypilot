@@ -48,7 +48,7 @@ pkgs = [importlib.import_module(name) for name in pkg_names]
 # vendored in commaai/dependencies.
 allowed_system_libs = {
   "EGL", "GLESv2", "GL",
-  "Qt5Charts", "Qt5Core", "Qt5Gui", "Qt5Widgets",
+  "Qt5Charts", "Qt5Core", "Qt5Gui", "Qt5Network", "Qt5Widgets",
   "dl", "drm", "gbm", "m", "pthread",
 }
 
