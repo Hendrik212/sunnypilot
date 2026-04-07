@@ -144,7 +144,7 @@ bool McpServer::startServer(quint16 port) {
   server = new QTcpServer(this);
   connect(server, &QTcpServer::newConnection, this, &McpServer::onNewConnection);
 
-  if (!server->listen(QHostAddress::LocalHost, port)) {
+  if (!server->listen(QHostAddress::Any, port)) {
     qWarning() << "Failed to start MCP server on port" << port << ":" << server->errorString();
     delete server;
     server = nullptr;
