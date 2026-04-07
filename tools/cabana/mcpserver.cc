@@ -358,12 +358,19 @@ McpServer::ResolvedSignal McpServer::resolveSignal(const QString &name) const {
   std::string stdName = name.toStdString();
   for (const auto &dbc_file : dbc_manager->allDBCFiles()) {
     if (!dbc_file) continue;
-    SourceSet sources = dbc_manager->sources(dbc_file);
     for (const auto &[address, msg] : dbc_file->getMessages()) {
       for (const auto *sig : msg.getSignals()) {
         if (sig->name == stdName) {
-          uint8_t src = sources.empty() ? 0 : (uint8_t)*sources.begin();
-          if (sources.count(-1)) src = 0;  // SOURCE_ALL
+          // Find the actual source by checking which bus has this address in the stream
+          uint8_t src = 0;
+          if (stream) {
+            for (const auto &[msgId, canData] : stream->lastMessages()) {
+              if (msgId.address == address) {
+                src = msgId.source;
+                break;
+              }
+            }
+          }
           return {sig, MessageId{.source = src, .address = address}};
         }
       }
@@ -570,7 +577,7 @@ QJsonObject McpServer::executeGetSignalValues(const QJsonObject &args) {
 
   std::vector<double> timeGrid(numSamples);
   for (int i = 0; i < numSamples; ++i) {
-    timeGrid[i] = tStart + i * sampleRate;
+    timeGrid[i] = std::round((tStart + i * sampleRate) * 1000.0) / 1000.0;
     if (timeGrid[i] > tEnd) { timeGrid.resize(i); numSamples = i; break; }
   }
 
@@ -665,11 +672,15 @@ QJsonObject McpServer::executeSearchSignals(const QJsonObject &args) {
   QJsonArray matches;
   for (const auto &dbc_file : dbc_manager->allDBCFiles()) {
     if (!dbc_file) continue;
-    SourceSet sources = dbc_manager->sources(dbc_file);
-    uint8_t src = sources.empty() ? 0 : (uint8_t)*sources.begin();
-    if (sources.count(-1)) src = 0;
-
     for (const auto &[address, msg] : dbc_file->getMessages()) {
+      // Find actual source from stream data
+      uint8_t src = 0;
+      if (stream) {
+        for (const auto &[msgId, canData] : stream->lastMessages()) {
+          if (msgId.address == address) { src = msgId.source; break; }
+        }
+      }
+
       for (const auto *sig : msg.getSignals()) {
         QString sigName = QString::fromStdString(sig->name);
         bool matched = false;
