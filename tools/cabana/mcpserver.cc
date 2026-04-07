@@ -500,14 +500,14 @@ QJsonObject McpServer::executeGetDbcInfo(const QJsonObject &args) {
     for (const auto &dbc_file : dbc_manager->allDBCFiles()) {
       if (dbc_file) {
         QJsonObject dbcInfo;
-        dbcInfo["name"] = dbc_file->name();
+        dbcInfo["name"] = QString::fromStdString(dbc_file->name());
         dbcInfo["messages"] = getAvailableMessages();
         dbcs.append(dbcInfo);
       }
     }
   } else {
     for (const auto &dbc_file : dbc_manager->allDBCFiles()) {
-      if (dbc_file && dbc_file->name() == source) {
+      if (dbc_file && QString::fromStdString(dbc_file->name()) == source) {
         QJsonObject dbcInfo;
         dbcInfo["name"] = source;
         dbcInfo["messages"] = getAvailableMessages();
@@ -932,7 +932,7 @@ QJsonArray McpServer::getAvailableMessages() {
   if (dbc_manager) {
     for (const auto &dbc_file : dbc_manager->allDBCFiles()) {
       if (dbc_file) {
-        QString dbcName = dbc_file->name();
+        QString dbcName = QString::fromStdString(dbc_file->name());
         // Get messages from all sources - this is a simplified approach
         // In practice, you might want to iterate through specific sources
         for (int source = 0; source < 256; ++source) {
