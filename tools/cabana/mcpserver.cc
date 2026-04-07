@@ -858,7 +858,7 @@ QJsonObject McpServer::executeCreateSignal(const QJsonObject &args) {
   cabana::Msg *msg = dbc_manager->msg(msgId);
   if (!msg) {
     // Create a new message if it doesn't exist
-    QString msgName = dbc_manager->newMsgName(msgId);
+    std::string msgName = dbc_manager->newMsgName(msgId);
     dbc_manager->updateMsg(msgId, msgName, 8, DEFAULT_NODE_NAME, "");
     msg = dbc_manager->msg(msgId);
     if (!msg) {
@@ -868,15 +868,15 @@ QJsonObject McpServer::executeCreateSignal(const QJsonObject &args) {
 
   // Create the signal
   cabana::Signal newSignal;
-  newSignal.name = signalName;
+  newSignal.name = signalName.toStdString();
   newSignal.start_bit = startBit;
   newSignal.size = size;
   newSignal.is_signed = isSigned;
   newSignal.is_little_endian = isLittleEndian;
   newSignal.factor = factor;
   newSignal.offset = offset;
-  newSignal.unit = unit;
-  newSignal.comment = comment;
+  newSignal.unit = unit.toStdString();
+  newSignal.comment = comment.toStdString();
   newSignal.receiver_name = DEFAULT_NODE_NAME;
   newSignal.type = cabana::Signal::Type::Normal;
 
@@ -940,7 +940,7 @@ QJsonArray McpServer::getAvailableMessages() {
             const auto &source_messages = dbc_manager->getMessages(source);
             for (const auto &[address, msg] : source_messages) {
               QJsonObject msgInfo;
-              msgInfo["name"] = msg.name;
+              msgInfo["name"] = QString::fromStdString(msg.name);
               msgInfo["id"] = static_cast<int>(address);
               msgInfo["source"] = source;
               msgInfo["dbc"] = dbcName;
@@ -965,12 +965,12 @@ QJsonArray McpServer::getSignalsForMessage(const QString &message_name) {
     // Search through all sources for a message with the given name
     for (int source = 0; source < 256; ++source) {
       try {
-        auto msg = dbc_manager->msg(source, message_name);
+        auto msg = dbc_manager->msg(source, message_name.toStdString());
         if (msg) {
           for (const auto &sig : msg->getSignals()) {
             QJsonObject sigInfo;
-            sigInfo["name"] = sig->name;
-            sigInfo["unit"] = sig->unit;
+            sigInfo["name"] = QString::fromStdString(sig->name);
+            sigInfo["unit"] = QString::fromStdString(sig->unit);
             signal_array.append(sigInfo);
           }
           break; // Found the message, no need to continue searching
