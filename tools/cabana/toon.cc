@@ -260,18 +260,6 @@ void encodeArray(const QJsonArray &arr, int depth, int spaces, QStringList &line
   }
 }
 
-// --- Object encoding ---
-
-void encodeObject(const QJsonObject &obj, int depth, int spaces, QStringList &lines,
-                  const QString &keyPrefix) {
-  QStringList keys = obj.keys();
-  for (const QString &key : keys) {
-    QJsonValue val = obj[key];
-    QString fullKey = keyPrefix.isEmpty() ? encodeKey(key) : keyPrefix + "." + encodeKey(key);
-    encodeValue(val, depth, spaces, lines, encodeKey(key));
-  }
-}
-
 // --- Main encoder ---
 
 void encodeValue(const QJsonValue &value, int depth, int spaces, QStringList &lines,
