@@ -156,13 +156,18 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 
 | File | Change |
 |------|--------|
-| `opendbc/car/hyundai/values.py` | Ioniq 6: removed `CANFD_NO_RADAR_DISABLE`, steer limits 350/3/4 |
+| `opendbc/car/hyundai/values.py` | Ioniq 6: removed `CANFD_NO_RADAR_DISABLE`; CANFD steer limits raised from upstream stock (270/2/3) to (350/4/4) |
+| `opendbc/safety/modes/hyundai_canfd.h` | CANFD steering limits raised to match values.py: `max_torque=350`, `max_rate_up=4`, `max_rate_down=4` |
 | `opendbc/car/hyundai/carcontroller.py` | Cancel timeout (4s), standstill resume fix |
 | `opendbc/car/hyundai/carstate.py` | BSM disabled during long, conditional CAN parser |
 | `opendbc/car/hyundai/hyundaicanfd.py` | ACCMode 0 in create_acc_cancel |
 | `opendbc/car/hyundai/interface.py` | BSM address 0x1ba, ECU silence verification |
 | `opendbc/car/hyundai/mqtt.py` | Ioniq 6 CAN data parser (entirely custom) |
 | `opendbc/car/disable_ecu.py` | verify_silence_addrs, _verify_ecu_silence |
+
+> **Important:** `values.py` and `hyundai_canfd.h` must always be kept in sync for steer limits. The panda safety layer (`hyundai_canfd.h`) enforces hard limits in firmware — if `values.py` requests more torque or a higher rate than the safety code allows, commands will be silently clipped or trigger a safety fault. Whenever you change `STEER_MAX`, `STEER_DELTA_UP`, or `STEER_DELTA_DOWN` in `values.py`, update `max_torque`, `max_rate_up`, and `max_rate_down` in the `HYUNDAI_CANFD_STEERING_LIMITS` struct accordingly.
+>
+> Upstream sunnypilot stock CANFD values for reference: `STEER_MAX=270`, `STEER_DELTA_UP=2`, `STEER_DELTA_DOWN=3`.
 
 ## Git LFS Handling
 
