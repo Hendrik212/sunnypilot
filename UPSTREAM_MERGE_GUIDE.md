@@ -156,8 +156,8 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 
 | File | Change |
 |------|--------|
-| `opendbc/car/hyundai/values.py` | Ioniq 6: removed `CANFD_NO_RADAR_DISABLE`; CANFD steer limits raised from upstream stock (270/2/3) to (350/4/4) |
-| `opendbc/safety/modes/hyundai_canfd.h` | CANFD steering limits raised to match values.py: `max_torque=350`, `max_rate_up=4`, `max_rate_down=4` |
+| `opendbc/car/hyundai/values.py` | Ioniq 6: removed `CANFD_NO_RADAR_DISABLE`; CANFD steer limits raised from upstream stock (270/2/3) to (384/5/5) |
+| `opendbc/safety/modes/hyundai_canfd.h` | CANFD steering limits raised to match values.py: `max_torque=384`, `max_rate_up=5`, `max_rate_down=5`, `max_rt_delta=140` |
 | `opendbc/car/hyundai/carcontroller.py` | Cancel timeout (4s), standstill resume fix |
 | `opendbc/car/hyundai/carstate.py` | BSM disabled during long, conditional CAN parser |
 | `opendbc/car/hyundai/hyundaicanfd.py` | ACCMode 0 in create_acc_cancel |
@@ -167,7 +167,23 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 
 > **Important:** `values.py` and `hyundai_canfd.h` must always be kept in sync for steer limits. The panda safety layer (`hyundai_canfd.h`) enforces hard limits in firmware — if `values.py` requests more torque or a higher rate than the safety code allows, commands will be silently clipped or trigger a safety fault. Whenever you change `STEER_MAX`, `STEER_DELTA_UP`, or `STEER_DELTA_DOWN` in `values.py`, update `max_torque`, `max_rate_up`, and `max_rate_down` in the `HYUNDAI_CANFD_STEERING_LIMITS` struct accordingly.
 >
-> Upstream sunnypilot stock CANFD values for reference: `STEER_MAX=270`, `STEER_DELTA_UP=2`, `STEER_DELTA_DOWN=3`.
+> **You must also recalculate `max_rt_delta`** when changing `max_rate_up`. This is the maximum total torque change allowed within a 250ms real-time window (defined by `MAX_RT_INTERVAL` in `declarations.h`). The formula is:
+>
+> ```
+> max_rt_delta = max_rate_up * (250ms / STEER_STEP_period) * margin
+>             = max_rate_up * 25 * 1.12
+> ```
+>
+> At 100Hz (STEER_STEP=1, 10ms per frame), there are 25 frames per 250ms window. The 12% margin prevents false RT violations. If `max_rt_delta` is too low for the configured `max_rate_up`, the safety layer will reject valid torque ramps and cause EPS faults.
+>
+> | max_rate_up | max_rt_delta |
+> |-------------|--------------|
+> | 2           | 56           |
+> | 3           | 84           |
+> | 4           | 112          |
+> | 5           | 140          |
+>
+> Upstream sunnypilot stock CANFD values for reference: `STEER_MAX=270`, `STEER_DELTA_UP=2`, `STEER_DELTA_DOWN=3`, `max_rt_delta=112`.
 
 ## Git LFS Handling
 
