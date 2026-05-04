@@ -177,10 +177,7 @@ class UIStateSP:
       if not CP.enableBsm:
         self.params.remove("AutoLaneChangeBsmDelay")
     else:
-      # No CarParams: clear all car-dependent params as safety default
-      self.params.remove("EnforceTorqueControl")
-      self.params.remove("NeuralNetworkLateralControl")
-      self.params.remove("AlphaLongitudinalEnabled")
+      return
 
     # No longitudinal control: no experimental mode
     if not has_long:
