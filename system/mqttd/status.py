@@ -102,6 +102,19 @@ def publish_sensor_discovery(pm, sensor_name, device_info, config_prefix):
       "unit_of_measurement": "%",
       "icon": "mdi:battery-charging-high",
     },
+    "ac_power_limit_pct": {
+      "name": "AC Power Limit",
+      "state_topic": "openpilot/car_status",
+      "value_template": "{{ value_json.ac_power_limit_pct }}",
+      "unit_of_measurement": "%",
+      "icon": "mdi:flash",
+    },
+    "ac_current_limit": {
+      "name": "AC Current Limit",
+      "state_topic": "openpilot/car_status",
+      "value_template": "{{ value_json.ac_current_limit }}",
+      "icon": "mdi:current-ac",
+    },
   }
 
   if sensor_name not in sensors:
@@ -187,6 +200,8 @@ def publish_ha_discovery(pm, count, config_prefix):
     "charging_status",
     "charge_limit_ac",
     "charge_limit_dc",
+    "ac_power_limit_pct",
+    "ac_current_limit",
   ]
 
   binary_sensors = [
@@ -312,6 +327,8 @@ def status_thread():
                  "connector_connected": mqtt.connector_connected_out,
                  "charge_limit_ac": mqtt.charge_limit_ac_out,
                  "charge_limit_dc": mqtt.charge_limit_dc_out,
+                 "ac_power_limit_pct": mqtt.ac_power_limit_pct_out,
+                 "ac_current_limit": mqtt.ac_current_limit_out,
                 }
       mqttd.publish(pm, topic, content)
 
