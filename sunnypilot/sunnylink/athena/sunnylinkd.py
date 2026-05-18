@@ -28,13 +28,14 @@ from websocket import (ABNF, WebSocket, WebSocketException, WebSocketTimeoutExce
                        create_connection, WebSocketConnectionClosedException)
 
 import cereal.messaging as messaging
-from openpilot.sunnypilot.selfdrive.car.sync_car_list_param import update_car_list_param
+from openpilot.sunnypilot.models.default_model import DEFAULT_MODEL
+from openpilot.sunnypilot.selfdrive.car.sync_sunnylink_params import update_car_list_param
 from openpilot.sunnypilot.sunnylink.api import SunnylinkApi
 from openpilot.sunnypilot.sunnylink.utils import sunnylink_need_register, sunnylink_ready, get_param_as_byte, save_param_from_base64_encoded_string
 from openpilot.sunnypilot.sunnylink.capabilities import generate_capabilities, CAPABILITY_LABELS
 from openpilot.sunnypilot.sunnylink.tools.generate_settings_schema import generate_schema
 
-SUNNYLINK_ATHENA_HOST = os.getenv('SUNNYLINK_ATHENA_HOST', 'wss://ws.stg.api.sunnypilot.ai')
+SUNNYLINK_ATHENA_HOST = os.getenv('SUNNYLINK_ATHENA_HOST', 'wss://athena.sunnylink.ai')
 HANDLER_THREADS = int(os.getenv('HANDLER_THREADS', "4"))
 LOCAL_PORT_WHITELIST = {8022}
 SUNNYLINK_LOG_ATTR_NAME = "user.sunny.upload"
@@ -214,6 +215,7 @@ def getParamsMetadata() -> str:
     schema = generate_schema()
     schema["capabilities"] = generate_capabilities()
     schema["capability_labels"] = CAPABILITY_LABELS
+    schema["default_model"] = DEFAULT_MODEL
     raw = json.dumps(schema, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(gzip.compress(raw)).decode("utf-8")
   except Exception:
