@@ -156,8 +156,8 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 
 | File | Change |
 |------|--------|
-| `opendbc/car/hyundai/values.py` | Ioniq 6: removed `CANFD_NO_RADAR_DISABLE`; CANFD steer limits raised from upstream stock (270/2/3) to (384/5/5) |
-| `opendbc/safety/modes/hyundai_canfd.h` | CANFD steering limits raised to match values.py: `max_torque=384`, `max_rate_up=5`, `max_rate_down=5`, `max_rt_delta=140` |
+| `opendbc/car/hyundai/values.py` | Ioniq 6: removed `CANFD_NO_RADAR_DISABLE`; CANFD steer limits raised from upstream stock (270/2/3) to (384/4/4) |
+| `opendbc/safety/modes/hyundai_canfd.h` | CANFD steering limits raised to match values.py: `max_torque=384`, `max_rate_up=4`, `max_rate_down=4`, `max_rt_delta=112` |
 | `opendbc/car/hyundai/carcontroller.py` | Cancel timeout (4s), standstill resume fix |
 | `opendbc/car/hyundai/carstate.py` | BSM disabled during long, conditional CAN parser |
 | `opendbc/car/hyundai/hyundaicanfd.py` | ACCMode 0 in create_acc_cancel |
