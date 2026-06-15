@@ -73,7 +73,7 @@ Files most likely to conflict with our custom changes:
 - `system/manager/process_config.py` — our MQTT, BLE process entries
 - `system/hardware/power_monitoring.py` — our shutdown logic
 - `selfdrive/selfdrived/events.py` — our steerSaturated silencing
-- `cereal/log.capnp` — our MQTT message types (@150, @151)
+- `cereal/log.capnp` — our MQTT message types (`mqttPubQueue`, `mqttRecvQueue`)
 - `cereal/services.py` — our MQTT service entries
 
 ```bash
@@ -81,6 +81,16 @@ Files most likely to conflict with our custom changes:
 # Keep our custom additions, accept upstream changes elsewhere
 git add <resolved-files>
 ```
+
+> **⚠️ capnp ordinal gotcha (`cereal/log.capnp`):** capnp requires the `Event` struct's
+> ordinals to be **sequential with no holes**, and our `mqttPubQueue`/`mqttRecvQueue` must
+> occupy the **highest** ordinals. A text merge will NOT flag a conflict, but if upstream
+> added a new `Event` field it will reuse the ordinal our mqtt fields had, producing a
+> *duplicate ordinal* error at runtime (capnp import crash — surfaces when anything imports
+> `cereal`, e.g. clearing params). After every merge, bump our two mqtt fields to the next
+> sequential ordinals above upstream's new max. Do **not** jump to a high "reserved" number —
+> that creates a hole and capnp rejects it ("Skipped ordinal @N"). Verify with a `cereal`
+> import on-device before rebooting.
 
 ### 5. Handle Submodule Updates
 
