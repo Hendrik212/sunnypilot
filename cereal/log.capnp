@@ -2572,8 +2572,9 @@ struct Event {
     carStateSP @114 :Custom.CarStateSP;
     liveMapDataSP @115 :Custom.LiveMapDataSP;
     modelDataV2SP @116 :Custom.ModelDataV2SP;
-    mqttPubQueue @151 :MqttPubQueue;
-    mqttRecvQueue @152 :MqttRecvQueue;
+    # isla fork custom messages — high ordinals to avoid colliding with upstream's sequential growth
+    mqttPubQueue @200 :MqttPubQueue;
+    mqttRecvQueue @201 :MqttRecvQueue;
     customReserved10 @136 :Custom.CustomReserved10;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
