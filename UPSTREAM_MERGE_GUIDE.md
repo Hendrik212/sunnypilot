@@ -166,8 +166,7 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 
 | File | Change |
 |------|--------|
-| `opendbc/car/hyundai/values.py` | Ioniq 6: removed `CANFD_NO_RADAR_DISABLE`; CANFD steer limits raised from upstream stock (270/2/3) to (384/4/4) |
-| `opendbc/safety/modes/hyundai_canfd.h` | CANFD steering limits raised to match values.py: `max_torque=384`, `max_rate_up=4`, `max_rate_down=4`, `max_rt_delta=112` |
+| `opendbc/car/hyundai/values.py` | Ioniq 6: removed `CANFD_NO_RADAR_DISABLE`. (CANFD steer limits are currently **stock** — 270/2/3 — see note below if re-tuning) |
 | `opendbc/car/hyundai/carcontroller.py` | Cancel timeout (4s), standstill resume fix |
 | `opendbc/car/hyundai/carstate.py` | BSM disabled during long, conditional CAN parser |
 | `opendbc/car/hyundai/hyundaicanfd.py` | ACCMode 0 in create_acc_cancel |
@@ -175,7 +174,7 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 | `opendbc/car/hyundai/mqtt.py` | Ioniq 6 CAN data parser (entirely custom) |
 | `opendbc/car/disable_ecu.py` | verify_silence_addrs, _verify_ecu_silence |
 
-> **Important:** `values.py` and `hyundai_canfd.h` must always be kept in sync for steer limits. The panda safety layer (`hyundai_canfd.h`) enforces hard limits in firmware — if `values.py` requests more torque or a higher rate than the safety code allows, commands will be silently clipped or trigger a safety fault. Whenever you change `STEER_MAX`, `STEER_DELTA_UP`, or `STEER_DELTA_DOWN` in `values.py`, update `max_torque`, `max_rate_up`, and `max_rate_down` in the `HYUNDAI_CANFD_STEERING_LIMITS` struct accordingly.
+> **Steer-limit tuning (currently at stock).** The CAN-FD steer limits are presently unmodified from upstream, so `hyundai_canfd.h` is not in the table above. **If you re-tune them**, `values.py` and `hyundai_canfd.h` must always be kept in sync. The panda safety layer (`hyundai_canfd.h`) enforces hard limits in firmware — if `values.py` requests more torque or a higher rate than the safety code allows, commands will be silently clipped or trigger a safety fault. Whenever you change `STEER_MAX`, `STEER_DELTA_UP`, or `STEER_DELTA_DOWN` in `values.py`, update `max_torque`, `max_rate_up`, and `max_rate_down` in the `HYUNDAI_CANFD_STEERING_LIMITS` struct accordingly.
 >
 > **You must also recalculate `max_rt_delta`** when changing `max_rate_up`. This is the maximum total torque change allowed within a 250ms real-time window (defined by `MAX_RT_INTERVAL` in `declarations.h`). The formula is:
 >
