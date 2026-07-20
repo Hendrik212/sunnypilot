@@ -9,7 +9,7 @@ from collections import defaultdict
 
 from openpilot.system.mqttd import mqttd
 from opendbc.car.hyundai import mqtt
-from openpilot.system.hardware import HARDWARE
+from openpilot.common.hardware import HARDWARE
 
 
 #f = open("mqtt_status_log.txt", "w")
