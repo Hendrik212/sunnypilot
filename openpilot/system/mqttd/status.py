@@ -2,7 +2,7 @@
 import time
 import datetime
 
-import cereal.messaging as messaging
+import openpilot.cereal.messaging as messaging
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.utils import strip_deprecated_keys
 from collections import defaultdict
