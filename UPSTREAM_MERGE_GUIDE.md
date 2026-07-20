@@ -2,6 +2,13 @@
 
 This guide documents the process for merging upstream changes from the main sunnypilot repository and submodules into the ISLA fork while preserving custom modifications.
 
+> **Directory layout note:** as of the 2026-07 upstream restructure, nearly the entire
+> sunnypilot tree (`common/`, `selfdrive/`, `system/`, `sunnypilot/`, `cereal/`, etc.) now
+> lives under `openpilot/`. Only submodules (`opendbc_repo`, `panda`, `msgq_repo`,
+> `rednose_repo`, `teleoprtc_repo`, `tinygrad_repo`) and a handful of meta-repo dirs
+> (`docs/`, `release/`, `scripts/`, `site_scons/`, `tools/`, plus our own `pyextra/`) stay
+> at the true top level. All paths below reflect this.
+
 ## Repository Structure
 
 | Repo | Origin (our fork) | Upstream | Our Branch |
@@ -70,11 +77,22 @@ git merge upstream/master
 
 Files most likely to conflict with our custom changes:
 
-- `system/manager/process_config.py` — our MQTT, BLE process entries
-- `system/hardware/power_monitoring.py` — our shutdown logic
-- `selfdrive/selfdrived/events.py` — our steerSaturated silencing
-- `cereal/log.capnp` — our MQTT message types (`mqttPubQueue`, `mqttRecvQueue`)
-- `cereal/services.py` — our MQTT service entries
+- `openpilot/system/manager/process_config.py` — our MQTT, BLE process entries
+- `openpilot/system/hardware/power_monitoring.py` — our shutdown logic
+- `openpilot/selfdrive/selfdrived/events.py` — our steerSaturated + speedTooHigh silencing
+- `openpilot/cereal/log.capnp` — our MQTT message types (`mqttPubQueue`, `mqttRecvQueue`)
+- `openpilot/cereal/services.py` — our MQTT service entries
+
+Custom-only directories that don't exist upstream at all — git has no upstream content to
+map them against, so on a big upstream directory rename they can get silently left behind
+at their old path instead of following the rest of the tree. After any merge that moves
+files around, verify these still live under `openpilot/system/`:
+
+- `openpilot/system/mqttd/` — MQTT daemon (entirely custom)
+- `openpilot/system/abrp_ble/` — ABRP BLE bridge (entirely custom)
+
+(`pyextra/` stays at the true top level, not under `openpilot/` — it's a Python package
+root referenced as `from pyextra.paho...`, independent of the `openpilot.` import prefix.)
 
 ```bash
 # Resolve conflicts manually in each file
@@ -82,7 +100,19 @@ Files most likely to conflict with our custom changes:
 git add <resolved-files>
 ```
 
-> **⚠️ capnp ordinal gotcha (`cereal/log.capnp`):** capnp requires the `Event` struct's
+> **⚠️ Directory-rename-divergence conflicts:** on a large upstream restructure (files
+> moved/renamed en masse), git may flag files that exist on only one side of the merge
+> with a message like *"file added in HEAD inside a directory that was renamed in
+> upstream/master, suggesting it should perhaps be moved to \<new-path\>"* (status `AU`/`D`
+> pair, not `UU`). This happens for anything that entered our history through a *previous*
+> merge but isn't in upstream's current tree — either a feature upstream later reverted, or
+> genuinely custom content. It is NOT usually a content conflict (0 conflict markers in the
+> file) — it's git asking where to place it. Check whether the file/feature still works
+> (imports resolve, no orphaned references in SConscript/other files) before accepting git's
+> suggested new path with `git add <new-path>`. Don't reflexively delete just because
+> upstream dropped it — if it's self-contained and was already working, keep it.
+
+> **⚠️ capnp ordinal gotcha (`openpilot/cereal/log.capnp`):** capnp requires the `Event` struct's
 > ordinals to be **sequential with no holes**, and our `mqttPubQueue`/`mqttRecvQueue` must
 > occupy the **highest** ordinals. A text merge will NOT flag a conflict, but if upstream
 > added a new `Event` field it will reuse the ordinal our mqtt fields had, producing a
@@ -99,8 +129,11 @@ The opendbc submodule is the most important — it has our Ioniq 6 longitudinal 
 ```bash
 cd opendbc_repo
 
-# Fetch upstream sunnypilot opendbc
+# Fetch BOTH remotes — origin can carry commits merged directly on GitHub that your
+# local clone doesn't have (this has happened — see note below). Don't assume local
+# HEAD == origin HEAD just because you haven't pushed anything yourself recently.
 git fetch upstream
+git fetch origin
 
 # Merge upstream into our branch
 git checkout sp-isla-master
@@ -114,9 +147,22 @@ git merge upstream/master
 #   opendbc/car/hyundai/values.py — Ioniq 6 flags (no CANFD_NO_RADAR_DISABLE), steer limits
 #   opendbc/car/hyundai/mqtt.py — MQTT CAN data parser (entirely custom)
 #   opendbc/car/disable_ecu.py — verify_silence_addrs support
+#   opendbc/car/hyundai/radar_interface.py — differentiated MRR30/MRR35/MRREVO14F parsing
+#   opendbc/sunnypilot/car/hyundai/radar_interface_ext.py — RADAR_LEAD_ONLY/FULL_RADAR/OFF flags
+#     ⚠️ upstream/master's radar_interface.py only implements the generic Mando radar
+#     (single AZIMUTH-based parser). Our Ioniq 6 uses MRR35_RADAR, whose DBC
+#     (hyundai_mrr35_radar_generated) has NO AZIMUTH signal — taking upstream's version
+#     verbatim will KeyError-crash radar parsing on-device. Always keep our differentiated
+#     version here unless upstream has genuinely added equivalent per-radar-type support
+#     (check by diffing merge-base→upstream/master for this file specifically, not just
+#     resolving the conflict hunk — small unrelated upstream cleanups, e.g. dropping
+#     deprecated RadarPoint fields, are fine to skip/ignore).
 
 git add <resolved-files>
 git commit -m "Merge upstream sunnypilot/opendbc into sp-isla-master"
+
+# If origin had commits you didn't have locally, merge those in too before pushing:
+git merge origin/sp-isla-master --no-edit
 
 # Push opendbc submodule
 git push origin sp-isla-master
@@ -128,8 +174,10 @@ If panda submodule was also updated by upstream:
 ```bash
 cd panda
 git fetch upstream
+git fetch origin
 git checkout sunnypilot-master
 git merge upstream/master
+git merge origin/sunnypilot-master --no-edit   # pick up any commits pushed directly to origin
 git push origin sunnypilot-master
 cd ..
 ```
@@ -153,14 +201,14 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 
 | File | Change |
 |------|--------|
-| `system/manager/process_config.py` | MQTT + BLE processes, ubloxd/pigeond disabled |
-| `system/hardware/power_monitoring.py` | Relaxed shutdown (11V floor only) |
-| `selfdrive/selfdrived/events.py` | steerSaturated silenced (both instances) |
-| `cereal/log.capnp` | MqttPubQueue (@150), MqttRecvQueue (@151) structs |
-| `cereal/services.py` | mqttPubQueue, mqttRecvQueue service entries |
-| `system/mqttd/` | Entire directory (custom) |
-| `system/abrp_ble/` | Entire directory (custom) |
-| `pyextra/paho/` | Bundled paho-mqtt library |
+| `openpilot/system/manager/process_config.py` | MQTT + BLE processes, ubloxd/pigeond disabled |
+| `openpilot/system/hardware/power_monitoring.py` | Relaxed shutdown (11V floor only) |
+| `openpilot/selfdrive/selfdrived/events.py` | steerSaturated silenced (both instances), speedTooHigh silenced |
+| `openpilot/cereal/log.capnp` | MqttPubQueue, MqttRecvQueue structs — ordinals bump every merge, see gotcha below |
+| `openpilot/cereal/services.py` | mqttPubQueue, mqttRecvQueue service entries |
+| `openpilot/system/mqttd/` | Entire directory (custom) |
+| `openpilot/system/abrp_ble/` | Entire directory (custom) |
+| `pyextra/paho/` | Bundled paho-mqtt library (stays top-level, not under `openpilot/`) |
 
 ### opendbc Submodule
 
@@ -173,6 +221,14 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 | `opendbc/car/hyundai/interface.py` | BSM address 0x1ba, ECU silence verification |
 | `opendbc/car/hyundai/mqtt.py` | Ioniq 6 CAN data parser (entirely custom) |
 | `opendbc/car/disable_ecu.py` | verify_silence_addrs, _verify_ecu_silence |
+| `opendbc/car/hyundai/radar_interface.py` | Differentiated MRR30/MRR35/MRREVO14F radar parsing (upstream only has generic Mando/AZIMUTH parser — see conflict-resolution note in Step 5) |
+| `opendbc/sunnypilot/car/hyundai/radar_interface_ext.py` | RADAR_LEAD_ONLY/RADAR_FULL_RADAR/RADAR_OFF flag scaffolding (`HyundaiFlagsSP`, defined but not yet assigned to any platform — dead code path for now, keep anyway since it ships with radar_interface.py) |
+
+### panda Submodule
+
+| File | Change |
+|------|--------|
+| `board/main_comms.h` | `heartbeat_engaged_mads` forced `true` (was `req->param2 == 1U`) — works around a startup race where `controls_allowed_lateral` drops if `selfdriveStateSP` isn't alive yet when pandad's first heartbeat lands, causing CAN errors on every steer command until reboot. TODO-SP marked in code; revert once the startup race is fixed upstream. |
 
 > **Steer-limit tuning (currently at stock).** The CAN-FD steer limits are presently unmodified from upstream, so `hyundai_canfd.h` is not in the table above. **If you re-tune them**, `values.py` and `hyundai_canfd.h` must always be kept in sync. The panda safety layer (`hyundai_canfd.h`) enforces hard limits in firmware — if `values.py` requests more torque or a higher rate than the safety code allows, commands will be silently clipped or trigger a safety fault. Whenever you change `STEER_MAX`, `STEER_DELTA_UP`, or `STEER_DELTA_DOWN` in `values.py`, update `max_torque`, `max_rate_up`, and `max_rate_down` in the `HYUNDAI_CANFD_STEERING_LIMITS` struct accordingly.
 >
@@ -214,7 +270,11 @@ ssh comma@192.168.1.197  # or ioniq_local
 # Pull and update
 cd /data/openpilot
 git pull origin isla-master
-git submodule update --init opendbc_repo
+git submodule update --init
+# ⚠️ Do NOT scope this to opendbc_repo only. A merge that bumps ANY submodule pin
+# (msgq_repo, teleoprtc_repo, tinygrad_repo, panda) needs ALL of them synced — an
+# opendbc-only update once left msgq_repo stale after upstream restructured its
+# headers, breaking the on-device build (missing msm_ion.h).
 
 # Clear stale car params if opendbc flags changed
 PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 -c "
