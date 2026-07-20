@@ -147,16 +147,8 @@ git merge upstream/master
 #   opendbc/car/hyundai/values.py — Ioniq 6 flags (no CANFD_NO_RADAR_DISABLE), steer limits
 #   opendbc/car/hyundai/mqtt.py — MQTT CAN data parser (entirely custom)
 #   opendbc/car/disable_ecu.py — verify_silence_addrs support
-#   opendbc/car/hyundai/radar_interface.py — differentiated MRR30/MRR35/MRREVO14F parsing
-#   opendbc/sunnypilot/car/hyundai/radar_interface_ext.py — RADAR_LEAD_ONLY/FULL_RADAR/OFF flags
-#     ⚠️ upstream/master's radar_interface.py only implements the generic Mando radar
-#     (single AZIMUTH-based parser). Our Ioniq 6 uses MRR35_RADAR, whose DBC
-#     (hyundai_mrr35_radar_generated) has NO AZIMUTH signal — taking upstream's version
-#     verbatim will KeyError-crash radar parsing on-device. Always keep our differentiated
-#     version here unless upstream has genuinely added equivalent per-radar-type support
-#     (check by diffing merge-base→upstream/master for this file specifically, not just
-#     resolving the conflict hunk — small unrelated upstream cleanups, e.g. dropping
-#     deprecated RadarPoint fields, are fine to skip/ignore).
+#   opendbc/car/hyundai/radar_interface.py — see radar-tracks note below
+#   opendbc/sunnypilot/car/hyundai/radar_interface_ext.py — see radar-tracks note below
 
 git add <resolved-files>
 git commit -m "Merge upstream sunnypilot/opendbc into sp-isla-master"
@@ -169,6 +161,33 @@ git push origin sp-isla-master
 
 cd ..
 ```
+
+> **Radar tracks (`opendbc/car/hyundai/radar_interface.py` + `radar_interface_ext.py`):**
+> as of 2026-07-20 these are pulled from sunnypilot's `upstream/hyundai-radar-tracks` topic
+> branch (not `upstream/master` — that branch's own history diverged from ours ~110
+> commits back and hasn't tracked master since). Merge it explicitly if you want its
+> updates:
+> ```bash
+> git fetch upstream hyundai-radar-tracks
+> git merge upstream/hyundai-radar-tracks --no-edit
+> ```
+> This branch is a full rewrite: runtime CAN-fingerprint auto-detection across 5 radar
+> specs (`RADAR_500_53F/210_21F/235_248/3A5_3C4/602_617`, our Ioniq 6 = `3A5_3C4`) replacing
+> the old static per-platform `MRR35_RADAR`-style flags entirely — those flags no longer
+> exist in `HyundaiFlags`, so don't reference them in platform configs anymore (`HYUNDAI_IONIQ_6`
+> is just `HyundaiFlags.EV` now). It also added new `car.capnp` fields (`RadarData.trackSources`,
+> `radarTracksAvailable`, `RadarPoint.motionState/sourceAddress/sourceBus/trackAge`) and
+> un-deprecated `aRel`/`yvRel`/`measured` (same ordinals). The `.dbc` files these specs need
+> are generator-produced at build time (gitignored, not checked in — verify with
+> `python -c "from opendbc.dbc.generator.generator import generate_all; ..."` if paranoid).
+>
+> ⚠️ It's still WIP (messy commit history, hasn't landed on `sunnypilot/opendbc:master`) —
+> treat every merge from it as a real review, not a rubber-stamp. And critically: radar mode
+> is gated by a user param (`"RadarTracks"`, read in `opendbc/sunnypilot/car/interfaces.py`
+> `_initialize_radar()`), defaulting to `RadarType.OFF`. Our Ioniq 6 has no `CAMERA_SCC`/`ESCC`,
+> so `RadarType.LEAD_ONLY` is a no-op for us — we need `FULL_RADAR` (2), which the existing UI
+> toggle (`radar_tracks` in `toggles.py`, a plain boolean `BigParamControl`) can't reach. Check
+> whether that's been resolved before assuming radar "just works" post-merge.
 
 If panda submodule was also updated by upstream:
 ```bash
@@ -221,8 +240,8 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 | `opendbc/car/hyundai/interface.py` | BSM address 0x1ba, ECU silence verification |
 | `opendbc/car/hyundai/mqtt.py` | Ioniq 6 CAN data parser (entirely custom) |
 | `opendbc/car/disable_ecu.py` | verify_silence_addrs, _verify_ecu_silence |
-| `opendbc/car/hyundai/radar_interface.py` | Differentiated MRR30/MRR35/MRREVO14F radar parsing (upstream only has generic Mando/AZIMUTH parser — see conflict-resolution note in Step 5) |
-| `opendbc/sunnypilot/car/hyundai/radar_interface_ext.py` | RADAR_LEAD_ONLY/RADAR_FULL_RADAR/RADAR_OFF flag scaffolding (`HyundaiFlagsSP`, defined but not yet assigned to any platform — dead code path for now, keep anyway since it ships with radar_interface.py) |
+| `opendbc/car/hyundai/radar_interface.py` | Pulled from `upstream/hyundai-radar-tracks` topic branch, not `master` — see radar-tracks note in Step 5 |
+| `opendbc/sunnypilot/car/hyundai/radar_interface_ext.py` | Same — pulled from the radar-tracks branch, kept in sync with radar_interface.py |
 
 ### panda Submodule
 
