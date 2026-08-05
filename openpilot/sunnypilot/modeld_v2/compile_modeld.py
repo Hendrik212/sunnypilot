@@ -57,7 +57,26 @@ def derive_frame_skip(vision_input_shapes: dict, policy_input_shapes: dict) -> i
   return 1 if not features_buffer or features_buffer[1] >= 99 else 4
 
 
-def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str = Device.DEFAULT) -> tuple[dict, dict]:
+def get_policy_npy_shapes(input_shapes: dict, is_supercombo: bool = False) -> tuple[dict, list[int]]:
+  desire_key = _detect_desire_key(input_shapes)
+  shapes = {}
+  if desire_key:
+    shapes['desire'] = (input_shapes[desire_key][2],)
+
+  if is_supercombo and 'features_buffer' in input_shapes:
+    fb = input_shapes['features_buffer']
+    shapes['prev_feat'] = (fb[0], fb[2])
+
+  for key, shape in input_shapes.items():
+    if key not in (desire_key, 'features_buffer') and 'img' not in key:
+      shapes[key] = tuple(shape)
+
+  sizes = [int(np.prod(size)) for size in shapes.values()]
+  return shapes, sizes
+
+
+def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str = Device.DEFAULT,
+                            is_supercombo: bool = False, use_packed: bool = True) -> tuple[dict, dict]:
   road_key, _ = _detect_vision_keys(input_shapes)
   if not road_key:
     raise ValueError("Vision road key missing from input shapes.")
@@ -73,37 +92,69 @@ def generate_queues_and_npy(input_shapes: dict, frame_skip: int, device: str = D
   desire_shape = input_shapes[desire_key]
   features_buffer = input_shapes.get('features_buffer')
 
-  npy_arrays = {
-    'desire': np.zeros(desire_shape[2], dtype=np.float32),
-    'tfm': np.zeros((3, 3), dtype=np.float32),
-    'big_tfm': np.zeros((3, 3), dtype=np.float32)
-  }
+  if use_packed:  # remove packed detection block after all models are recompiled
+    npy_arrays = {
+      'tfm': np.zeros((3, 3), dtype=np.float32),
+      'big_tfm': np.zeros((3, 3), dtype=np.float32)
+    }
 
-  for key, shape in input_shapes.items():
-    if key not in npy_arrays and 'img' not in key and key not in ('features_buffer', desire_key):
-      npy_arrays[key] = np.zeros(shape, dtype=np.float32)
+    shapes, sizes = get_policy_npy_shapes(input_shapes, is_supercombo=is_supercombo)
+    packed_npy_inputs = np.zeros(sum(sizes), dtype=np.float32)
 
-  queues = {
-    'img_q': Tensor(np.zeros(img_buf_shape, dtype=np.uint8), device=device).contiguous().realize(),
-    'big_img_q': Tensor(np.zeros(img_buf_shape, dtype=np.uint8), device=device).contiguous().realize(),
-    'desire_q': Tensor(np.zeros((frame_skip * desire_shape[1], desire_shape[0], desire_shape[2]),
-                  dtype=np.float32), device=device).contiguous().realize()
-  }
+    split_indices = np.cumsum(sizes[:-1]) if len(sizes) > 1 else []
+    split_views = np.split(packed_npy_inputs, split_indices) if len(sizes) > 0 else []
+    for (k, s), v in zip(shapes.items(), split_views, strict=True):
+      npy_arrays[k] = v.reshape(s)
 
-  if features_buffer:
-    queues['feat_q'] = Tensor(np.zeros((frame_skip * (features_buffer[1] - 1) + 1, features_buffer[0], features_buffer[2]),
-                       dtype=np.float32), device=device).contiguous().realize()
+    queues = {
+      'img_q': Tensor(np.zeros(img_buf_shape, dtype=np.uint8), device=device).contiguous().realize(),
+      'big_img_q': Tensor(np.zeros(img_buf_shape, dtype=np.uint8), device=device).contiguous().realize(),
+      'desire_q': Tensor(np.zeros((frame_skip * desire_shape[1], desire_shape[0], desire_shape[2]),
+                    dtype=np.float32), device=device).contiguous().realize(),
+      'packed_npy_inputs': Tensor(packed_npy_inputs, device='NPY').realize(),
+    }
 
-  queues.update({key: Tensor(value, device='NPY').realize() for key, value in npy_arrays.items()})
+    if features_buffer:
+      queues['feat_q'] = Tensor(np.zeros((frame_skip * (features_buffer[1] - 1) + 1, features_buffer[0], features_buffer[2]),
+                         dtype=np.float32), device=device).contiguous().realize()
+
+    queues.update({key: Tensor(value, device='NPY').realize() for key, value in npy_arrays.items() if key in ('tfm', 'big_tfm')})
+  else:
+    # TODO-SP: Remove legacy queuing fallback else block after all models are recompiled
+    npy_arrays = {
+      'desire': np.zeros(desire_shape[2], dtype=np.float32),
+      'tfm': np.zeros((3, 3), dtype=np.float32),
+      'big_tfm': np.zeros((3, 3), dtype=np.float32)
+    }
+
+    for key, shape in input_shapes.items():
+      if key not in npy_arrays and 'img' not in key and key not in ('features_buffer', desire_key):
+        npy_arrays[key] = np.zeros(shape, dtype=np.float32)
+
+    queues = {
+      'img_q': Tensor(np.zeros(img_buf_shape, dtype=np.uint8), device=device).contiguous().realize(),
+      'big_img_q': Tensor(np.zeros(img_buf_shape, dtype=np.uint8), device=device).contiguous().realize(),
+      'desire_q': Tensor(np.zeros((frame_skip * desire_shape[1], desire_shape[0], desire_shape[2]),
+                    dtype=np.float32), device=device).contiguous().realize()
+    }
+
+    if features_buffer:
+      queues['feat_q'] = Tensor(np.zeros((frame_skip * (features_buffer[1] - 1) + 1, features_buffer[0], features_buffer[2]),
+                         dtype=np.float32), device=device).contiguous().realize()
+
+    queues.update({key: Tensor(value, device='NPY').realize() for key, value in npy_arrays.items()})
+
   return queues, npy_arrays
 
 
-def make_split_input_queues(vision_input_shapes: dict, policy_input_shapes: dict, frame_skip: int, device: str = Device.DEFAULT) -> tuple[dict, dict]:
-  return generate_queues_and_npy({**vision_input_shapes, **policy_input_shapes}, frame_skip, device)
+def make_split_input_queues(vision_input_shapes: dict, policy_input_shapes: dict,
+                            frame_skip: int, device: str = Device.DEFAULT, use_packed: bool = True) -> tuple[dict, dict]:
+  return generate_queues_and_npy({**vision_input_shapes, **policy_input_shapes}, frame_skip, device, is_supercombo=False, use_packed=use_packed)
 
 
-def make_supercombo_input_queues(input_shapes: dict, frame_skip: int, device: str = Device.DEFAULT) -> tuple[dict, dict]:
-  return generate_queues_and_npy(input_shapes, frame_skip, device)
+def make_supercombo_input_queues(input_shapes: dict, frame_skip: int,
+                                 device: str = Device.DEFAULT, use_packed: bool = True) -> tuple[dict, dict]:
+  return generate_queues_and_npy(input_shapes, frame_skip, device, is_supercombo=True, use_packed=use_packed)
 
 
 def create_jit_runner(vision_runner, policy_runners: list, nv12: NV12Frame, model_size: tuple[int, int],
@@ -118,22 +169,17 @@ def create_jit_runner(vision_runner, policy_runners: list, nv12: NV12Frame, mode
   if not desire_key or not road_key or not wide_key:
     raise ValueError("Missing required vision or desire keys in input shapes.")
 
-  extra_keys = [key for key in input_shapes if key not in (desire_key, 'features_buffer', 'traffic_convention') and 'img' not in key]
+  is_supercombo = vision_runner is None
+  npy_shapes, npy_sizes = get_policy_npy_shapes(input_shapes, is_supercombo=is_supercombo)
 
-  def runner(img_q, big_img_q, feat_q, frame, big_frame, tfm, big_tfm, **kwargs):
+  def runner(img_q, big_img_q, feat_q, packed_npy_inputs, frame, big_frame, tfm, big_tfm, **kwargs):
     desire_q = kwargs['desire_q']
-    desire = kwargs['desire']
-    traffic_convention = kwargs.get('traffic_convention')
 
-    npys = [tfm.to(Device.DEFAULT), big_tfm.to(Device.DEFAULT), desire.to(Device.DEFAULT)]
-    if traffic_convention is not None:
-      npys.append(traffic_convention.to(Device.DEFAULT))
+    packed_npy_inputs_dev = packed_npy_inputs.to(Device.DEFAULT)
+    tfm_dev = tfm.to(Device.DEFAULT)
+    big_tfm_dev = big_tfm.to(Device.DEFAULT)
 
-    extra_tensors = {key: kwargs[key].to(Device.DEFAULT) for key in extra_keys if key in kwargs}
-    Tensor.realize(*npys, *extra_tensors.values())
-
-    tfm_dev, big_tfm_dev, desire_dev = npys[:3]
-    traffic_conv_dev = npys[3] if traffic_convention is not None else None
+    Tensor.realize(packed_npy_inputs_dev, tfm_dev, big_tfm_dev)
 
     img = shift_and_sample(img_q, frame_prepare(frame, tfm_dev).unsqueeze(0), sample_skip_fn).realize()
     big_img = shift_and_sample(big_img_q, frame_prepare(big_frame, big_tfm_dev).unsqueeze(0), sample_skip_fn).realize()
@@ -141,22 +187,37 @@ def create_jit_runner(vision_runner, policy_runners: list, nv12: NV12Frame, mode
     if prepare_only:
       return img, big_img
 
-    desire_buf = shift_and_sample(desire_q, desire_dev.reshape(1, 1, -1), sample_desire_fn).realize()
-    inputs = {desire_key: desire_buf, **extra_tensors}
+    unpacked_tensors = [tensor.reshape(shape) for tensor, shape in zip(packed_npy_inputs_dev.split(npy_sizes), npy_shapes.values(), strict=True)]
+    unpacked_dict = dict(zip(npy_shapes.keys(), unpacked_tensors, strict=True))
 
-    if traffic_conv_dev is not None:
-      inputs['traffic_convention'] = traffic_conv_dev
+    desire_dev = unpacked_dict['desire']
+    desire_buf = shift_and_sample(desire_q, desire_dev.reshape(1, 1, -1), sample_desire_fn).realize()
+
+    inputs = {desire_key: desire_buf}
+    for key, tensor_val in unpacked_dict.items():
+      if key not in ('desire', 'prev_feat'):
+        inputs[key] = tensor_val
+
+    if 'prev_feat' in unpacked_dict:
+      prev_feat_dev = unpacked_dict['prev_feat']
+      inputs['features_buffer'] = shift_and_sample(feat_q, prev_feat_dev.reshape(1, 1, -1), sample_skip_fn).realize()
 
     if vision_runner:
       vision_out_cast = next(iter(vision_runner({road_key: img, wide_key: big_img}).values())).cast('float32').realize()
-      new_feat = vision_out_cast[:, features_slice].reshape(1, -1).unsqueeze(0)
-      inputs['features_buffer'] = shift_and_sample(feat_q, new_feat, sample_skip_fn).realize()
+      if 'features_buffer' not in inputs:
+        new_feat = vision_out_cast[:, features_slice].reshape(1, -1).unsqueeze(0)
+        inputs['features_buffer'] = shift_and_sample(feat_q, new_feat, sample_skip_fn).realize()
       policy_outs = [next(iter(pol_runner(inputs).values())).cast('float32').realize() for pol_runner in policy_runners]
       return (vision_out_cast, *policy_outs) if len(policy_outs) > 1 else (vision_out_cast, policy_outs[0])
-    inputs.update({road_key: img, wide_key: big_img, 'features_buffer': sample_skip_fn(feat_q)})
+
+    inputs.update({road_key: img, wide_key: big_img})
+    if 'features_buffer' not in inputs:
+      inputs['features_buffer'] = sample_skip_fn(feat_q)
+
     policy_out = next(iter(policy_runners[0](inputs).values())).cast('float32').realize()
-    new_feat = policy_out[:, features_slice].reshape(1, -1).unsqueeze(0)
-    shift_and_sample(feat_q, new_feat, sample_skip_fn).realize()
+    if 'features_buffer' not in inputs and features_slice is not None:
+      new_feat = policy_out[:, features_slice].reshape(1, -1).unsqueeze(0)
+      shift_and_sample(feat_q, new_feat, sample_skip_fn).realize()
     return policy_out
 
   return runner
@@ -174,9 +235,10 @@ def compile_and_warmup(nv12: NV12Frame, model_size: tuple[int, int], prepare_onl
   features_slice = feat_meta['output_slices']['hidden_state']
   WARP_DEV = 'CPU' if "USBGPU" in os.environ else Device.DEFAULT
 
+  is_supercombo = vision_runner is None
   run_func = create_jit_runner(vision_runner, policy_runners, nv12, model_size, features_slice, frame_skip, all_shapes, prepare_only)
   run_jit = TinyJit(run_func, prune=True)
-  queues, npy_arrays = generate_queues_and_npy(all_shapes, frame_skip, Device.DEFAULT)
+  queues, npy_arrays = generate_queues_and_npy(all_shapes, frame_skip, Device.DEFAULT, is_supercombo=is_supercombo)
 
   for i in range(3):
     rng = np.random.default_rng(42 + i)
@@ -192,6 +254,7 @@ def compile_and_warmup(nv12: NV12Frame, model_size: tuple[int, int], prepare_onl
     Device.default.synchronize()
     print(f"  [{i + 1}/3] enqueue {(mid_time - start_time) * 1e3:6.2f} ms -- total {(time.perf_counter() - start_time) * 1e3:6.2f} ms")
 
+  # TODO-SP: switch to dump_oob/load_oob on next full recompile of all models
   return pickle.loads(pickle.dumps(run_jit)) if not prepare_only else run_jit
 
 
@@ -289,6 +352,7 @@ if __name__ == "__main__":
                         vision_runner, policy_runners, output_data['metadata']))
 
   with open(args.output, "wb") as file:
+    # TODO-SP: switch to dump_oob from openpilot/selfdrive/helpers on next full recompile of all models
     pickle.dump(output_data, file)
 
   pkl_size = os.path.getsize(args.output)

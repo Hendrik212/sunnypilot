@@ -108,6 +108,7 @@ class ModelState(ModelStateBase):
 
   def _init_combined(self, pkl_path, cam_w, cam_h, bundle):
     cloudlog.warning(f"loading combined pkl: {pkl_path}")
+    # TODO-SP: switch to load_oob from openpilot/selfdrive/helpers on next full recompile of all models
     jits = pickle.load(open_file_chunked(pkl_path))
 
     self.DEV = Device.DEFAULT
@@ -115,6 +116,17 @@ class ModelState(ModelStateBase):
     self.QUEUE_DEV = self.DEV
 
     metadata = jits['metadata']
+
+    self._run_policy = jits[(cam_w, cam_h)]['run_policy']
+    self._warp_enqueue = jits[(cam_w, cam_h)]['warp_enqueue']
+
+    # TODO-SP: Remove legacy use_packed detection block after all models are recompiled
+    captured = getattr(self._run_policy, 'captured', None)
+    if captured is not None:
+      use_packed = 'packed_npy_inputs' in getattr(captured, 'expected_names', [])
+    else:
+      use_packed = True
+
     if 'model' in metadata:
       model_metadata = metadata['model']
       self.vision_output_slices = model_metadata['output_slices']
@@ -124,7 +136,8 @@ class ModelState(ModelStateBase):
       self._vision_input_names = [key for key in model_metadata['input_shapes'] if 'img' in key]
       from openpilot.sunnypilot.modeld_v2.compile_modeld import make_supercombo_input_queues
       frame_skip = derive_frame_skip({}, model_metadata['input_shapes'])
-      self.input_queues, self.numpy_inputs = make_supercombo_input_queues(model_metadata['input_shapes'], frame_skip, device=self.QUEUE_DEV)
+      self.input_queues, self.numpy_inputs = make_supercombo_input_queues(model_metadata['input_shapes'],
+                                                                          frame_skip, device=self.QUEUE_DEV, use_packed=use_packed)
     else:
       vision_metadata = metadata['vision']
       policy_keys = [k for k in metadata if k != 'vision']
@@ -142,7 +155,8 @@ class ModelState(ModelStateBase):
       policy_input_shapes = first_policy_metadata['input_shapes']
       self._vision_input_names = [k for k in vision_input_shapes if 'img' in k]
       frame_skip = derive_frame_skip(vision_input_shapes, policy_input_shapes)
-      self.input_queues, self.numpy_inputs = make_split_input_queues(vision_input_shapes, policy_input_shapes, frame_skip, device=self.QUEUE_DEV)
+      self.input_queues, self.numpy_inputs = make_split_input_queues(vision_input_shapes, policy_input_shapes,
+                                                                     frame_skip, device=self.QUEUE_DEV, use_packed=use_packed)
 
     self._desire_key = next(key for key in self.numpy_inputs if key.startswith('desire'))
     self._road_key = next(key for key in self._vision_input_names if 'big' not in key)
@@ -169,8 +183,6 @@ class ModelState(ModelStateBase):
     nv12_info = get_nv12_info(cam_w, cam_h)
     self.frame_buf_params = dict.fromkeys(self._vision_input_names, nv12_info)
 
-    self._run_policy = jits[(cam_w, cam_h)]['run_policy']
-    self._warp_enqueue = jits[(cam_w, cam_h)]['warp_enqueue']
     yuv_size = self.frame_buf_params[self._road_key][3]
     self._warp_enqueue(
       **self.input_queues,
@@ -192,8 +204,6 @@ class ModelState(ModelStateBase):
 
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
                 inputs: dict[str, np.ndarray], prepare_only: bool) -> dict[str, np.ndarray] | None:
-    from tinygrad.tensor import Tensor
-
     for key in bufs.keys():
       ptr = np.frombuffer(bufs[key].data, dtype=np.uint8).ctypes.data
       yuv_size = self.frame_buf_params[key][3]
@@ -225,10 +235,15 @@ class ModelState(ModelStateBase):
       model_output = raw_outputs.numpy().flatten()
       sliced = {k: model_output[np.newaxis, v] for k, v in self.vision_output_slices.items()}
       outputs = self.parser.parse_outputs(sliced)
+      if 'prev_feat' in self.numpy_inputs:
+        self.numpy_inputs['prev_feat'][:] = model_output[self.vision_output_slices['hidden_state']]
     else:
       vision_output = raw_outputs[0].numpy().flatten()
       vision_sliced = {k: vision_output[np.newaxis, v] for k, v in self.vision_output_slices.items()}
       outputs = self.parser.parse_vision_outputs(vision_sliced)
+
+      if 'prev_feat' in self.numpy_inputs and 'hidden_state' in self.vision_output_slices:
+        self.numpy_inputs['prev_feat'][:] = vision_output[self.vision_output_slices['hidden_state']]
 
       for i, policy_slices in enumerate(self._policy_slices_list):
         policy_output = raw_outputs[i + 1].numpy().flatten()
@@ -250,6 +265,11 @@ class ModelState(ModelStateBase):
       buf[0, :-1] = buf[0, 1:]
       buf[0, -1, :] = outputs['desired_curvature'][0, :] if not self.mlsim else 0
 
+    # TODO-SP: This is a hack to prevent GPU corruption by calculating in CPU space, it can be removed on next recompile
+    if 'prev_feat' not in self.numpy_inputs and 'feat_q' in self.input_queues:
+      feat_val = self.input_queues['feat_q'].numpy()
+      self.input_queues['feat_q'].assign(feat_val).realize()
+
     return outputs
 
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
@@ -258,7 +278,6 @@ class ModelState(ModelStateBase):
       plan = model_output['plan'][0]
       desired_accel, should_stop = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0], self.constants.T_IDXS,
                                                        action_t=long_action_t)
-      desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
 
       curvature_plan = (plan + (self.PLANPLUS_CONTROL - 1.0) * model_output['planplus'][0]
                         if 'planplus' in model_output and self.PLANPLUS_CONTROL != 1.0 else plan)
@@ -267,6 +286,8 @@ class ModelState(ModelStateBase):
       desired_accel = model_output['action'][0, 1]
       desired_curvature = model_output['action'][0, 0] / (max(1.0, v_ego))**2
       should_stop = (v_ego < 0.3 and desired_accel < 0.1)
+
+    desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
 
     if self.generation is not None and self.generation >= 10: # smooth curvature for post FOF models
       if v_ego > self.MIN_LAT_CONTROL_SPEED:
