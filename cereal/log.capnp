@@ -2611,6 +2611,20 @@ struct Touch {
   value @4 :Int32;
 }
 
+struct MqttPubQueue {
+  publish @0 :Bool;
+  subscribe @1 :Bool;
+  topic @2 :Text;
+  content @3 :Text;
+  qos @4 :UInt8;
+  retain @5 :Bool;
+}
+
+struct MqttRecvQueue {
+  topic @0 :Text;
+  payload @1 :Text;
+}
+
 struct Event {
   logMonoTime @0 :UInt64;  # nanoseconds
   valid @67 :Bool = true;
@@ -2658,6 +2672,8 @@ struct Event {
     onroadEvents @134: List(OnroadEvent);
     carParams @69: Car.CarParams;
     driverMonitoringState @151 :DriverMonitoringState;
+    mqttPubQueue @152 :MqttPubQueue;
+    mqttRecvQueue @153 :MqttRecvQueue;
     livePose @129 :LivePose;
     modelV2 @75 :ModelDataV2;
     drivingModelData @128 :DrivingModelData;
