@@ -3,7 +3,7 @@
 import time
 import datetime
 import cereal.messaging as messaging
-from openpilot.common.hardware import HARDWARE
+from openpilot.system.hardware import HARDWARE
 from pyextra.paho.mqtt import client as mqtt_client
 from pyextra.paho.mqtt.client import MQTT_ERR_SUCCESS
 import json
