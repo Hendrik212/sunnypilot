@@ -119,6 +119,10 @@ _services: dict[str, tuple] = {
   "mapdExtendedOut": (True, 1., 1, QueueSize.MEDIUM),
   "mapdIn": (True, 1., 1, QueueSize.MEDIUM),
   "mapdOut": (True, 20., 20, QueueSize.MEDIUM),
+
+  # mqtt
+  "mqttPubQueue": (True, 0.),
+  "mqttRecvQueue": (True, 0.),
 }
 SERVICE_LIST = {name: Service(*vals) for
                 idx, (name, vals) in enumerate(_services.items())}
