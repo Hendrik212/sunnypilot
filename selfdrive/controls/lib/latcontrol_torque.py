@@ -88,6 +88,8 @@ class LatControlTorque(LatControl):
     self.lookahead_frames = int(JERK_LOOKAHEAD_SECONDS / self.dt)
     self.jerk_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * LP_FILTER_CUTOFF_HZ), self.dt)
     self.ioniq_6_directional_taper_filter = FirstOrderFilter(1.0, IONIQ_6_DIRECTIONAL_TAPER_FILTER_RC, self.dt)
+    self.curvature_ripple_filter = FirstOrderFilter(
+      0.0, 1 / (2 * np.pi * IONIQ_6_CURVATURE_RIPPLE_FILTER_CUTOFF_HZ), self.dt)
     self.previous_measurement = 0.0
     self.measurement_rate_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * (MAX_LAT_JERK_UP - 0.5)), self.dt)
     self.low_speed_reset_threshold = max(CP.minSteerSpeed, MIN_LATERAL_CONTROL_SPEED)
@@ -221,6 +223,19 @@ class LatControlTorque(LatControl):
     flm_surface_active = flm_profile_active and flm_runtime_overrides_active()
     measured_curvature = -VM.calc_curvature(math.radians(CS.steeringAngleDeg - params.angleOffsetDeg), CS.vEgo, params.roll)
     measurement = measured_curvature * CS.vEgo ** 2
+    # Strip the model's curvature ripple before it becomes torque, blended in by speed
+    # (see IONIQ_6_CURVATURE_RIPPLE_FILTER_* for the measurements and the rejected notch
+    # alternative). Applied here, ahead of the split below, so the setpoint path and the
+    # feedforward both act on the same de-rippled command. This is reference-side only --
+    # `measurement` above is the loop's sole feedback term -- so it cannot move loop phase
+    # margin. The filter is always stepped, even where the blend is zero, so that its state
+    # stays primed and crossing the blend-in speed is continuous.
+    ripple_filter_input = desired_curvature
+    if self.is_ioniq_6:
+      ripple_filtered = self.curvature_ripple_filter.update(ripple_filter_input)
+      ripple_blend = np.interp(CS.vEgo, IONIQ_6_CURVATURE_RIPPLE_FILTER_SPEED_BP,
+                               IONIQ_6_CURVATURE_RIPPLE_FILTER_BLEND_V)
+      desired_curvature = ripple_filter_input + ripple_blend * (ripple_filtered - ripple_filter_input)
     future_desired_lateral_accel = desired_curvature * CS.vEgo ** 2
     if not active:
       output_torque = 0.0
@@ -238,6 +253,10 @@ class LatControlTorque(LatControl):
       self.jerk_filter.x = 0.0
       self.prev_desired_lateral_accel = future_desired_lateral_accel
       self.ioniq_6_directional_taper_filter.x = 1.0
+      # Prime with the unfiltered command (which tracks measured curvature while
+      # inactive) so re-engaging with a wound wheel does not start the filter a
+      # time-constant behind, for the same reason the request buffer is primed above.
+      self.curvature_ripple_filter.x = ripple_filter_input
     else:
       if self.prev_steering_pressed and not CS.steeringPressed:
         self.pid.i *= self.steer_release_i_decay

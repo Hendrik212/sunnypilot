@@ -888,6 +888,35 @@ IONIQ_6_OUTPUT_TAPER_SPEED_WIDTH = 2.5
 IONIQ_6_OUTPUT_CENTER_TAPER_BLEND = 0.90
 IONIQ_6_OUTPUT_DIRECTIONAL_TAPER_BLEND = 0.97
 
+# Model curvature-ripple prefilter.
+#
+# The driving model emits a peaked ripple in action.desiredCurvature that is
+# present whether or not openpilot is steering (proven open-loop against manual
+# rlogs), so it is not a control-loop artifact and no gain retuning removes it.
+# Measured on route 00000180--9e09323dec at 123 km/h: the ripple sits at
+# 0.78 Hz carrying 39.7% of all desiredCurvature variance, and the loop passes
+# it through at |T| = 1.09 with coherence 0.99 -- i.e. the controller faithfully
+# executes it, producing ~2.3 deg peak-to-peak of visible wheel hunting on a
+# straight highway.
+#
+# desired_curvature reaches this controller as a reference only (it feeds the
+# setpoint and the feedforward; `measurement` is the sole feedback term), so
+# low-passing it here is a pure prefilter -- outside the loop, and therefore
+# cannot change loop phase margin or stability.
+#
+# The cutoff must be speed-scheduled. At 123 km/h genuine road-following lives
+# at/below 0.05 Hz with an almost empty 0.05-0.6 Hz valley, so a 0.3 Hz cutoff
+# takes -8.8 dB off the ripple while preserving 97.2% of real road content. At
+# 61 km/h none of the legitimate curvature demand is below 0.2 Hz -- real
+# steering lives exactly where this filter bites -- so it must be off by then.
+# A speed-scheduled notch was evaluated and rejected: the ripple frequency does
+# not follow the f = 0.126*sqrt(v) law from earlier routes on this model
+# (measured -43% at 61 km/h, -50% at 39 km/h), and a notch mis-centred that far
+# attenuates nothing.
+IONIQ_6_CURVATURE_RIPPLE_FILTER_CUTOFF_HZ = 0.3
+IONIQ_6_CURVATURE_RIPPLE_FILTER_SPEED_BP = [20.0, 28.0]  # m/s: off below, full above
+IONIQ_6_CURVATURE_RIPPLE_FILTER_BLEND_V = [0.0, 1.0]
+
 KIA_EV6_LATERAL_TESTING_GROUND_ID = testing_ground.id_6
 KIA_EV6_LATERAL_TESTING_GROUND_VARIANT = "C"
 KIA_EV6_FF_GAIN_LEFT = 0.12
