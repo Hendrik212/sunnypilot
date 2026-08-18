@@ -136,8 +136,8 @@ class ModelRenderer(Widget, ChevronMetrics, ModelRendererSP):
     self._draw_lane_lines()
     self._draw_path(sm)
 
-    if ui_state.radar_tracks and sm.valid['liveTracks'] and sm.recv_frame['liveTracks'] >= ui_state.started_frame:
-      self.radar_tracks.draw_radar_tracks(sm['liveTracks'], self._map_to_screen, self._path_offset_z)
+    if ui_state.radar_tracks and sm.valid['radarTracks'] and sm.recv_frame['radarTracks'] >= ui_state.started_frame:
+      self.radar_tracks.draw_radar_tracks(sm['radarTracks'], self._map_to_screen, self._path_offset_z)
 
     if render_lead_indicator and radar_state:
       self._draw_lead_indicator()
