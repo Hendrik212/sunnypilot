@@ -3,6 +3,7 @@ import cereal.messaging as messaging
 from opendbc.car import DT_CTRL, structs
 from opendbc.car.chrysler.values import RAM_DT
 from opendbc.car.gm.values import CAR as GM_CAR, GMFlags, SDGM_CAR
+from opendbc.car.hyundai.values import CAR as HYUNDAI_CAR
 from opendbc.car.interfaces import MAX_CTRL_SPEED
 
 from openpilot.selfdrive.selfdrived.events import Events
@@ -214,7 +215,10 @@ class CarSpecificEvents:
       events.add(EventName.stockFcw)
     if CS.stockAeb:
       events.add(EventName.stockAeb)
-    if CS.vEgo > MAX_CTRL_SPEED:
+    # Ioniq 6 is driven well above V_CRUISE_MAX+4 (149 km/h) on the Autobahn.
+    # The stock "Model uncertain at this speed" warning is a training-data
+    # heuristic, not a control limit — skip it on this car only.
+    if CS.vEgo > MAX_CTRL_SPEED and self.CP.carFingerprint != HYUNDAI_CAR.HYUNDAI_IONIQ_6:
       events.add(EventName.speedTooHigh)
     if CS.cruiseState.nonAdaptive:
       events.add(EventName.wrongCruiseMode)
