@@ -3,6 +3,7 @@ import time
 import datetime
 
 import openpilot.cereal.messaging as messaging
+from openpilot.cereal import log
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.utils import strip_deprecated_keys
 from collections import defaultdict
@@ -10,6 +11,12 @@ from collections import defaultdict
 from openpilot.system.mqttd import mqttd
 from opendbc.car.hyundai import mqtt
 from openpilot.common.hardware import HARDWARE
+from openpilot.system.hardware.power_monitoring import VBATT_PAUSE_CHARGING
+
+# hardwared compares a low-passed car voltage against the shutdown threshold,
+# not the instantaneous reading (power_monitoring.CAR_VOLTAGE_LOW_PASS_K, 45s).
+# Mirror that here so the published value matches what actually triggers shutdown.
+CAR_VOLTAGE_LOW_PASS_TAU_S = 45.0
 
 
 #f = open("mqtt_status_log.txt", "w")
@@ -115,6 +122,34 @@ def publish_sensor_discovery(pm, sensor_name, device_info, config_prefix):
       "value_template": "{{ value_json.ac_current_limit }}",
       "icon": "mdi:current-ac",
     },
+    "car_voltage": {
+      "name": "12V Battery Voltage",
+      "state_topic": "openpilot/car_status",
+      "value_template": "{{ value_json.car_voltage }}",
+      "unit_of_measurement": "V",
+      "device_class": "voltage",
+      "state_class": "measurement",
+      "suggested_display_precision": 2,
+    },
+    "car_voltage_filtered": {
+      "name": "12V Battery Voltage (Filtered)",
+      "state_topic": "openpilot/car_status",
+      "value_template": "{{ value_json.car_voltage_filtered }}",
+      "unit_of_measurement": "V",
+      "device_class": "voltage",
+      "state_class": "measurement",
+      "suggested_display_precision": 2,
+      "icon": "mdi:sine-wave",
+    },
+    "low_voltage_shutdown_threshold": {
+      "name": "Low Voltage Shutdown Threshold",
+      "state_topic": "openpilot/car_status",
+      "value_template": "{{ value_json.low_voltage_shutdown_threshold }}",
+      "unit_of_measurement": "V",
+      "device_class": "voltage",
+      "suggested_display_precision": 2,
+      "icon": "mdi:power-plug-off",
+    },
   }
 
   if sensor_name not in sensors:
@@ -202,6 +237,9 @@ def publish_ha_discovery(pm, count, config_prefix):
     "charge_limit_dc",
     "ac_power_limit_pct",
     "ac_current_limit",
+    "car_voltage",
+    "car_voltage_filtered",
+    "low_voltage_shutdown_threshold",
   ]
 
   binary_sensors = [
@@ -236,6 +274,7 @@ def status_thread():
 
   panda_state_timeout = int(1000 * 2.5 * DT_CTRL)  # 2.5x the expected pandaState frequency
   panda_state_sock = messaging.sub_sock('pandaState', timeout=panda_state_timeout)
+  peripheral_state_sock = messaging.sub_sock('peripheralState')
   location_sock = messaging.sub_sock('gpsLocationExternal')
   device_sock = messaging.sub_sock('deviceState')
 
@@ -254,6 +293,9 @@ def status_thread():
   charging_time_remaining_prev = None
   charging_status_prev = None
   sleeptimer = time.monotonic()
+  car_voltage_instant = None
+  car_voltage_filtered = None
+  car_voltage_last_t = None
 
   while True:
     cur_time = time.monotonic()
@@ -262,6 +304,20 @@ def status_thread():
     can_recv = messaging.drain_sock(logcan)
     bus = 1
     mqtt.getParsedMessages(can_recv, bus, dat, pm)
+
+    # sample the 12V line every iteration so the low-pass advances at the real
+    # peripheralState rate rather than the 30s publish cadence
+    peripheral_msgs = [m for m in messaging.drain_sock(peripheral_state_sock)
+                       if m.peripheralState.pandaType != log.PandaState.PandaType.unknown]
+    if peripheral_msgs:
+      car_voltage_instant = peripheral_msgs[-1].peripheralState.voltage / 1e3
+      dt = cur_time - car_voltage_last_t if car_voltage_last_t is not None else 0.0
+      if car_voltage_filtered is None or dt <= 0.0:
+        car_voltage_filtered = car_voltage_instant
+      else:
+        alpha = dt / (CAR_VOLTAGE_LOW_PASS_TAU_S + dt)
+        car_voltage_filtered += alpha * (car_voltage_instant - car_voltage_filtered)
+      car_voltage_last_t = cur_time
 
     if cur_time > sleeptimer + 30: # update mqtt all 30s
       #f.write(str(datetime.datetime.now()) + " entering loop...\n")
@@ -329,6 +385,9 @@ def status_thread():
                  "charge_limit_dc": mqtt.charge_limit_dc_out,
                  "ac_power_limit_pct": mqtt.ac_power_limit_pct_out,
                  "ac_current_limit": mqtt.ac_current_limit_out,
+                 "car_voltage": round(car_voltage_instant, 2) if car_voltage_instant is not None else None,
+                 "car_voltage_filtered": round(car_voltage_filtered, 2) if car_voltage_filtered is not None else None,
+                 "low_voltage_shutdown_threshold": VBATT_PAUSE_CHARGING,
                 }
       mqttd.publish(pm, topic, content)
 
