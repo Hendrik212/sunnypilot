@@ -4,7 +4,7 @@ import datetime
 
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal import log
-from openpilot.common.realtime import DT_CTRL
+from openpilot.common.realtime import DT_CTRL, Ratekeeper
 from openpilot.common.utils import strip_deprecated_keys
 from collections import defaultdict
 
@@ -297,6 +297,10 @@ def status_thread():
   car_voltage_filtered = None
   car_voltage_last_t = None
 
+  # The loop only drains non-blocking sockets, so without pacing it spins a core
+  # at 100%. `can` is the fastest thing we read at 100Hz, so match that.
+  rk = Ratekeeper(1 / DT_CTRL, print_delay_threshold=None)
+
   while True:
     cur_time = time.monotonic()
 
@@ -398,6 +402,8 @@ def status_thread():
       charging_power_prev = mqtt.charging_power_out
       charging_time_remaining_prev = mqtt.charging_time_remaining_out
       charging_status_prev = mqtt.charging_status_out
+
+    rk.keep_time()
 
 
 def main():
