@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 from numbers import Number
 
 from openpilot.cereal import log
@@ -69,6 +70,13 @@ class Controls(ControlsExt):
       self.LaC = LatControlTorque(self.CP, self.CP_SP, self.CI, DT_CTRL)
 
     self.LaC = ControlsExt.initialize_lateral_control(self, self.LaC, self.CI, DT_CTRL)
+
+    # Track the lateral controller selection so we can hot-swap it live (see
+    # check_lateral_control_version). Keyed on both EnforceTorqueControl and
+    # TorqueControlTune since either changes which controller is selected.
+    self._lac_version_key = (self.params.get_bool("EnforceTorqueControl"),
+                             self.params.get("TorqueControlTune"))
+    self._lac_version_check_t = time.monotonic()
 
   def update(self):
     self.sm.update(15)
@@ -167,6 +175,49 @@ class Controls(ControlsExt):
 
     return CC, lac_log
 
+  def check_lateral_control_version(self):
+    # Hot-swap the lateral controller live when the driver changes the torque tune
+    # version (or EnforceTorqueControl) in the UI. Selection is otherwise fixed at
+    # controlsd startup; this rebuilds self.LaC mid-session so v0/v1/v2 can be A/B'd
+    # within a single drive.
+    #
+    # Throttled to ~1 Hz: TorqueControlTune/EnforceTorqueControl are full file reads
+    # (Params.get is uncached, params.cc:182), so polling at the 100 Hz loop rate would
+    # be 100 reads/s off eMMC for a human-triggered toggle. Mirrors the get_params_sp
+    # throttle pattern (controlsd_ext.py).
+    now = time.monotonic()
+    if now - self._lac_version_check_t < 1.0:
+      return
+    self._lac_version_check_t = now
+
+    key = (self.params.get_bool("EnforceTorqueControl"), self.params.get("TorqueControlTune"))
+    if key == self._lac_version_key:
+      return  # unchanged since last init
+
+    # Version or enforce flag changed -> rebuild LaC. initialize_lateral_control
+    # returns a fully-constructed controller (extension included), which must be in
+    # place before state_control accesses self.LaC.extension.
+    old_lac = self.LaC
+    self.LaC = ControlsExt.initialize_lateral_control(self, self.LaC, self.CI, DT_CTRL)
+    self._lac_version_key = key
+
+    # Carry cheap, high-impact state so the swap isn't a torque step. pid.i is the
+    # dominant source of a step (it's the integrated error); torque_params holds the
+    # live-learned latAccelFactor/latAccelOffset/friction. Filters and the lat-accel
+    # request buffer re-prime naturally within ~1 s. Extension state resets (jerk-aware
+    # / NNLC are off for this car; acceptable).
+    #
+    # Gate the whole carry on both controllers being torque controllers (the only
+    # family with torque_params). LatControlPID/LatControlCurvature also have a pid,
+    # but it operates in a different space with different gains — carrying across
+    # families would be nonsensical.
+    if hasattr(old_lac, "torque_params") and hasattr(self.LaC, "torque_params"):
+      self.LaC.torque_params = old_lac.torque_params
+      self.LaC.update_limits()
+      self.LaC.pid.i = old_lac.pid.i
+
+    cloudlog.info(f"live lateral controller swap: {key} (carried pid.i, torque_params)")
+
   def publish(self, CC, lac_log):
     CS = self.sm['carState']
 
@@ -246,6 +297,7 @@ class Controls(ControlsExt):
   def run(self):
     rk = Ratekeeper(100, print_delay_threshold=None)
     while True:
+      self.check_lateral_control_version()
       self.update()
       CC, lac_log = self.state_control()
       self.publish(CC, lac_log)
