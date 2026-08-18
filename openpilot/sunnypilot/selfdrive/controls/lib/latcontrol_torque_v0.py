@@ -3,6 +3,7 @@ import numpy as np
 from collections import deque
 
 from openpilot.cereal import log
+from opendbc.car.hyundai.values import CAR
 from opendbc.car.lateral import get_friction
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -33,6 +34,14 @@ LAT_ACCEL_REQUEST_BUFFER_SECONDS = 1.0
 FRICTION_THRESHOLD = 0.3
 VERSION = 0
 
+# Ioniq 6 model curvature-ripple prefilter (reference-side only).
+# Measured 0.78 Hz peak in action.desiredCurvature at 123 km/h; cutoff is
+# speed-scheduled so it is inert below ~72 km/h. v0 only — this is the
+# controller isla-master actually runs.
+IONIQ_6_CURVATURE_RIPPLE_FILTER_CUTOFF_HZ = 0.3
+IONIQ_6_CURVATURE_RIPPLE_FILTER_SPEED_BP = [20.0, 28.0]  # m/s: off below, full above
+IONIQ_6_CURVATURE_RIPPLE_FILTER_BLEND_V = [0.0, 1.0]
+
 
 class LatControlTorque(LatControl):
   def __init__(self, CP, CP_SP, CI, dt):
@@ -47,6 +56,9 @@ class LatControlTorque(LatControl):
     self.lat_accel_request_buffer = deque([0.] * self.lat_accel_request_buffer_len , maxlen=self.lat_accel_request_buffer_len)
     self.previous_measurement = 0.0
     self.measurement_rate_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * LP_FILTER_CUTOFF_HZ), self.dt)
+    self.is_ioniq_6 = CP.carFingerprint == CAR.HYUNDAI_IONIQ_6
+    self.curvature_ripple_filter = FirstOrderFilter(
+      0.0, 1 / (2 * np.pi * IONIQ_6_CURVATURE_RIPPLE_FILTER_CUTOFF_HZ), self.dt)
 
     self.extension = LatControlTorqueExt(self, CP, CP_SP, CI)
 
@@ -67,9 +79,23 @@ class LatControlTorque(LatControl):
 
     pid_log = log.ControlsState.LateralTorqueState.new_message()
     pid_log.version = VERSION
+    # Strip the model's curvature ripple before it becomes torque. Applied here,
+    # ahead of the setpoint/feedforward split, so both act on the same command.
+    # measurement is the loop's only feedback term, so this cannot move phase
+    # margin. Always stepped so the state stays primed across the blend-in.
+    ripple_filter_input = desired_curvature
+    if self.is_ioniq_6:
+      ripple_filtered = self.curvature_ripple_filter.update(ripple_filter_input)
+      ripple_blend = np.interp(CS.vEgo, IONIQ_6_CURVATURE_RIPPLE_FILTER_SPEED_BP,
+                               IONIQ_6_CURVATURE_RIPPLE_FILTER_BLEND_V)
+      desired_curvature = ripple_filter_input + ripple_blend * (ripple_filtered - ripple_filter_input)
     if not active:
       output_torque = 0.0
       pid_log.active = False
+      # Prime with the unfiltered command (tracks measured curvature while
+      # inactive) so re-engaging does not start a time-constant behind.
+      if self.is_ioniq_6:
+        self.curvature_ripple_filter.x = ripple_filter_input
     else:
       measured_curvature = -VM.calc_curvature(math.radians(CS.steeringAngleDeg - params.angleOffsetDeg), CS.vEgo, params.roll)
       roll_compensation = params.roll * ACCELERATION_DUE_TO_GRAVITY
