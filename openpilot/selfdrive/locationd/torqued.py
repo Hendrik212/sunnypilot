@@ -27,6 +27,14 @@ FACTOR_SANITY = 0.3
 FACTOR_SANITY_QLOG = 0.5
 FRICTION_SANITY = 0.5
 FRICTION_SANITY_QLOG = 0.8
+# The friction sanity window is multiplicative on the offline value, so a near-zero
+# offline friction collapses it to a uselessly tight absolute range. HYUNDAI_IONIQ_6
+# and KIA_EV6 carry offline friction 0.005 (set deliberately in commaai/openpilot
+# cf8885b59), which yields a ceiling of 0.0075-0.01 -- below anything physically
+# measurable on those cars, so torqued clips 100% of its estimates and the filtered
+# value decays to the ceiling instead of converging. Floor the ceiling at a value
+# that still admits a plausible estimate (fleet median friction is ~0.14, p05 ~0.078).
+MIN_FRICTION_CEILING = 0.10
 STEER_MIN_THRESHOLD = 0.02
 MIN_FILTER_DECAY = 50
 MAX_FILTER_DECAY = 250
@@ -100,7 +108,7 @@ class TorqueEstimator(ParameterEstimator, TorqueEstimatorExt):
     self.min_lataccel_factor = (1.0 - self.factor_sanity) * self.offline_latAccelFactor
     self.max_lataccel_factor = (1.0 + self.factor_sanity) * self.offline_latAccelFactor
     self.min_friction = (1.0 - self.friction_sanity) * self.offline_friction
-    self.max_friction = (1.0 + self.friction_sanity) * self.offline_friction
+    self.max_friction = max((1.0 + self.friction_sanity) * self.offline_friction, MIN_FRICTION_CEILING)
 
     # try to restore cached params
     params = Params()
