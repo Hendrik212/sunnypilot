@@ -22,6 +22,7 @@ from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.helpers import convert_carControlSP, convert_to_capnp
 
+from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP, is_starpilot_lat_tune
 from openpilot.sunnypilot.mads.helpers import set_alternative_experience, set_car_specific_params
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
 
@@ -170,6 +171,10 @@ class Car:
     self.params.put("CarParamsCache", cp_bytes)
     self.params.put("CarParamsPersistent", cp_bytes)
 
+    # Seed the derived lateral-tune flag before the first publish, so CarParamsSP is
+    # correct from frame zero rather than only after params_thread's first tick.
+    self.update_lateral_tune_flag(publish=False)
+
     # Write CarParamsSP for controls
     # convert to pycapnp representation for caching and logging
     self.CP_SP_capnp = convert_to_capnp(self.CP_SP)
@@ -299,6 +304,32 @@ class Car:
     self.CS_prev = CS
     self.CS_SP_prev = CS_SP
 
+  def update_lateral_tune_flag(self, publish=True):
+    # Derive LAT_TUNE_STARPILOT from TorqueControlTune, the single source of truth.
+    # CarControllerParams is rebuilt from CP_SP every frame for CAN FD (carcontroller.py),
+    # so flipping this flag makes the 409 ceiling / rate ramp / driver allowance follow the
+    # tune live. controlsd derives the same predicate from the same param for the controller
+    # body, so the two sides cannot disagree for longer than their poll intervals (~100 ms
+    # here, ~1 s there) -- which is what makes the "StarPilot limits + upstream control law"
+    # hybrid unrepresentable rather than something we have to police.
+    starpilot = is_starpilot_lat_tune(self.CP, self.params.get("TorqueControlTune"),
+                                     self.params.get_bool("EnforceTorqueControl"))
+    if starpilot == bool(self.CP_SP.flags & HyundaiFlagsSP.LAT_TUNE_STARPILOT):
+      return
+
+    if starpilot:
+      self.CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
+    else:
+      self.CP_SP.flags &= ~HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
+
+    # Refresh the published copy so carParamsSP logging reflects the live state. Not
+    # written back to the CarParamsSP param: nothing reads it live, and rewriting a
+    # persistent blob on every toggle would be needless flash wear. Skipped on the
+    # startup seed, where the caller builds CP_SP_capnp from CP_SP immediately after.
+    if publish:
+      self.CP_SP_capnp = convert_to_capnp(self.CP_SP)
+    cloudlog.info(f"lateral tune flag: LAT_TUNE_STARPILOT={starpilot}")
+
   def params_thread(self, evt):
     while not evt.is_set():
       self.is_metric = self.params.get_bool("IsMetric")
@@ -307,6 +338,7 @@ class Car:
       # sunnypilot
       self.dynamic_experimental_control = self.params.get_bool("DynamicExperimentalControl")
       self.v_cruise_helper.read_custom_set_speed_params()
+      self.update_lateral_tune_flag()
 
       time.sleep(0.1)
 

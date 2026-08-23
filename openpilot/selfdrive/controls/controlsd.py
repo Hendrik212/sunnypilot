@@ -211,12 +211,34 @@ class Controls(ControlsExt):
     # family with torque_params). LatControlPID/LatControlCurvature also have a pid,
     # but it operates in a different space with different gains — carrying across
     # families would be nonsensical.
+    #
+    # torque_params is only carried when both sides are in the SAME tune. The StarPilot
+    # tune sets its own baseline and scales latAccelFactor by 1.22 in __init__; copying
+    # the old struct wholesale across a tune change would overwrite that with the other
+    # tune's normalization — silently undoing the multiplier on upstream->StarPilot, and
+    # leaving a 1.22x-hot factor behind on StarPilot->upstream.
+    #
+    # pid.i lives in lateral-accel space but reaches the actuator as
+    # torque = lat_accel / latAccelFactor (torque_from_lateral_accel_linear). Carrying it
+    # unchanged across a tune change would therefore step the torque by the ratio of the
+    # two factors (2.5 -> 3.66 is a ~32% drop). Rescale so the torque contribution is
+    # continuous across the swap; within one tune the factors match and this is a no-op.
     if hasattr(old_lac, "torque_params") and hasattr(self.LaC, "torque_params"):
-      self.LaC.torque_params = old_lac.torque_params
-      self.LaC.update_limits()
-      self.LaC.pid.i = old_lac.pid.i
+      same_tune = getattr(old_lac, "is_ioniq6_starpilot", False) == getattr(self.LaC, "is_ioniq6_starpilot", False)
+      if same_tune:
+        self.LaC.torque_params = old_lac.torque_params
+        self.LaC.update_limits()
+        self.LaC.pid.i = old_lac.pid.i
+        carried = "pid.i, torque_params"
+      else:
+        old_factor = float(old_lac.torque_params.latAccelFactor)
+        new_factor = float(self.LaC.torque_params.latAccelFactor)
+        self.LaC.pid.i = old_lac.pid.i * (new_factor / old_factor) if old_factor > 1e-6 else 0.0
+        carried = f"pid.i rescaled {old_factor:.3f}->{new_factor:.3f} (tune changed)"
+    else:
+      carried = "nothing"
 
-    cloudlog.info(f"live lateral controller swap: {key} (carried pid.i, torque_params)")
+    cloudlog.info(f"live lateral controller swap: {key} (carried {carried})")
 
   def publish(self, CC, lac_log):
     CS = self.sm['carState']

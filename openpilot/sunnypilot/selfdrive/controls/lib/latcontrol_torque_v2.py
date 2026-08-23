@@ -4,8 +4,8 @@ from collections import deque
 
 from openpilot.cereal import log
 from opendbc.car.lateral import get_friction
-from opendbc.car.hyundai.values import HyundaiFlags
-from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
+from opendbc.sunnypilot.car.hyundai.values import IONIQ6_STARPILOT_TORQUE, is_starpilot_lat_tune
+from openpilot.common.params import Params
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
@@ -102,15 +102,26 @@ class LatControlTorque(LatControl):
     # friction_scale, so StarPilot's friction shaping has no home there. The
     # passthrough-when-off behaviour of extension.update() means leaving the
     # extension call in place is correct -- the shaping flows through untouched.
-    self.is_ioniq6_starpilot = (CP.brand == 'hyundai' and bool(CP.flags & HyundaiFlags.CANFD) and
-                                bool(CP_SP.flags & HyundaiFlagsSP.LAT_TUNE_STARPILOT))
+    # Derived from TorqueControlTune, the single source of truth (see
+    # is_starpilot_lat_tune). NOT read from a stored CP_SP flag: controlsd rebuilds this
+    # controller on a live tune change, and the CarParams blob it holds was loaded at
+    # process start, so a stored flag could be stale.
+    _params = Params()
+    self.is_ioniq6_starpilot = is_starpilot_lat_tune(CP, _params.get("TorqueControlTune"),
+                                                     _params.get_bool("EnforceTorqueControl"))
     if self.is_ioniq6_starpilot:
       from openpilot.sunnypilot.selfdrive.controls.lib import latcontrol_ioniq6_tune as i6
       self._i6 = i6
+      # The controller owns the StarPilot baseline rather than inheriting it from CP.
+      # CP is written once at fingerprint time, so on a live switch from upstream it
+      # still holds the UPSTREAM factor -- multiplying that by 1.22 would give a gain
+      # that is neither tune. Setting the baseline here makes the switch stateless.
+      #
       # The 1.22 multiplier is the dominant gain term and easy to miss: StarPilot's
-      # effective latAccelFactor is 3.0 x 1.22 = 3.73, giving 409/3.73 = 110 CAN per
+      # effective latAccelFactor is 3.0 x 1.22 = 3.66, giving 409/3.66 = 112 CAN per
       # m/s^2 vs a measured plant-neutral ~105. Without it the tune lands 22% hot.
-      self.torque_params.latAccelFactor *= i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
+      self.torque_params.latAccelFactor = IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] * i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
+      self.torque_params.friction = IONIQ6_STARPILOT_TORQUE['FRICTION']
       self.update_limits()
       # StarPilot stores curvature in the request buffer (scales by v^2 on read);
       # v2 stored lateral accel directly. Storing lateral accel makes the delayed
@@ -129,10 +140,20 @@ class LatControlTorque(LatControl):
       self._i6 = None
 
   def update_torque_parameters(self, latAccelFactor, latAccelOffset, friction):
-    # StarPilot applies the 1.22 here too, so live-learned params stay on the same
-    # gain scale as the offline baseline. torqued learns the *unmultiplied* factor;
-    # the controller multiplies on use so the sanity window and the feedforward
-    # share one consistent normalization.
+    # torqued fits measured lateral accel against actuatorsOutput.torque, so what it learns
+    # is a property of the PLANT, not of the tune -- the same car measures the same way on
+    # either tune. It is therefore used directly, exactly as on the upstream path.
+    #
+    # StarPilot applies its 1.22 here too, so live-learned params stay on the same gain
+    # scale as the offline baseline: torqued learns the *unmultiplied* factor and the
+    # controller multiplies on use, keeping the sanity window and the feedforward on one
+    # consistent normalization.
+    #
+    # NOTE: torqued's sanity window and restore key come from CP (torqued.py), which this
+    # design deliberately no longer mutates -- so both are on the upstream override.toml
+    # baseline regardless of tune. The window [1.75, 3.25] comfortably contains the plant's
+    # true value, so this costs nothing in practice; see the StarPilot friction floor
+    # handled by MIN_FRICTION_CEILING.
     if self.is_ioniq6_starpilot:
       latAccelFactor *= self._i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
     self.torque_params.latAccelFactor = latAccelFactor
