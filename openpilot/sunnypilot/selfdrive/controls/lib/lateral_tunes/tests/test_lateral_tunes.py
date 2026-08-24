@@ -77,6 +77,16 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     # and it is NOT the car's override.toml seed
     assert not np.isclose(ctl.torque_params.latAccelFactor, CP.lateralTuning.torque.latAccelFactor)
 
+  def test_live_torque_params_cannot_overwrite_the_starpilot_tune(self):
+    """torqued seeds from override.toml ([2.5, 2.5, 0.005]) and controlsd feeds that back
+    every frame, replacing the tune with the seed."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    before = (ctl.torque_params.latAccelFactor, ctl.torque_params.friction)
+    ctl.update_torque_parameters(2.5, 0.0, 0.005)
+    after = (ctl.torque_params.latAccelFactor, ctl.torque_params.friction)
+    assert before == after, f"live params overwrote the tune: {before} -> {after}"
+    assert np.isclose(ctl.torque_params.friction, 0.09)
+
   def test_live_torque_params_still_apply_on_upstream(self):
     ctl, _, _ = _make_controller(HONDA.HONDA_CIVIC, starpilot=False)
     ctl.update_torque_parameters(2.75, 0.1, 0.12)

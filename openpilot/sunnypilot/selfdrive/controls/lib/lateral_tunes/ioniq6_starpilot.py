@@ -92,7 +92,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
   # frictionCoefficientFiltered=0.005, i.e. torqued had published nothing but the seed
   # while its own raw estimate read 4.0 / 0.058. With friction at 0.005 the feedforward is
   # ~5% of intended, and at creep the friction term IS the entire feedforward.
-  use_live_torque_params = True
+  use_live_torque_params = False
 
   def init_controller(self, ctl, CP, CP_SP, CI) -> None:
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
