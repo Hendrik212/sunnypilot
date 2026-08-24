@@ -25,8 +25,7 @@ env:
 
 jobs:
   preview:
-    if: false # tmp disable due to GH API rate limiting flakiness
-    #if: github.repository == 'sunnypilot/sunnypilot'
+    if: github.repository == 'sunnypilot/sunnypilot'
     name: preview
     runs-on: ubuntu-latest
     timeout-minutes: 20
