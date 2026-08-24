@@ -76,7 +76,7 @@ def get_center_chatter_friction_jerk_deadzone(v_ego, setpoint, vehicle_deadzone=
 class Ioniq6StarPilotProfile(LateralTuneProfile):
   profile_id = "ioniq6_starpilot"
 
-  lat_delay_offset = 0.0  # see LAT_SMOOTH_SECONDS_OFFSET
+  lat_delay_offset = LAT_SMOOTH_SECONDS_OFFSET
 
   # StarPilot uses drive_helpers.MIN_SPEED (1.0) as the low-speed-factor denominator floor.
   # A lower floor makes the boost blow up at creep: at 0.3 m/s a floor of 0.3 gives
