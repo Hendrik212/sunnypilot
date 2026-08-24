@@ -212,19 +212,19 @@ class Controls(ControlsExt):
     # but it operates in a different space with different gains — carrying across
     # families would be nonsensical.
     #
-    # torque_params is only carried when both sides are in the SAME tune. The StarPilot
-    # tune sets its own baseline and scales latAccelFactor by 1.22 in __init__; copying
-    # the old struct wholesale across a tune change would overwrite that with the other
-    # tune's normalization — silently undoing the multiplier on upstream->StarPilot, and
-    # leaving a 1.22x-hot factor behind on StarPilot->upstream.
+    # torque_params is only carried when both sides are on the SAME lateral tune profile.
+    # A profile may set its own torque baseline on a different normalization; copying the
+    # old struct wholesale across a profile change would overwrite that with the other
+    # tune's normalization, silently undoing the conversion in one direction and leaving a
+    # converted-but-wrong factor behind in the other.
     #
     # pid.i lives in lateral-accel space but reaches the actuator as
     # torque = lat_accel / latAccelFactor (torque_from_lateral_accel_linear). Carrying it
     # unchanged across a tune change would therefore step the torque by the ratio of the
     # two factors (2.5 -> 3.66 is a ~32% drop). Rescale so the torque contribution is
-    # continuous across the swap; within one tune the factors match and this is a no-op.
+    # continuous across the swap; within one profile the factors match and this is a no-op.
     if hasattr(old_lac, "torque_params") and hasattr(self.LaC, "torque_params"):
-      same_tune = getattr(old_lac, "is_ioniq6_starpilot", False) == getattr(self.LaC, "is_ioniq6_starpilot", False)
+      same_tune = getattr(old_lac, "profile_id", None) == getattr(self.LaC, "profile_id", None)
       if same_tune:
         self.LaC.torque_params = old_lac.torque_params
         self.LaC.update_limits()
