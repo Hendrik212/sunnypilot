@@ -123,6 +123,17 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
           assert abs(torque) <= 1.0 + 1e-6, (car_name, v, active, torque)
           assert pid_log.active == active
 
+  def test_inactive_branch_resets_pid_and_tracks_steering_pressed(self):
+    ctl, VM, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    ctl.pid.i = 0.5
+    CS = car.CarState.new_message()
+    CS.vEgo = 0.4
+    CS.steeringPressed = True
+    pose = Pose.from_device_motion(generate_deviceMotion().deviceMotion)
+    ctl.update(False, CS, VM, log.VehicleParameters.new_message(), False, 0.0, pose, False, 0.4585)
+    assert ctl.pid.i == 0.0
+    assert ctl.profile.prev_steering_pressed is True
+
   def test_steer_limits_follow_the_tune_flag(self):
     CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
     CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
@@ -140,3 +151,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     assert (tuned_slow.STEER_DELTA_UP, tuned_slow.STEER_DELTA_DOWN) == (10, 8)
     assert (tuned_fast.STEER_DELTA_UP, tuned_fast.STEER_DELTA_DOWN) == (2, 3)
 
+  def test_ioniq6_steers_at_standstill(self):
+    CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
+    CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
+    assert CP.steerAtStandstill

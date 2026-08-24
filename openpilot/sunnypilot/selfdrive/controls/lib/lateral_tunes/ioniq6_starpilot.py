@@ -145,8 +145,12 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     self.directional_taper_filter.x = 1.0
     # StarPilot primes previous_measurement with the live measurement, not zero, and resets
     # the PID every inactive frame so a re-engage never starts from a wound integrator.
-    ctl.previous_measurement = 0.0
+    ctl.previous_measurement = measurement
     ctl.measurement_rate_filter.x = 0.0
+    ctl.pid.reset()
+    # Tracked every frame, active or not, so a grab-and-release while inactive still arms
+    # the steering-release integrator decay on the next active frame.
+    self.prev_steering_pressed = CS.steeringPressed
 
   def update(self, ctl, active, CS, VM, params, steer_limited_by_safety,
              desired_curvature, measured_curvature, measurement, calibrated_pose,
