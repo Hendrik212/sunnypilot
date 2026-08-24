@@ -23,6 +23,7 @@ from openpilot.common.mock.generators import generate_deviceMotion
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 import LatControlTorque
 from openpilot.sunnypilot.selfdrive.controls.lib import latcontrol_ioniq6_tune as i6
+from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_starpilot as i6p
 
 
 def _make_controller(car_name, starpilot: bool):
@@ -92,6 +93,22 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     ctl.update_torque_parameters(2.75, 0.1, 0.12)
     assert np.isclose(ctl.torque_params.latAccelFactor, 2.75)
     assert np.isclose(ctl.torque_params.friction, 0.12)
+
+  def test_low_speed_factor_floor_matches_starpilot(self):
+    from openpilot.selfdrive.controls.lib.drive_helpers import MIN_SPEED
+    assert np.isclose(i6p.Ioniq6StarPilotProfile.low_speed_factor_min_speed, MIN_SPEED)
+
+    def lsf(v, floor):
+      return (np.interp(v, i6p.LOW_SPEED_X, i6p.LOW_SPEED_Y) / max(v, floor)) ** 2
+
+    assert np.isclose(lsf(0.3, MIN_SPEED), 142.92, atol=0.01)
+    # Below 1 m/s the two floors diverge as (MIN_SPEED / max(v, 0.3)) ** 2: 11.1x at
+    # 0.3 m/s and 4.0x at 0.5 m/s. Lateral is live from 0.3 m/s up (the standstill gate),
+    # so that whole band is reachable in stop-and-go.
+    for v, expected in ((0.3, 11.11), (0.5, 4.0), (0.8, 1.5625)):
+      assert np.isclose(lsf(v, 0.3) / lsf(v, MIN_SPEED), expected, rtol=1e-3), v
+    # at and above MIN_SPEED the floors are identical
+    assert np.isclose(lsf(1.5, 0.3), lsf(1.5, MIN_SPEED))
 
   def test_both_paths_run_active_and_inactive(self):
     for car_name, sp in ((HONDA.HONDA_CIVIC, False), (HYUNDAI.HYUNDAI_IONIQ_6, True)):

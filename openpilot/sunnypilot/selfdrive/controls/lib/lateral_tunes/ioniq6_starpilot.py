@@ -20,6 +20,7 @@ from opendbc.car.lateral import get_friction
 from opendbc.sunnypilot.car.hyundai.values import IONIQ6_STARPILOT_TORQUE
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.selfdrive.controls.lib.drive_helpers import MIN_SPEED
 from openpilot.sunnypilot.selfdrive.controls.lib import latcontrol_ioniq6_tune as i6
 from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.base import LateralTuneProfile
 
@@ -82,7 +83,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
   # (12/0.3)^2 = 1600 against StarPilot's (12/1.0)^2 = 144, i.e. an effective proportional
   # gain 3.6x StarPilot's in exactly the 0.3-1.0 m/s band where lateral is live in
   # stop-and-go.
-  low_speed_factor_min_speed = MIN_LATERAL_CONTROL_SPEED
+  low_speed_factor_min_speed = MIN_SPEED
 
   # This tune ships a fixed torque baseline (3.0 / 0.09). torqued seeds its filter from
   # CP.lateralTuning.torque -- the car's override.toml entry, [2.5, 2.5, 0.005] -- and
