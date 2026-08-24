@@ -203,11 +203,11 @@ class LatControlTorque(LatControl):
 
       if self.is_ioniq6_starpilot:
         output_torque = self._update_ioniq6(active, CS, VM, params, steer_limited_by_safety,
-                                            desired_curvature, measured_curvature, measurement,
+                                            desired_curvature, measured_curvature, measurement, calibrated_pose,
                                             pid_log, lat_delay)
       else:
         output_torque = self._update_upstream(active, CS, VM, params, steer_limited_by_safety,
-                                              desired_curvature, measured_curvature, measurement,
+                                              desired_curvature, measured_curvature, measurement, calibrated_pose,
                                               pid_log, lat_delay, curvature_limited)
 
       pid_log.active = True
@@ -222,7 +222,7 @@ class LatControlTorque(LatControl):
     return -output_torque, 0.0, pid_log
 
   def _update_upstream(self, active, CS, VM, params, steer_limited_by_safety,
-                       desired_curvature, measured_curvature, measurement,
+                       desired_curvature, measured_curvature, measurement, calibrated_pose,
                        pid_log, lat_delay, curvature_limited):
     """The original v2 path, byte-for-byte. Only the pid_log fields that the upstream
     controller set are filled here; the caller writes p/i/d/f/output/saturated."""
@@ -267,7 +267,7 @@ class LatControlTorque(LatControl):
     return output_torque
 
   def _update_ioniq6(self, active, CS, VM, params, steer_limited_by_safety,
-                     desired_curvature, measured_curvature, measurement,
+                     desired_curvature, measured_curvature, measurement, calibrated_pose,
                      pid_log, lat_delay):
     """StarPilot Ioniq 6 shaping, ported from StarPilot's latcontrol_torque.py (2023 path).
     Runs in lateral-acceleration space, same as upstream v2, so the multiplicative ff
