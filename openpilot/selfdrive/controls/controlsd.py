@@ -24,6 +24,7 @@ from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
 from openpilot.sunnypilot.selfdrive.controls.controlsd_ext import ControlsExt
+from openpilot.sunnypilot.selfdrive.controls.lib.turn_intent import TurnIntentHold
 
 State = log.SelfdriveState.OpenpilotState
 LaneChangeState = log.LaneChangeState
@@ -56,6 +57,9 @@ class Controls(ControlsExt):
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
+
+    # Low-speed turn-intent curvature hold. Blinker-gated: a no-op without a blinker.
+    self.turn_intent = TurnIntentHold()
 
     self.LoC = LongControl(self.CP, self.CP_SP)
     self.VM = VehicleModel(self.CP)
@@ -151,6 +155,11 @@ class Controls(ControlsExt):
       new_desired_curvature = self.sm['lateralManeuverPlan'].desiredCurvature if CC.latActive else self.curvature
     else:
       new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
+    # Hold a curvature floor through a signalled low-speed turn, where the model's
+    # time-based plan collapses as the car slows (see lib/turn_intent/). Applied to the raw
+    # model command, before clip_curvature, exactly as upstream StarPilot does.
+    new_desired_curvature = self.turn_intent.update(new_desired_curvature, CS, model_v2,
+                                                    CC.latActive, self.curvature)
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 
