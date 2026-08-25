@@ -247,16 +247,13 @@ def _applied_torque_params(sm):
 
   lateralTorqueParameters.*Filtered is torqued's ESTIMATE, which a lateral tune profile may
   decline -- on such a tune the estimate is decoupled from control and showing it is
-  misleading. controlsState publishes what was really applied; zero means the running
-  controller does not publish it, so fall back to the estimate.
+  misleading. controlsd publishes what was really applied on lateralTuneStateSP; inactive
+  means the running controller has no torque params, so fall back to the estimate.
   """
-  lac = sm['controlsState'].lateralControlState
-  if lac.which() != 'torqueState':
+  state = sm['lateralTuneStateSP']
+  if not state.active or state.latAccelFactor <= 0.0:
     return None
-  ts = lac.torqueState
-  if not ts.active or ts.latAccelFactor <= 0.0:
-    return None
-  return ts
+  return state
 
 
 class FrictionCoefficientElement:

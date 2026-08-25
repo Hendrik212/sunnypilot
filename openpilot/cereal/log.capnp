@@ -915,12 +915,6 @@ struct ControlsState @0x97ff69c53601abf1 {
     desiredLateralAccel @10 :Float32;
     desiredLateralJerk @11 :Float32;
     version @12 :Int32;
-    # The torque params the controller ACTUALLY applied this frame. Not the same as
-    # lateralTorqueParameters.*Filtered: that is torqued's estimate, which a lateral tune
-    # profile may decline (see sunnypilot/.../lateral_tunes/). Zero means "not published
-    # by this controller" -- consumers fall back to the torqued values.
-    latAccelFactor @13 :Float32;
-    friction @14 :Float32;
    }
 
   struct LateralAngleState {
@@ -2665,7 +2659,7 @@ struct Event {
     # upstream added chestnutState @152; mqtt follows.
     mqttPubQueue @153 :MqttPubQueue;
     mqttRecvQueue @154 :MqttRecvQueue;
-    customReserved10 @136 :Custom.CustomReserved10;
+    lateralTuneStateSP @136 :Custom.LateralTuneStateSP;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
     customReserved13 @139 :Custom.CustomReserved13;

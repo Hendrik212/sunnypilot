@@ -468,7 +468,16 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   }
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+# The torque params the lateral controller ACTUALLY applied. Distinct from
+# lateralTorqueParameters.*Filtered, which is torqued's ESTIMATE: a lateral tune profile
+# may decline live params (see sunnypilot/selfdrive/controls/lib/lateral_tunes/), in which
+# case the estimate is decoupled from control and displaying it is misleading.
+struct LateralTuneStateSP @0xcb9fd56c7057593a {
+  active @0 :Bool;
+  latAccelFactor @1 :Float32;
+  friction @2 :Float32;
+  latAccelOffset @3 :Float32;
+  profileId @4 :Text;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

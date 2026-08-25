@@ -33,7 +33,7 @@ class ControlsExt(ModelStateBase):
     cloudlog.info("controlsd_ext got CarParamsSP")
 
     self.sm_services_ext = ['radarState', 'selfdriveStateSP']
-    self.pm_services_ext = ['carControlSP']
+    self.pm_services_ext = ['carControlSP', 'lateralTuneStateSP']
 
   def initialize_lateral_control(self, lac, CI, dt):
     enforce_torque_control = self.params.get_bool("EnforceTorqueControl")
@@ -117,6 +117,28 @@ class ControlsExt(ModelStateBase):
 
     pm.send('carControlSP', cc_sp_send)
 
+  @staticmethod
+  def publish_lateral_tune_state(LaC, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
+    """Publish the torque params the lateral controller ACTUALLY applied.
+
+    Distinct from lateralTorqueParameters, which carries torqued's ESTIMATE: a lateral tune
+    profile may decline live params, in which case the estimate is decoupled from control
+    and displaying it is misleading. Controllers that do not expose torque_params (angle,
+    curvature, PID) publish active=False and consumers fall back to the estimate.
+    """
+    msg = messaging.new_message('lateralTuneStateSP')
+    msg.valid = sm['carState'].canValid
+    state = msg.lateralTuneStateSP
+    torque_params = getattr(LaC, 'torque_params', None)
+    if torque_params is not None:
+      state.active = True
+      state.latAccelFactor = float(torque_params.latAccelFactor)
+      state.friction = float(torque_params.friction)
+      state.latAccelOffset = float(torque_params.latAccelOffset)
+      state.profileId = str(getattr(LaC, 'profile_id', 'upstream'))
+    pm.send('lateralTuneStateSP', msg)
+
   def run_ext(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
     CC_SP = self.state_control_ext(sm)
     self.publish_ext(CC_SP, sm, pm)
+    self.publish_lateral_tune_state(self.LaC, sm, pm)
