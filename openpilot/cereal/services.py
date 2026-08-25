@@ -90,6 +90,11 @@ _services: dict[str, tuple] = {
   "carParamsSP": (True, 0.02, 1),
   "carControlSP": (True, 100., 10),
   "carStateSP": (True, 100., 10),
+  # The torque params the lateral controller actually applied (distinct from
+  # lateralTorqueParameters, which is torqued's estimate). Published by controlsd_ext at the
+  # run_ext rate; MUST stay registered -- SubMaster.__init__ hard-KeyErrors on an unregistered
+  # service, which crashed the UI to a static logo at boot (2026-08-25).
+  "lateralTuneStateSP": (True, 100., 10),
   "liveMapDataSP": (True, 1., 1),
   "modelDataV2SP": (True, 20., None, QueueSize.BIG),
   "liveLocationKalman": (True, 20.),
