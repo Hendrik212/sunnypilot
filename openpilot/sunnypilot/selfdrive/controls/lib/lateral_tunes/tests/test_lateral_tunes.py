@@ -5,6 +5,8 @@ Covers the two things the refactor must guarantee:
   * the upstream path selects NO profile and is untouched;
   * the StarPilot profile owns its baseline and refuses torqued's live params.
 """
+from pathlib import Path
+
 import numpy as np
 
 from opendbc.car.car_helpers import interfaces
@@ -146,10 +148,53 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
     tuned_slow = CarControllerParams(CP, 10.0, CP_SP=CP_SP)
     tuned_fast = CarControllerParams(CP, 25.0, CP_SP=CP_SP)
-    assert tuned_slow.STEER_MAX == 409
+    assert tuned_slow.STEER_MAX == 500 and tuned_fast.STEER_MAX == 409  # speed-scheduled
     assert tuned_slow.STEER_DRIVER_ALLOWANCE == 75 and tuned_slow.STEER_THRESHOLD == 100
     assert (tuned_slow.STEER_DELTA_UP, tuned_slow.STEER_DELTA_DOWN) == (10, 8)
     assert (tuned_fast.STEER_DELTA_UP, tuned_fast.STEER_DELTA_DOWN) == (2, 3)
+
+  def test_steer_max_schedule_and_panda_envelope(self):
+    """The car layer schedules STEER_MAX inside the panda envelope. Panda must never block
+    what the car layer can request, or commands are silently clipped (see
+    UPSTREAM_MERGE_GUIDE: values.py and hyundai_canfd.h must stay in sync)."""
+    import re
+    from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
+
+    CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
+    CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
+
+    # panda's compiled ceiling, read from the safety source itself
+    safety = (Path(__file__).parents[6] / 'opendbc_repo' / 'opendbc' / 'safety' /
+              'modes' / 'hyundai_canfd.h').read_text()
+    m = re.search(r'\.max_torque\s*=\s*(\d+)', safety)
+    assert m, "could not read max_torque from hyundai_canfd.h"
+    panda_max = int(m.group(1))
+
+    worst = 0
+    for v in np.arange(0.0, 40.0, 0.25):
+      steer_max = CarControllerParams(CP, float(v), CP_SP=CP_SP).STEER_MAX
+      worst = max(worst, steer_max)
+      assert steer_max <= panda_max, f"car layer asks {steer_max} at {v} m/s, panda allows {panda_max}"
+    assert worst == panda_max, f"panda envelope {panda_max} does not match peak request {worst}"
+
+    # schedule shape: full authority through the measured saturation band, back down above it
+    assert CarControllerParams(CP, 0.0, CP_SP=CP_SP).STEER_MAX == 500
+    assert CarControllerParams(CP, 15.0, CP_SP=CP_SP).STEER_MAX == 500
+    assert CarControllerParams(CP, 17.0, CP_SP=CP_SP).STEER_MAX == 409
+    assert CarControllerParams(CP, 30.0, CP_SP=CP_SP).STEER_MAX == 409
+    # and it completes before the rate ramp begins, so the two never move at once
+    assert ll.CANFD_STEER_MAX_SPEED_BP[1] <= ll.CANFD_STEER_RATE_SPEED_BP[0]
+
+  def test_upstream_canfd_limits_untouched_by_the_schedule(self):
+    CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
+    CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP.flags &= ~HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
+    for v in (0.0, 10.0, 16.0, 30.0):
+      p = CarControllerParams(CP, v, CP_SP=CP_SP)
+      assert (p.STEER_MAX, p.STEER_DELTA_UP, p.STEER_DELTA_DOWN) == (270, 2, 3), v
 
   def test_ioniq6_steers_at_standstill(self):
     CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
