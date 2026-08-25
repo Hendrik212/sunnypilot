@@ -149,6 +149,10 @@ class LatControlTorque(LatControl):
       pid_log.d = float(self.pid.d)
       pid_log.f = float(self.pid.f)
       pid_log.output = float(-output_torque) # TODO: log lat accel?
+      # What we actually applied, so the UI shows the live tune rather than torqued's
+      # estimate (which a profile may decline).
+      pid_log.latAccelFactor = float(self.torque_params.latAccelFactor)
+      pid_log.friction = float(self.torque_params.friction)
       pid_log.saturated = bool(self._check_saturation(self.steer_max - abs(output_torque) < 1e-3, CS, steer_limited_by_safety, curvature_limited))
 
     # TODO left is positive in this convention

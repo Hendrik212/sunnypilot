@@ -119,6 +119,10 @@ class LatControlTorque(LatControl):
       pid_log.d = float(self.pid.d)
       pid_log.f = float(self.pid.f)
       pid_log.output = float(-output_torque) # TODO: log lat accel?
+      # What we actually applied, so the UI shows the live tune rather than torqued's
+      # estimate (which a profile may decline).
+      pid_log.latAccelFactor = float(self.torque_params.latAccelFactor)
+      pid_log.friction = float(self.torque_params.friction)
       pid_log.actualLateralAccel = float(measurement)
       pid_log.desiredLateralAccel = float(setpoint)
       pid_log.desiredLateralJerk = float(desired_lateral_jerk)

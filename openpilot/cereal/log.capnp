@@ -915,6 +915,12 @@ struct ControlsState @0x97ff69c53601abf1 {
     desiredLateralAccel @10 :Float32;
     desiredLateralJerk @11 :Float32;
     version @12 :Int32;
+    # The torque params the controller ACTUALLY applied this frame. Not the same as
+    # lateralTorqueParameters.*Filtered: that is torqued's estimate, which a lateral tune
+    # profile may decline (see sunnypilot/.../lateral_tunes/). Zero means "not published
+    # by this controller" -- consumers fall back to the torqued values.
+    latAccelFactor @13 :Float32;
+    friction @14 :Float32;
    }
 
   struct LateralAngleState {

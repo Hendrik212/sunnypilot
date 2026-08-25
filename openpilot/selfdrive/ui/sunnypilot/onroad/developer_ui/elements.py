@@ -242,6 +242,23 @@ class LeadSpeedElement(LeadInfoElement):
     return UiElement(value, "L.S.", self.unit, color)
 
 
+def _applied_torque_params(sm):
+  """The torque params the lateral controller actually applied, or None.
+
+  lateralTorqueParameters.*Filtered is torqued's ESTIMATE, which a lateral tune profile may
+  decline -- on such a tune the estimate is decoupled from control and showing it is
+  misleading. controlsState publishes what was really applied; zero means the running
+  controller does not publish it, so fall back to the estimate.
+  """
+  lac = sm['controlsState'].lateralControlState
+  if lac.which() != 'torqueState':
+    return None
+  ts = lac.torqueState
+  if not ts.active or ts.latAccelFactor <= 0.0:
+    return None
+  return ts
+
+
 class FrictionCoefficientElement:
   def __init__(self):
     self.unit = ""
@@ -249,6 +266,10 @@ class FrictionCoefficientElement:
   def update(self, sm, is_metric: bool) -> UiElement:
     if ui_state.enforce_torque_control and ui_state.custom_torque_params and ui_state.torque_override_enabled:
       return UiElement(f"{ui_state.torque_override_friction:.3f}", "FRIC.", self.unit, rl.WHITE)
+
+    applied = _applied_torque_params(sm)
+    if applied is not None:
+      return UiElement(f"{applied.friction:.3f}", "FRIC.", self.unit, rl.WHITE)
 
     ltp = sm['lateralTorqueParameters']
     value = f"{ltp.frictionCoefficientFiltered:.3f}"
@@ -263,6 +284,10 @@ class LatAccelFactorElement:
   def update(self, sm, is_metric: bool) -> UiElement:
     if ui_state.enforce_torque_control and ui_state.custom_torque_params and ui_state.torque_override_enabled:
       return UiElement(f"{ui_state.torque_override_lat_accel_factor:.3f}", "L.A.F.", self.unit, rl.WHITE)
+
+    applied = _applied_torque_params(sm)
+    if applied is not None:
+      return UiElement(f"{applied.latAccelFactor:.3f}", "L.A.F.", self.unit, rl.WHITE)
 
     ltp = sm['lateralTorqueParameters']
     value = f"{ltp.latAccelFactorFiltered:.3f}"
