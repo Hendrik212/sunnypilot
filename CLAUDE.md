@@ -18,6 +18,10 @@ on 2026-08-24 (see "Post-mortem" below).
 4. **`git merge` can silently drop a fork-local fix** when upstream touches the same file.
    After merging, re-check the specific lines your fork fixed, not just that the merge
    was conflict-free.
+5. **On this Linux box, build and boot until UI.** `./scripts/verify_host_boot.sh`
+   A cereal/schema/import crash dies here in the first seconds — the same class of bug
+   as the static comma logo on device. Offroad only; it does not replace an engaged drive.
+   Do this before pushing anything the device will pull.
 
 ## Route/log analysis stack
 
