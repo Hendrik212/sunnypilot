@@ -39,6 +39,15 @@ FF_ROLL_OFFSET_FADE_V = [0.0, 1.0]
 LOW_SPEED_X = [0, 10, 20, 30]
 LOW_SPEED_Y = [12, 10.5, 8, 5]
 
+# StarPilot latcontrol_torque.py PID. v2 constructs the controller with KP=1.0 / KI=0.3;
+# this profile replaces those with the gains the Ioniq 6 constants were calibrated against.
+# Below 15 m/s the interp table is identical; the last knot is the highway divergence
+# (0.6 vs 1.0 at 30 m/s).
+KP = 0.6
+KI = 0.35
+INTERP_SPEEDS = [1, 1.5, 2.0, 3.0, 5, 7.5, 10, 15, 30]
+KP_INTERP = [250, 120, 65, 30, 11.5, 5.5, 3.5, 2.0, KP]
+
 # Small planner jerk changes around the lane center can repeatedly re-trigger the friction
 # compensation term. Keep this correction out of the center band while leaving actual
 # turn-in and unwind commands unchanged.
@@ -107,6 +116,8 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     ctl.torque_params.latAccelFactor = (IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] *
                                         i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT)
     ctl.torque_params.friction = IONIQ6_STARPILOT_TORQUE['FRICTION']
+    ctl.pid._k_p = [list(INTERP_SPEEDS), list(KP_INTERP)]
+    ctl.pid._k_i = ([0], [KI])
     ctl.update_limits()
 
     # StarPilot stores curvature in the request buffer (scales by v^2 on read); upstream v2

@@ -1,9 +1,10 @@
 """
 Regression tests for the lateral tune profile layer.
 
-Covers the two things the refactor must guarantee:
+Covers:
   * the upstream path selects NO profile and is untouched;
-  * the StarPilot profile owns its baseline and refuses torqued's live params.
+  * the StarPilot profile owns its baseline, PID (KP=0.6/KI=0.35), and refuses torqued;
+  * StarPilot CAN envelope is 409 flat and matches panda max_torque.
 """
 from pathlib import Path
 
@@ -148,7 +149,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
     tuned_slow = CarControllerParams(CP, 10.0, CP_SP=CP_SP)
     tuned_fast = CarControllerParams(CP, 25.0, CP_SP=CP_SP)
-    assert tuned_slow.STEER_MAX == 500 and tuned_fast.STEER_MAX == 409  # speed-scheduled
+    assert tuned_slow.STEER_MAX == 409 and tuned_fast.STEER_MAX == 409
     assert tuned_slow.STEER_DRIVER_ALLOWANCE == 75 and tuned_slow.STEER_THRESHOLD == 100
     assert (tuned_slow.STEER_DELTA_UP, tuned_slow.STEER_DELTA_DOWN) == (10, 8)
     assert (tuned_fast.STEER_DELTA_UP, tuned_fast.STEER_DELTA_DOWN) == (2, 3)
@@ -166,7 +167,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
 
     # panda's compiled ceiling, read from the safety source itself
-    safety = (Path(__file__).parents[6] / 'opendbc_repo' / 'opendbc' / 'safety' /
+    safety = (Path(__file__).resolve().parents[7] / 'opendbc_repo' / 'opendbc' / 'safety' /
               'modes' / 'hyundai_canfd.h').read_text()
     m = re.search(r'\.max_torque\s*=\s*(\d+)', safety)
     assert m, "could not read max_torque from hyundai_canfd.h"
@@ -179,13 +180,10 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
       assert steer_max <= panda_max, f"car layer asks {steer_max} at {v} m/s, panda allows {panda_max}"
     assert worst == panda_max, f"panda envelope {panda_max} does not match peak request {worst}"
 
-    # schedule shape: full authority through the measured saturation band, back down above it
-    assert CarControllerParams(CP, 0.0, CP_SP=CP_SP).STEER_MAX == 500
-    assert CarControllerParams(CP, 15.0, CP_SP=CP_SP).STEER_MAX == 500
-    assert CarControllerParams(CP, 17.0, CP_SP=CP_SP).STEER_MAX == 409
-    assert CarControllerParams(CP, 30.0, CP_SP=CP_SP).STEER_MAX == 409
-    # and it completes before the rate ramp begins, so the two never move at once
-    assert ll.CANFD_STEER_MAX_SPEED_BP[1] <= ll.CANFD_STEER_RATE_SPEED_BP[0]
+    # StarPilot envelope is 409 at every speed (not a low-speed 500 gain bump)
+    for v in (0.0, 10.0, 15.0, 17.0, 30.0):
+      assert CarControllerParams(CP, v, CP_SP=CP_SP).STEER_MAX == 409, v
+    assert ll.STARPILOT_STEER_MAX == panda_max
 
   def test_upstream_canfd_limits_untouched_by_the_schedule(self):
     CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
@@ -195,6 +193,25 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     for v in (0.0, 10.0, 16.0, 30.0):
       p = CarControllerParams(CP, v, CP_SP=CP_SP)
       assert (p.STEER_MAX, p.STEER_DELTA_UP, p.STEER_DELTA_DOWN) == (270, 2, 3), v
+
+  def test_starpilot_pid_gains_match_starpilot(self):
+    """v2 constructs KP=1.0 / KI=0.3; the profile must overwrite those with StarPilot's
+    0.6 / 0.35. Below 15 m/s the interp table is identical, so this only diverges on
+    the highway knot -- which is exactly where an un-overwritten v2 PID is 67% hot."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    assert np.isclose(np.interp(15.0, ctl.pid._k_p[0], ctl.pid._k_p[1]), 2.0)
+    assert np.isclose(np.interp(30.0, ctl.pid._k_p[0], ctl.pid._k_p[1]), i6p.KP)
+    assert np.isclose(ctl.pid._k_i[1][0], i6p.KI)
+    assert np.isclose(i6p.KP, 0.6) and np.isclose(i6p.KI, 0.35)
+
+    # upstream v2 path is untouched
+    up, _, _ = _make_controller(HONDA.HONDA_CIVIC, starpilot=False)
+    assert np.isclose(np.interp(30.0, up.pid._k_p[0], up.pid._k_p[1]), 1.0)
+    assert np.isclose(up.pid._k_i[1][0], 0.3)
+
+    ioniq_up, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=False)
+    assert ioniq_up.profile is None
+    assert np.isclose(np.interp(30.0, ioniq_up.pid._k_p[0], ioniq_up.pid._k_p[1]), 1.0)
 
   def test_ioniq6_steers_at_standstill(self):
     CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
