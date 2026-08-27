@@ -4,7 +4,8 @@ Regression tests for the lateral tune profile layer.
 Covers:
   * the upstream path selects NO profile and is untouched;
   * the StarPilot profile owns its baseline, PID (KP=0.6/KI=0.35), and refuses torqued;
-  * StarPilot CAN envelope is 409 flat and matches panda max_torque.
+  * StarPilot CAN envelope is speed-scheduled (409 creep / 600 mid / 409 highway)
+    and the peak matches panda max_torque; unsaturated CAN/m/s^2 stays 409/3.66.
 """
 from pathlib import Path
 
@@ -147,9 +148,11 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     assert stock.STEER_MAX == 270 and stock.STEER_DELTA_UP == 2
 
     CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
+    tuned_creep = CarControllerParams(CP, 2.0, CP_SP=CP_SP)
     tuned_slow = CarControllerParams(CP, 10.0, CP_SP=CP_SP)
     tuned_fast = CarControllerParams(CP, 25.0, CP_SP=CP_SP)
-    assert tuned_slow.STEER_MAX == 409 and tuned_fast.STEER_MAX == 409
+    assert tuned_creep.STEER_MAX == 409  # 0-10 km/h stays at the StarPilot rail
+    assert tuned_slow.STEER_MAX == 600 and tuned_fast.STEER_MAX == 409
     assert tuned_slow.STEER_DRIVER_ALLOWANCE == 75 and tuned_slow.STEER_THRESHOLD == 100
     assert (tuned_slow.STEER_DELTA_UP, tuned_slow.STEER_DELTA_DOWN) == (10, 8)
     assert (tuned_fast.STEER_DELTA_UP, tuned_fast.STEER_DELTA_DOWN) == (2, 3)
@@ -180,10 +183,15 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
       assert steer_max <= panda_max, f"car layer asks {steer_max} at {v} m/s, panda allows {panda_max}"
     assert worst == panda_max, f"panda envelope {panda_max} does not match peak request {worst}"
 
-    # StarPilot envelope is 409 at every speed (not a low-speed 500 gain bump)
-    for v in (0.0, 10.0, 15.0, 17.0, 30.0):
-      assert CarControllerParams(CP, v, CP_SP=CP_SP).STEER_MAX == 409, v
+    assert CarControllerParams(CP, 0.0, CP_SP=CP_SP).STEER_MAX == 409
+    assert CarControllerParams(CP, 2.8, CP_SP=CP_SP).STEER_MAX == 409
+    assert CarControllerParams(CP, 4.0, CP_SP=CP_SP).STEER_MAX == 600
+    assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_MAX == 600
+    assert CarControllerParams(CP, 15.0, CP_SP=CP_SP).STEER_MAX == 600
+    assert CarControllerParams(CP, 17.0, CP_SP=CP_SP).STEER_MAX == 409
+    assert CarControllerParams(CP, 30.0, CP_SP=CP_SP).STEER_MAX == 409
     assert ll.STARPILOT_STEER_MAX == panda_max
+    assert ll.CANFD_STEER_MAX_SPEED_BP[-1] <= ll.CANFD_STEER_RATE_SPEED_BP[0]
 
   def test_upstream_canfd_limits_untouched_by_the_schedule(self):
     CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
@@ -212,6 +220,16 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     ioniq_up, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=False)
     assert ioniq_up.profile is None
     assert np.isclose(np.interp(30.0, ioniq_up.pid._k_p[0], ioniq_up.pid._k_p[1]), 1.0)
+
+  def test_lat_accel_factor_scales_with_steer_max(self):
+    """Unsaturated CAN/m/s^2 must stay 409/3.66 as STEER_MAX changes."""
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed, steer_max_for_speed
+    base = IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] * i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
+    assert np.isclose(base, 3.66)
+    for v in (0.0, 2.8, 4.0, 10.0, 15.0, 17.0, 30.0):
+      sm = steer_max_for_speed(v)
+      laf = lat_accel_factor_for_speed(v, base)
+      assert np.isclose(sm / laf, 409 / 3.66, rtol=1e-3), (v, sm, laf)
 
   def test_ioniq6_steers_at_standstill(self):
     CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]

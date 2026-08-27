@@ -17,6 +17,7 @@ from collections import deque
 import numpy as np
 
 from opendbc.car.lateral import get_friction
+from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed
 from opendbc.sunnypilot.car.hyundai.values import IONIQ6_STARPILOT_TORQUE
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -104,21 +105,26 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
   # ~5% of intended, and at creep the friction term IS the entire feedforward.
   use_live_torque_params = False
 
+  def _apply_speed_scheduled_factor(self, ctl, v_ego: float) -> None:
+    # Scale latAccelFactor with STEER_MAX so unsaturated CAN/m/s^2 stays 409/3.66.
+    # Without this, raising STEER_MAX is a gain change (the 500-at-3.66 mistake).
+    base = (IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] *
+            i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT)
+    laf = lat_accel_factor_for_speed(v_ego, base)
+    if abs(ctl.torque_params.latAccelFactor - laf) > 1e-4:
+      ctl.torque_params.latAccelFactor = laf
+      ctl.update_limits()
+
   def init_controller(self, ctl, CP, CP_SP, CI) -> None:
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
     # written once at fingerprint time, so on a live switch from upstream it still holds the
     # UPSTREAM factor -- multiplying that by 1.22 would give a gain that is neither tune.
     # Setting the baseline here makes the switch stateless.
-    #
-    # The 1.22 multiplier is the dominant gain term and easy to miss: StarPilot's effective
-    # latAccelFactor is 3.0 x 1.22 = 3.66, giving 409/3.66 = 112 CAN per m/s^2 vs a measured
-    # plant-neutral ~105. Without it the tune lands 22% hot.
-    ctl.torque_params.latAccelFactor = (IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] *
-                                        i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT)
     ctl.torque_params.friction = IONIQ6_STARPILOT_TORQUE['FRICTION']
+    ctl.torque_params.latAccelFactor = 0.0  # force the first schedule write
+    self._apply_speed_scheduled_factor(ctl, 0.0)
     ctl.pid._k_p = [list(INTERP_SPEEDS), list(KP_INTERP)]
     ctl.pid._k_i = ([0], [KI])
-    ctl.update_limits()
 
     # StarPilot stores curvature in the request buffer (scales by v^2 on read); upstream v2
     # stored lateral accel directly. Storing lateral accel makes the delayed request lag the
@@ -162,10 +168,13 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     # Tracked every frame, active or not, so a grab-and-release while inactive still arms
     # the steering-release integrator decay on the next active frame.
     self.prev_steering_pressed = CS.steeringPressed
+    self._apply_speed_scheduled_factor(ctl, CS.vEgo)
 
   def update(self, ctl, active, CS, VM, params, steer_limited_by_safety,
              desired_curvature, measured_curvature, measurement, calibrated_pose,
              pid_log, lat_delay) -> float:
+    self._apply_speed_scheduled_factor(ctl, CS.vEgo)
+
     # Reproduce StarPilot's lat_delay (see LAT_SMOOTH_SECONDS_OFFSET).
     lat_delay = lat_delay + self.lat_delay_offset
 
