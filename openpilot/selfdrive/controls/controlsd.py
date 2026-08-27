@@ -24,7 +24,7 @@ from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
 from openpilot.sunnypilot.selfdrive.controls.controlsd_ext import ControlsExt
-from openpilot.sunnypilot.selfdrive.controls.lib.turn_intent import TurnIntentHold
+from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.turn_intent import TurnIntentHold
 
 State = log.SelfdriveState.OpenpilotState
 LaneChangeState = log.LaneChangeState
@@ -58,8 +58,12 @@ class Controls(ControlsExt):
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
 
-    # Low-speed turn-intent curvature hold. Blinker-gated: a no-op without a blinker.
+    # Low-speed turn-intent curvature hold. Gated on the lateral tune profile opting in
+    # (uses_turn_intent_hold) and blinker-gated inside: a no-op without a blinker.
+    # Constructed unconditionally so a live tune switch onto a profile that wants it does
+    # not have to build state mid-drive.
     self.turn_intent = TurnIntentHold()
+    self.turn_intent_was_active = False
 
     self.LoC = LongControl(self.CP, self.CP_SP)
     self.VM = VehicleModel(self.CP)
@@ -156,10 +160,21 @@ class Controls(ControlsExt):
     else:
       new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
     # Hold a curvature floor through a signalled low-speed turn, where the model's
-    # time-based plan collapses as the car slows (see lib/turn_intent/). Applied to the raw
-    # model command, before clip_curvature, exactly as upstream StarPilot does.
-    new_desired_curvature = self.turn_intent.update(new_desired_curvature, CS, model_v2,
-                                                    CC.latActive, self.curvature)
+    # time-based plan collapses as the car slows (see lib/lateral_tunes/turn_intent/).
+    # Applied to the raw model command, before clip_curvature, exactly as upstream
+    # StarPilot does -- but only for a lateral tune profile that opts in, so the upstream
+    # command path is untouched. Read off the live controller so the v0/v2 hot-swap
+    # (check_lateral_control_version) carries the gate with it.
+    lat_profile = getattr(self.LaC, "profile", None)
+    if getattr(lat_profile, "uses_turn_intent_hold", False):
+      new_desired_curvature = self.turn_intent.update(new_desired_curvature, CS, model_v2,
+                                                      CC.latActive, self.curvature)
+    elif self.turn_intent_was_active:
+      # Tune switched away mid-hold: drop the held state rather than leaving it wound up
+      # for whenever the driver switches back. reset() is safe here precisely because the
+      # hold is no longer being applied (see the note in turn_intent/__init__.py).
+      self.turn_intent.reset()
+    self.turn_intent_was_active = getattr(lat_profile, "uses_turn_intent_hold", False)
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 

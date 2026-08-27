@@ -40,6 +40,18 @@ FF_ROLL_OFFSET_FADE_V = [0.0, 1.0]
 LOW_SPEED_X = [0, 10, 20, 30]
 LOW_SPEED_Y = [12, 10.5, 8, 5]
 
+# Curvature-ripple prefilter (reference-side only). Ioniq 6 model curvature carries a
+# ~0.78 Hz ripple on highway (measured at 123 km/h); this low-passes the REFERENCE before
+# it becomes torque. measurement is the loop's only feedback term, so it cannot move phase
+# margin. Speed-scheduled: inert below 20 m/s (72 km/h), blended in fully by 28 m/s.
+#
+# Route 000001a4 measured the 63-76 km/h weave at 0% rail with plant/model HP ratio ~1.0,
+# i.e. the weave is in the desired path and sits BELOW this blend-in. The prefilter does
+# not address it and is not expected to.
+CURVATURE_RIPPLE_FILTER_CUTOFF_HZ = 0.3
+CURVATURE_RIPPLE_FILTER_SPEED_BP = [20.0, 28.0]  # m/s: off below, full above
+CURVATURE_RIPPLE_FILTER_BLEND_V = [0.0, 1.0]
+
 # StarPilot latcontrol_torque.py PID. v2 constructs the controller with KP=1.0 / KI=0.3;
 # this profile replaces those with the gains the Ioniq 6 constants were calibrated against.
 # Below 15 m/s the interp table is identical; the last knot is the highway divergence
@@ -95,6 +107,10 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
   # stop-and-go.
   low_speed_factor_min_speed = MIN_SPEED
 
+  # Ported from StarPilot's controlsd.py alongside the rest of this tune, and calibrated
+  # against it. Blinker-gated inside TurnIntentHold, so it is a no-op without a blinker.
+  uses_turn_intent_hold = True
+
   # This tune ships a fixed torque baseline (3.0 / 0.09). torqued seeds its filter from
   # CP.lateralTuning.torque -- the car's override.toml entry, [2.5, 2.5, 0.005] -- and
   # controlsd feeds that back over the baseline on every frame that useParams is set, so
@@ -115,6 +131,20 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
       ctl.torque_params.latAccelFactor = laf
       ctl.update_limits()
 
+  def filter_desired_curvature(self, ctl, CS, desired_curvature: float, active: bool) -> float:
+    # Strip the model's curvature ripple before it becomes torque, ahead of the
+    # setpoint/feedforward split so both act on the same command. Stepped every frame,
+    # active or not, so the state stays primed across the blend-in; while inactive the
+    # filter is pinned to the live command (which tracks measured curvature), so
+    # re-engaging never starts a time constant behind.
+    if not active:
+      self.curvature_ripple_filter.x = desired_curvature
+      return desired_curvature
+
+    filtered = self.curvature_ripple_filter.update(desired_curvature)
+    blend = np.interp(CS.vEgo, CURVATURE_RIPPLE_FILTER_SPEED_BP, CURVATURE_RIPPLE_FILTER_BLEND_V)
+    return float(desired_curvature + blend * (filtered - desired_curvature))
+
   def init_controller(self, ctl, CP, CP_SP, CI) -> None:
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
     # written once at fingerprint time, so on a live switch from upstream it still holds the
@@ -133,6 +163,8 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     self.curvature_request_buffer = deque([0.] * ctl.lat_accel_request_buffer_len,
                                           maxlen=ctl.lat_accel_request_buffer_len)
     self.jerk_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * LP_FILTER_CUTOFF_HZ), ctl.dt)
+    self.curvature_ripple_filter = FirstOrderFilter(
+      0.0, 1 / (2 * np.pi * CURVATURE_RIPPLE_FILTER_CUTOFF_HZ), ctl.dt)
     self.directional_taper_filter = FirstOrderFilter(1.0, i6.IONIQ_6_DIRECTIONAL_TAPER_FILTER_RC, ctl.dt)
     self.prev_steering_pressed = False
     self.prev_desired_lateral_accel = 0.0

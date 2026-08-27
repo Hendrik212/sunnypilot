@@ -235,3 +235,61 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
     CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
     assert CP.steerAtStandstill
+
+  def test_ripple_prefilter_is_owned_by_the_profile(self):
+    """v2 applies no shaping of its own; the prefilter belongs to the Ioniq 6 profile."""
+    import openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 as v2
+    # The constants and the filter state must no longer live on the generic controller.
+    assert not hasattr(v2, "CURVATURE_RIPPLE_FILTER_CUTOFF_HZ")
+    up, _, _ = _make_controller(HONDA.HONDA_CIVIC, starpilot=False)
+    assert not hasattr(up, "curvature_ripple_filter")
+
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    assert hasattr(ctl.profile, "curvature_ripple_filter")
+
+  def test_upstream_curvature_command_is_untouched(self):
+    """With no profile, filter_desired_curvature is the identity."""
+    from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.base import LateralTuneProfile
+    CS = car.CarState.new_message()
+    CS.vEgo = 30.0
+    assert LateralTuneProfile().filter_desired_curvature(None, CS, 0.0123, True) == 0.0123
+
+  def test_ripple_prefilter_is_inert_below_blend_in(self):
+    """Inert below 20 m/s, active above 28 m/s -- the 70 km/h weave is NOT in its band."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    CS = car.CarState.new_message()
+
+    # 19.4 m/s (70 km/h): below blend-in, must pass through untouched.
+    CS.vEgo = 19.4
+    ctl.profile.curvature_ripple_filter.x = 0.0
+    assert ctl.profile.filter_desired_curvature(ctl, CS, 0.02, True) == 0.02
+
+    # 30 m/s: fully blended, so a step is attenuated toward the filter state.
+    CS.vEgo = 30.0
+    ctl.profile.curvature_ripple_filter.x = 0.0
+    out = ctl.profile.filter_desired_curvature(ctl, CS, 0.02, True)
+    assert 0.0 <= out < 0.02, out
+
+  def test_ripple_prefilter_primes_while_inactive(self):
+    """Inactive must pin the filter to the live command, not run it."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    CS = car.CarState.new_message()
+    CS.vEgo = 30.0
+    ctl.profile.curvature_ripple_filter.x = 0.0
+    out = ctl.profile.filter_desired_curvature(ctl, CS, 0.02, False)
+    assert out == 0.02
+    assert ctl.profile.curvature_ripple_filter.x == 0.02
+
+  def test_turn_intent_hold_is_gated_on_the_profile(self):
+    """turn_intent runs only for a profile that opts in -- not on the upstream path."""
+    from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.base import LateralTuneProfile
+    assert LateralTuneProfile().uses_turn_intent_hold is False
+
+    up, _, _ = _make_controller(HONDA.HONDA_CIVIC, starpilot=False)
+    assert getattr(up.profile, "uses_turn_intent_hold", False) is False
+
+    ioniq_up, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=False)
+    assert getattr(ioniq_up.profile, "uses_turn_intent_hold", False) is False
+
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    assert ctl.profile.uses_turn_intent_hold is True

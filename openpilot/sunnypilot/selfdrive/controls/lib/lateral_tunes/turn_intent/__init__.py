@@ -27,7 +27,7 @@ import math
 from openpilot.cereal import log
 from openpilot.common.realtime import DT_CTRL
 
-from openpilot.sunnypilot.selfdrive.controls.lib.turn_intent.constants import (
+from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.turn_intent.constants import (
   CURVATURE_HOLD_CONFIRM_MIN,
   CURVATURE_HOLD_CONFIRM_SWEPT,
   CURVATURE_HOLD_DECAY_TAU,

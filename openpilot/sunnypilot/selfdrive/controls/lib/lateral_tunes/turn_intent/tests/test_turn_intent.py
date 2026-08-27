@@ -7,8 +7,8 @@ from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.sunnypilot.selfdrive.controls.lib.turn_intent import TurnIntentHold
-from openpilot.sunnypilot.selfdrive.controls.lib.turn_intent.constants import (
+from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.turn_intent import TurnIntentHold
+from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.turn_intent.constants import (
   CURVATURE_HOLD_PLAN_CAP,
   CURVATURE_HOLD_PLAN_SOURCE_SPEED,
   CURVATURE_HOLD_RELEASE_SPEED,

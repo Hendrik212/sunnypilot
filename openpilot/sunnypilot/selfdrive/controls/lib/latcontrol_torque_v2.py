@@ -24,12 +24,11 @@ from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import get_latera
 # Additionally, there is friction in the steering wheel that needs
 # to be overcome to move it at all, this is compensated for too.
 
-# v2 is v0 plus a speed-scheduled low-pass on desired_curvature that strips
-# the model's curvature ripple (measured 0.78 Hz on the Ioniq 6 at 123 km/h)
-# before it reaches the setpoint/feedforward split. It is not car-specific:
-# any vehicle that selects this tune gets the filter, which is inert below
-# the blend-in speed. measurement is the loop's only feedback term, so this
-# cannot move phase margin.
+# v2 is v0 plus a profile hook on the model's curvature command
+# (`filter_desired_curvature`). v2 itself applies no shaping: with no profile
+# selected it is byte-for-byte v0. The Ioniq 6 curvature-ripple prefilter that
+# used to live here is now owned by the StarPilot profile, since the 0.78 Hz
+# ripple it targets was measured on that car's model output.
 #
 # A vehicle-specific tune may additionally select a lateral tune PROFILE (see
 # lateral_tunes/). A profile replaces the inner loop below `_update_upstream` and owns all
@@ -47,12 +46,6 @@ LAT_ACCEL_REQUEST_BUFFER_SECONDS = 1.0
 FRICTION_THRESHOLD = 0.3
 VERSION = 2
 
-# Curvature-ripple prefilter (reference-side only). Cutoff is speed-scheduled
-# so the filter is inert below ~72 km/h; blended in over 20-28 m/s.
-CURVATURE_RIPPLE_FILTER_CUTOFF_HZ = 0.3
-CURVATURE_RIPPLE_FILTER_SPEED_BP = [20.0, 28.0]  # m/s: off below, full above
-CURVATURE_RIPPLE_FILTER_BLEND_V = [0.0, 1.0]
-
 
 class LatControlTorque(LatControl):
   def __init__(self, CP, CP_SP, CI, dt):
@@ -67,8 +60,6 @@ class LatControlTorque(LatControl):
     self.lat_accel_request_buffer = deque([0.] * self.lat_accel_request_buffer_len , maxlen=self.lat_accel_request_buffer_len)
     self.previous_measurement = 0.0
     self.measurement_rate_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * LP_FILTER_CUTOFF_HZ), self.dt)
-    self.curvature_ripple_filter = FirstOrderFilter(
-      0.0, 1 / (2 * np.pi * CURVATURE_RIPPLE_FILTER_CUTOFF_HZ), self.dt)
     self.low_speed_reset_threshold = 0.0
 
     self.extension = LatControlTorqueExt(self, CP, CP_SP, CI)
@@ -112,21 +103,14 @@ class LatControlTorque(LatControl):
 
     pid_log = log.ControlsState.LateralTorqueState.new_message()
     pid_log.version = VERSION
-    # Strip the model's curvature ripple before it becomes torque. Applied here,
-    # ahead of the setpoint/feedforward split, so both act on the same command.
-    # measurement is the loop's only feedback term, so this cannot move phase
-    # margin. Always stepped so the state stays primed across the blend-in.
-    ripple_filter_input = desired_curvature
-    ripple_filtered = self.curvature_ripple_filter.update(ripple_filter_input)
-    ripple_blend = np.interp(CS.vEgo, CURVATURE_RIPPLE_FILTER_SPEED_BP,
-                             CURVATURE_RIPPLE_FILTER_BLEND_V)
-    desired_curvature = ripple_filter_input + ripple_blend * (ripple_filtered - ripple_filter_input)
+    # A profile may shape the model command before it becomes torque (the Ioniq 6
+    # ripple prefilter). Called active or not so profile-owned filter state stays
+    # primed; with no profile this is the identity.
+    if self.profile is not None:
+      desired_curvature = self.profile.filter_desired_curvature(self, CS, desired_curvature, active)
     if not active:
       output_torque = 0.0
       pid_log.active = False
-      # Prime with the unfiltered command (tracks measured curvature while
-      # inactive) so re-engaging does not start a time-constant behind.
-      self.curvature_ripple_filter.x = ripple_filter_input
       if self.profile is not None:
         measured_curvature = -VM.calc_curvature(math.radians(CS.steeringAngleDeg - params.angleOffsetDeg), CS.vEgo, params.roll)
         self.profile.prime_inactive(self, CS, desired_curvature, measured_curvature * CS.vEgo ** 2)
