@@ -1285,7 +1285,6 @@ requires-dist = [
     { name = "pylint", marker = "extra == 'linting'" },
     { name = "pytest", marker = "extra == 'testing-minimal'" },
     { name = "pytest-split", marker = "extra == 'testing-minimal'" },
-    { name = "pytest-timeout", marker = "extra == 'testing-minimal'" },
     { name = "pytest-xdist", marker = "extra == 'testing-minimal'" },
     { name = "ruff", marker = "extra == 'linting'", specifier = "==0.14.10" },
     { name = "safetensors", marker = "extra == 'testing-unit'" },
@@ -1294,6 +1293,7 @@ requires-dist = [
     { name = "tiktoken", marker = "extra == 'testing'" },
     { name = "tinygrad", extras = ["testing-minimal"], marker = "extra == 'testing-unit'" },
     { name = "tinygrad", extras = ["testing-unit"], marker = "extra == 'testing'" },
+    { name = "tinymesa", marker = "extra == 'mesa'", specifier = "==25.2.7.2" },
     { name = "torch", marker = "extra == 'testing-minimal'", specifier = "==2.9.1" },
     { name = "tqdm", marker = "extra == 'testing-unit'" },
     { name = "transformers", marker = "extra == 'testing'" },
@@ -1301,7 +1301,7 @@ requires-dist = [
     { name = "typing-extensions", marker = "extra == 'linting'" },
     { name = "z3-solver", marker = "extra == 'testing-minimal'", specifier = "<4.15.4" },
 ]
-provides-extras = ["linting", "testing-minimal", "testing-unit", "testing", "docs"]
+provides-extras = ["linting", "testing-minimal", "testing-unit", "testing", "docs", "mesa"]
 
 [[package]]
 name = "tomli"
