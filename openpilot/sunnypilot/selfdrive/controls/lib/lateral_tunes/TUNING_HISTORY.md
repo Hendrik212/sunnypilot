@@ -335,20 +335,36 @@ it against 0.4585 before reading anything into a jerk-keyed difference.
 
 ## Lateral changes that are NOT behind the v2/StarPilot gate
 
-Everything above is selected by `TorqueControlTune = 2` + `EnforceTorqueControl`.
-These are not, and will still be live if you switch the dropdown back to v0:
+Everything else is selected by `TorqueControlTune = 2` + `EnforceTorqueControl`.
+This one is not, and stays live if you switch the dropdown back to v0:
 
-- **`turn_intent/`** (`controls/lib/turn_intent/`, ~630 lines) holds a curvature
-  floor through a signalled low-speed turn, applied to `new_desired_curvature`
-  in `controlsd.py` **before** `clip_curvature` — i.e. upstream of the whole
-  torque controller, on every tune. It is blinker-gated, so it is a no-op
-  without a blinker and did not touch the hands-off `000001a4` analysis. If a
-  drive shows odd behaviour in a *signalled* low-speed turn, look here first.
 - **`torqued.py` `MIN_FRICTION_CEILING = 0.10`** floors the multiplicative
   friction sanity ceiling. Without it the Ioniq 6 / EV6 offline friction of
   0.005 collapses the ceiling to 0.0075–0.01 and torqued clips 100% of its
   estimates. Irrelevant while `use_live_torque_params = False`, but it changes
   what torqued publishes on any tune.
+
+### 2026-08-27 — ripple prefilter and turn_intent moved behind the profile
+
+Both used to run wider than this tune. The prefilter lived in
+`latcontrol_torque_v2.py`'s shared `update()` (every car selecting v2 got it);
+`turn_intent` ran in `controlsd.py` on **every** tune including v0.
+
+Neither is car-agnostic in practice — the 0.78 Hz ripple was measured on this
+car's model output, and `turn_intent` was ported from StarPilot's controlsd
+alongside the rest of the tune. Now:
+
+- Prefilter → `ioniq6_starpilot.py` via the new `filter_desired_curvature()`
+  base hook. v2 applies no shaping of its own; with no profile it is v0.
+- `turn_intent/` → `lateral_tunes/turn_intent/`, gated on `uses_turn_intent_hold`.
+  It applies upstream of `clip_curvature` so it cannot be a profile method;
+  controlsd reads the flag off the live controller, so the hot-swap carries it.
+
+Switching tunes mid-hold now resets the held state instead of leaving it wound.
+
+**Confound for the next drive:** `turn_intent` no longer runs on v0, so a v0
+A/B is no longer the same v0 that drove `000001a4`. It is blinker-gated either
+way, so hands-off comparisons are unaffected.
 
 ## Routes
 
@@ -373,7 +389,9 @@ Analysis scripts (untracked): `rlog_data/000001a1/reanalyze_1a1.py`,
 | Shaping (pure) | `lateral_tunes/ioniq6_shaping.py` |
 | Profile / inner loop | `lateral_tunes/ioniq6_starpilot.py` |
 | Profile registry | `lateral_tunes/__init__.py` |
-| v2 wrapper + ripple filter | `latcontrol_torque_v2.py` |
+| v2 wrapper (no shaping of its own) | `latcontrol_torque_v2.py` |
+| Ripple prefilter | `lateral_tunes/ioniq6_starpilot.py` |
+| Turn-intent hold | `lateral_tunes/turn_intent/` |
 | CAN envelope + rate | `opendbc/sunnypilot/car/hyundai/lateral_limits.py` |
 | Tune flag / baseline | `opendbc/sunnypilot/car/hyundai/values.py` |
 | Panda envelope | `opendbc/safety/modes/hyundai_canfd.h` |
