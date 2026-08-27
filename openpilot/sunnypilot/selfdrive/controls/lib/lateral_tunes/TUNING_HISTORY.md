@@ -312,6 +312,26 @@ After pulling 600 (panda flashed):
 6. Confirm applied `laf` is 5.37 in the 14–54 band and 3.66 elsewhere
    (`lateralTuneStateSP`). If laf stays 3.66 at STEER_MAX 600, stop and
    flash/rebuild — that is the 500 bug again.
+7. Confirm applied `lat_delay` ≈ 0.5585 (0.4585 live + the 0.1 profile offset).
+   `get_lat_delay` was inverted until 2026-08-27, so this drive is the first on
+   the live value — a jerk-keyed change vs `000001a4` may be this, not the 600.
+
+### 2026-08-27 — get_lat_delay was inverted (fixed, affects the next drive)
+
+`livedelay/helpers.py` had both branches of `get_lat_delay` swapped: the
+2026-08-24 merge revert (`b77bcd0290`) reversed upstream's own fix (#1906,
+`53e13a7bc0`) back into the fork. With `LagdToggle` at its default (on), the
+tune was reading the stale `LagdValueCache` param instead of the live lagd
+value.
+
+This matters because `lat_delay` is the denominator of `raw_lateral_jerk`, and
+`167e6e75` deliberately adds `+0.1` to reproduce StarPilot's
+`LAT_SMOOTH_SECONDS` against a measured `lateralDelay` of 0.4585 s. Restored to
+upstream and pinned with a test (`livedelay/tests/test_helpers.py`).
+
+**The 600 drive is therefore not a clean A/B against `000001a4`:** it changes
+the envelope *and* the lat_delay source. Log the applied `lat_delay` and check
+it against 0.4585 before reading anything into a jerk-keyed difference.
 
 ## Lateral changes that are NOT behind the v2/StarPilot gate
 
