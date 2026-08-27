@@ -13,12 +13,12 @@ is ~6% of the same drive and will lie.
 
 ## Current tree (2026-08-27)
 
-Pushed and driven: **409 flat + StarPilot PID** (`9f2d11fd` / opendbc
-`5923cfef`). Last driven route: `000001a4` on `6024dfa88`.
+Last driven: **409 flat + StarPilot PID** (`9f2d11fd` / opendbc `5923cfef`),
+route `000001a4` on `6024dfa88`.
 
-Local, not committed, not driven: **speed-scheduled 600 envelope with
-proportional `latAccelFactor`**. Peak panda `max_torque = 600`. Unsaturated
-mapping held at `409/3.66 ≈ 112` CAN per m/s².
+Pushed but **not yet driven**: **speed-scheduled 600 envelope with proportional
+`latAccelFactor`** (`453e984836` / opendbc `c3ed8a3d`). Peak panda
+`max_torque = 600`. Unsaturated mapping held at `409/3.66 ≈ 112` CAN per m/s².
 
 ```
 v (m/s)     km/h      STEER_MAX   latAccelFactor   CAN / m/s²
@@ -109,7 +109,7 @@ tracking cost.
 ### 2026-08-23 — StarPilot port, switchable
 
 `963c20f101` / opendbc `4edd7cd8`. 2023-path shaping extracted from
-StarPilot `latcontrol_vehicle_tunes.py` into `latcontrol_ioniq6_tune.py`,
+StarPilot `latcontrol_vehicle_tunes.py` into `lateral_tunes/ioniq6_shaping.py`,
 equivalence-tested bit-identical on ~21k grid points. Selected by
 `TorqueControlTune = 2` with `EnforceTorqueControl` on.
 
@@ -271,7 +271,10 @@ Implemented in:
 - `lateral_tunes/tests/test_lateral_tunes.py` — schedule, panda peak, gain
   ratio `STEER_MAX / laf == 409/3.66`
 
-550 was considered first; p90=625 made 600 the next ceiling. Uncommitted.
+550 was considered first; p90=625 made 600 the next ceiling.
+
+Committed and pushed as `453e984836` (opendbc `c3ed8a3d`) on 2026-08-27. Not
+driven yet — the panda flash is still required first.
 
 ## What each knob actually does
 
@@ -310,6 +313,23 @@ After pulling 600 (panda flashed):
    (`lateralTuneStateSP`). If laf stays 3.66 at STEER_MAX 600, stop and
    flash/rebuild — that is the 500 bug again.
 
+## Lateral changes that are NOT behind the v2/StarPilot gate
+
+Everything above is selected by `TorqueControlTune = 2` + `EnforceTorqueControl`.
+These are not, and will still be live if you switch the dropdown back to v0:
+
+- **`turn_intent/`** (`controls/lib/turn_intent/`, ~630 lines) holds a curvature
+  floor through a signalled low-speed turn, applied to `new_desired_curvature`
+  in `controlsd.py` **before** `clip_curvature` — i.e. upstream of the whole
+  torque controller, on every tune. It is blinker-gated, so it is a no-op
+  without a blinker and did not touch the hands-off `000001a4` analysis. If a
+  drive shows odd behaviour in a *signalled* low-speed turn, look here first.
+- **`torqued.py` `MIN_FRICTION_CEILING = 0.10`** floors the multiplicative
+  friction sanity ceiling. Without it the Ioniq 6 / EV6 offline friction of
+  0.005 collapses the ceiling to 0.0075–0.01 and torqued clips 100% of its
+  estimates. Irrelevant while `use_live_torque_params = False`, but it changes
+  what torqued publishes on any tune.
+
 ## Routes
 
 Dongle `568c82e1de7c61a2`. Rlogs on the Linux box under
@@ -330,7 +350,7 @@ Analysis scripts (untracked): `rlog_data/000001a1/reanalyze_1a1.py`,
 
 | piece | where |
 |---|---|
-| Shaping (pure) | `latcontrol_ioniq6_tune.py` |
+| Shaping (pure) | `lateral_tunes/ioniq6_shaping.py` |
 | Profile / inner loop | `lateral_tunes/ioniq6_starpilot.py` |
 | Profile registry | `lateral_tunes/__init__.py` |
 | v2 wrapper + ripple filter | `latcontrol_torque_v2.py` |

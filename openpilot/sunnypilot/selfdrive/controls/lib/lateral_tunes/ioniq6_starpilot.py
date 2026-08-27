@@ -2,8 +2,8 @@
 StarPilot Ioniq 6 lateral tune profile.
 
 Ported from StarPilot's selfdrive/controls/lib/latcontrol_torque.py (2023 firmware path
-only; the 2025 path is deliberately not ported -- see latcontrol_ioniq6_tune.py). The pure
-shaping math and its constants live in latcontrol_ioniq6_tune.py; this module owns the
+only; the 2025 path is deliberately not ported -- see ioniq6_shaping.py). The pure
+shaping math and its constants live in ioniq6_shaping.py; this module owns the
 mutable controller state and the inner loop that calls into it.
 
 Runs in lateral-acceleration space, same as the upstream v2 path, so the multiplicative ff
@@ -22,7 +22,7 @@ from opendbc.sunnypilot.car.hyundai.values import IONIQ6_STARPILOT_TORQUE
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.controls.lib.drive_helpers import MIN_SPEED
-from openpilot.sunnypilot.selfdrive.controls.lib import latcontrol_ioniq6_tune as i6
+from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_shaping as i6
 from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.base import LateralTuneProfile
 
 # --- machinery this tune depends on that upstream v2 does not have ---

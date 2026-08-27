@@ -26,7 +26,7 @@ from openpilot.selfdrive.locationd.helpers import Pose
 from openpilot.common.mock.generators import generate_deviceMotion
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 import LatControlTorque
-from openpilot.sunnypilot.selfdrive.controls.lib import latcontrol_ioniq6_tune as i6
+from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_shaping as i6
 from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_starpilot as i6p
 
 

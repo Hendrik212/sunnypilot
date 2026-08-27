@@ -43,9 +43,19 @@ class ControlsExt(ModelStateBase):
         return LatControlTorqueV0(self.CP, self.CP_SP, CI, dt)  # FIXME-SP: revert when upstream fixes tuning issues with v1
       return lac
 
-    if torque_versions == 0.0:  # v0
+    # Coerce exactly as is_starpilot_lat_tune() does. TorqueControlTune is a FLOAT key,
+    # but the UI's "Default" entry REMOVES it (torque_settings.py), so params.get returns
+    # None -- and `None == 0.0` is False, which used to fall through to `lac`. Selecting
+    # the same value two different ways in the two processes that must agree on the tune
+    # is the one thing this predicate exists to prevent.
+    try:
+      selected = float(torque_versions or 0.0)
+    except (TypeError, ValueError):
+      selected = 0.0
+
+    if selected == 0.0:  # v0
       return LatControlTorqueV0(self.CP, self.CP_SP, CI, dt)
-    elif torque_versions == 2.0:  # v2 (v0 + curvature-ripple prefilter)
+    elif selected == 2.0:  # v2 (v0 + curvature-ripple prefilter)
       return LatControlTorqueV2(self.CP, self.CP_SP, CI, dt)
     else:
       return lac
