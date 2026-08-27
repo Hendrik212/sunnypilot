@@ -146,6 +146,15 @@ class ControlsExt(ModelStateBase):
       state.friction = float(torque_params.friction)
       state.latAccelOffset = float(torque_params.latAccelOffset)
       state.profileId = str(getattr(LaC, 'profile_id', 'upstream'))
+
+    profile = getattr(LaC, 'profile', None)
+    notch = getattr(profile, 'curvature_ripple_notch', None)
+    monitor = getattr(profile, 'ripple_monitor', None)
+    if notch is not None:
+      state.rippleNotchHz = float(notch.f0)
+    if monitor is not None:
+      state.rippleMeasuredHz = float(monitor.measured_hz)
+      state.rippleExcess = float(monitor.excess)
     pm.send('lateralTuneStateSP', msg)
 
   def run_ext(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:

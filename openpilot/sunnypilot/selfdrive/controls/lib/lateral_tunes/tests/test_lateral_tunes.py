@@ -28,6 +28,7 @@ from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfac
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 import LatControlTorque
 from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_shaping as i6
 from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_starpilot as i6p
+from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ripple_notch as rn
 
 
 def _make_controller(car_name, starpilot: bool):
@@ -184,8 +185,8 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     assert worst == panda_max, f"panda envelope {panda_max} does not match peak request {worst}"
 
     assert CarControllerParams(CP, 0.0, CP_SP=CP_SP).STEER_MAX == 409
-    assert CarControllerParams(CP, 2.8, CP_SP=CP_SP).STEER_MAX == 409
-    assert CarControllerParams(CP, 4.0, CP_SP=CP_SP).STEER_MAX == 600
+    assert CarControllerParams(CP, 5.0, CP_SP=CP_SP).STEER_MAX == 409
+    assert CarControllerParams(CP, 6.5, CP_SP=CP_SP).STEER_MAX == 600
     assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_MAX == 600
     assert CarControllerParams(CP, 15.0, CP_SP=CP_SP).STEER_MAX == 600
     assert CarControllerParams(CP, 17.0, CP_SP=CP_SP).STEER_MAX == 409
@@ -226,10 +227,41 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed, steer_max_for_speed
     base = IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] * i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
     assert np.isclose(base, 3.66)
-    for v in (0.0, 2.8, 4.0, 10.0, 15.0, 17.0, 30.0):
+    for v in (0.0, 5.0, 6.5, 10.0, 15.0, 17.0, 30.0):
       sm = steer_max_for_speed(v)
       laf = lat_accel_factor_for_speed(v, base)
       assert np.isclose(sm / laf, 409 / 3.66, rtol=1e-3), (v, sm, laf)
+
+  def test_friction_can_is_invariant_to_steer_max(self):
+    """latAccelFactor cancels out of the friction term (get_friction multiplies by it, the
+    feedforward divide cancels it), so friction's CAN contribution is friction*STEER_MAX and
+    scaling latAccelFactor alone does NOT hold it. It must stay 0.09*409 = 37 CAN."""
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import friction_for_speed, steer_max_for_speed
+    base = IONIQ6_STARPILOT_TORQUE['FRICTION']
+    for v in (0.0, 5.0, 6.5, 10.0, 15.0, 17.0, 30.0):
+      can = friction_for_speed(v, base) * steer_max_for_speed(v)
+      assert np.isclose(can, base * 409, rtol=1e-3), (v, can)
+
+  def test_profile_schedules_friction_with_the_ceiling(self):
+    """The invariance above is worthless unless the profile actually writes it each frame."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    for v, steer_max in ((0.0, 409), (10.0, 600), (30.0, 409)):
+      ctl.profile._apply_speed_scheduled_factor(ctl, v)
+      assert np.isclose(ctl.torque_params.friction * steer_max, 0.09 * 409, rtol=1e-3), v
+    # and it is idempotent -- repeated calls at one speed must not compound
+    ctl.profile._apply_speed_scheduled_factor(ctl, 10.0)
+    first = ctl.torque_params.friction
+    for _ in range(5):
+      ctl.profile._apply_speed_scheduled_factor(ctl, 10.0)
+    assert ctl.torque_params.friction == first
+
+  def test_low_speed_reset_threshold_is_not_degenerate(self):
+    """Was min(max(minSteerSpeed, 0.3), 0.0447), which is the constant 0.0447 for every
+    input -- both other terms dead. The reset must sit at the highest of the three."""
+    ctl, _, CP = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    assert np.isclose(ctl.low_speed_reset_threshold, i6p.MIN_LATERAL_CONTROL_SPEED)
+    assert ctl.low_speed_reset_threshold >= CP.minSteerSpeed
+    assert ctl.low_speed_reset_threshold > i6.IONIQ_6_LOW_SPEED_PID_RESET_SPEED
 
   def test_ioniq6_steers_at_standstill(self):
     CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
@@ -241,44 +273,101 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     import openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 as v2
     # The constants and the filter state must no longer live on the generic controller.
     assert not hasattr(v2, "CURVATURE_RIPPLE_FILTER_CUTOFF_HZ")
+    assert not hasattr(v2, "RIPPLE_NOTCH_HZ")
     up, _, _ = _make_controller(HONDA.HONDA_CIVIC, starpilot=False)
     assert not hasattr(up, "curvature_ripple_filter")
+    assert not hasattr(up, "curvature_ripple_notch")
 
+  def test_notch_is_unity_at_dc_and_kills_its_centre(self):
+    """A notch that does not pass DC would bias every steady-state corner."""
+    dt = 0.01
+    n = rn.NotchFilter(dt, rn.RIPPLE_NOTCH_HZ, rn.RIPPLE_NOTCH_Q)
+    n.reset(0.02)
+    for _ in range(2000):
+      out = n.update(0.02)
+    assert np.isclose(out, 0.02, rtol=1e-6), out
+
+    for f, keep in ((rn.RIPPLE_NOTCH_HZ, 0.05), (0.05, 0.9), (3.0, 0.9)):
+      n = rn.NotchFilter(dt, rn.RIPPLE_NOTCH_HZ, rn.RIPPLE_NOTCH_Q)
+      t = np.arange(6000) * dt
+      x = np.sin(2 * np.pi * f * t)
+      y = np.array([n.update(v) for v in x])
+      amp = np.std(y[3000:]) / np.std(x[3000:])
+      if f == rn.RIPPLE_NOTCH_HZ:
+        assert amp < keep, (f, amp)
+      else:
+        assert amp > keep, (f, amp)
+
+  def test_ripple_monitor_never_reaches_control(self):
+    """The monitor is inert by construction: the notch frequency is the constant, and
+    nothing on the profile feeds monitor output back into the filter. Validated offline:
+    tracking the estimate made the filter WORSE (7.2% -> 21.6% of ripple kept)."""
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
-    assert hasattr(ctl.profile, "curvature_ripple_filter")
+    prof = ctl.profile
+    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
+    prof.ripple_monitor.f_hz = 0.95          # pretend it converged somewhere else
+    prof.ripple_monitor.measured_hz = 0.95
+    CS = car.CarState.new_message()
+    CS.vEgo = 25.0
+    prof.filter_desired_curvature(ctl, CS, 0.01, True)
+    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
 
-  def test_upstream_curvature_command_is_untouched(self):
-    """With no profile, filter_desired_curvature is the identity."""
-    from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.base import LateralTuneProfile
+  def test_notch_centre_matches_the_measured_ripple(self):
+    """The whole design rests on this number. Measured on route 000001a4 against a fitted
+    power-law background: 14.8x excess at 0.69 Hz in BOTH desired curvature and steering
+    angle, and the offline centre sweep is sharply peaked there (ripple energy kept:
+    0.62 Hz 20.8%, 0.65 Hz 12.6%, 0.69 Hz 7.2%, 0.72 Hz 8.0%, 0.75 Hz 12.4%).
+
+    Do not widen this window to accommodate a new value -- re-run the offline validation
+    in ripple_notch.py's docstring against a route from the new model and move it.
+    """
+    assert 0.66 <= rn.RIPPLE_NOTCH_HZ <= 0.72, rn.RIPPLE_NOTCH_HZ
+    assert 1.5 <= rn.RIPPLE_NOTCH_Q <= 2.5, rn.RIPPLE_NOTCH_Q
+    # The notch must sit inside the band the monitor is allowed to report, or a genuine
+    # model shift would be clamped out of the logs before anyone could see it.
+    assert rn.RIPPLE_CLAMP_HZ[0] < rn.RIPPLE_NOTCH_HZ < rn.RIPPLE_CLAMP_HZ[1]
+
+  def test_notch_speed_blend_covers_the_70kmh_weave(self):
+    """The LP this replaced was still at blend 0.0 at 19.4 m/s (70 km/h) -- it never
+    touched the band it was aimed at. The notch must be fully on there."""
+    assert np.interp(19.4, rn.RIPPLE_NOTCH_SPEED_BP, rn.RIPPLE_NOTCH_BLEND_V) == 1.0
+    assert np.interp(16.7, rn.RIPPLE_NOTCH_SPEED_BP, rn.RIPPLE_NOTCH_BLEND_V) == 1.0
+    assert np.interp(10.0, rn.RIPPLE_NOTCH_SPEED_BP, rn.RIPPLE_NOTCH_BLEND_V) == 0.0
+
+  def test_ripple_notch_is_inert_below_blend_in(self):
+    """Below the blend the command must pass through byte-for-byte; above it the ripple
+    band must actually be attenuated."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    prof = ctl.profile
+    CS = car.CarState.new_message()
+
+    CS.vEgo = 10.0
+    prof.curvature_ripple_notch.reset(0.0)
+    assert prof.filter_desired_curvature(ctl, CS, 0.02, True) == 0.02
+
+    # At 25 m/s, a sustained tone at the notch centre must come out attenuated while a
+    # constant command passes untouched.
+    CS.vEgo = 25.0
+    prof.curvature_ripple_notch.reset(0.0)
+    t = np.arange(4000) * DT_CTRL
+    x = 0.01 * np.sin(2 * np.pi * rn.RIPPLE_NOTCH_HZ * t)
+    y = np.array([prof.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
+    assert np.std(y[2000:]) / np.std(x[2000:]) < 0.1
+
+    prof.curvature_ripple_notch.reset(0.02)
+    for _ in range(500):
+      out = prof.filter_desired_curvature(ctl, CS, 0.02, True)
+    assert np.isclose(out, 0.02, rtol=1e-6), out
+
+  def test_ripple_notch_primes_while_inactive(self):
+    """Inactive must pin the notch to the live command, not run it."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
     CS = car.CarState.new_message()
     CS.vEgo = 30.0
-    assert LateralTuneProfile().filter_desired_curvature(None, CS, 0.0123, True) == 0.0123
-
-  def test_ripple_prefilter_is_inert_below_blend_in(self):
-    """Inert below 20 m/s, active above 28 m/s -- the 70 km/h weave is NOT in its band."""
-    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
-    CS = car.CarState.new_message()
-
-    # 19.4 m/s (70 km/h): below blend-in, must pass through untouched.
-    CS.vEgo = 19.4
-    ctl.profile.curvature_ripple_filter.x = 0.0
-    assert ctl.profile.filter_desired_curvature(ctl, CS, 0.02, True) == 0.02
-
-    # 30 m/s: fully blended, so a step is attenuated toward the filter state.
-    CS.vEgo = 30.0
-    ctl.profile.curvature_ripple_filter.x = 0.0
-    out = ctl.profile.filter_desired_curvature(ctl, CS, 0.02, True)
-    assert 0.0 <= out < 0.02, out
-
-  def test_ripple_prefilter_primes_while_inactive(self):
-    """Inactive must pin the filter to the live command, not run it."""
-    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
-    CS = car.CarState.new_message()
-    CS.vEgo = 30.0
-    ctl.profile.curvature_ripple_filter.x = 0.0
+    ctl.profile.curvature_ripple_notch.reset(0.0)
     out = ctl.profile.filter_desired_curvature(ctl, CS, 0.02, False)
     assert out == 0.02
-    assert ctl.profile.curvature_ripple_filter.x == 0.02
+    assert ctl.profile.curvature_ripple_notch.y1 == 0.02
 
   def test_turn_intent_hold_is_gated_on_the_profile(self):
     """turn_intent runs only for a profile that opts in -- not on the upstream path."""

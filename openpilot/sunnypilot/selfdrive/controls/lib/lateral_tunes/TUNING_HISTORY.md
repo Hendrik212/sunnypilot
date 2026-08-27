@@ -21,10 +21,10 @@ Pushed but **not yet driven**: **speed-scheduled 600 envelope with proportional
 `max_torque = 600`. Unsaturated mapping held at `409/3.66 ≈ 112` CAN per m/s².
 
 ```
-v (m/s)     km/h      STEER_MAX   latAccelFactor   CAN / m/s²
-≤ 2.8        ≤ 10          409            3.66            112
-4.0–15.0    14–54          600            5.37            112
-≥ 17.0       ≥ 61          409            3.66            112
+v (m/s)     km/h      STEER_MAX   latAccelFactor   friction   CAN / m/s²   friction CAN
+≤ 5.0        ≤ 18          409            3.66      0.090            112             37
+6.5–15.0    23–54          600            5.37      0.0614           112             37
+≥ 17.0       ≥ 61          409            3.66      0.090            112             37
 ```
 
 PID stays `KP=0.6 / KI=0.35`. Rate stays 10/8 below 17 m/s, ramping to 2/3 by
@@ -34,6 +34,254 @@ PID stays `KP=0.6 / KI=0.35`. Rate stays 10/8 below 17 m/s, ramping to 2/3 by
 A panda rebuild/flash is required before the 600 drive. If firmware stays at
 409, commands above 409 are silently dropped.
 
+### 2026-08-27 — Fable review of the undriven 600 build: three fixes before the drive
+
+An independent control-system review of the whole tune, cross-checked against a
+fresh recomputation from the `000001a4` cache (147906 engaged hands-off frames).
+Nothing here has been driven. All three changes land on top of `453e984836`.
+
+**1. The 600 invariance was incomplete: friction's CAN scaled with `STEER_MAX`.**
+`get_friction` returns `±friction · latAccelFactor` in lat-accel space
+(`opendbc/car/lateral.py`), and the feedforward is divided by `latAccelFactor` on
+the way out — the two cancel, so friction's *normalized* torque is exactly
+`friction` and its CAN value is `friction · STEER_MAX`. Scaling `latAccelFactor`
+held P/I/FF at 112 CAN per m/s² and missed this one term entirely: the breakaway
+kick would have gone `0.09·409 = 37` → `0.09·600 = 54` CAN, +46%, on the one
+term that is a square wave through every error sign change — in the band that
+already flips 1.6–1.8 times a second. `friction_for_speed()` now rides the same
+schedule. Note this is **not** a pure restoration: holding friction's CAN
+constant shrinks its lat-accel-space contribution inside the 600 band. That is
+the right invariant only because 409/3.66 is what was actually tuned and driven.
+
+Lesson #1 was stated as "scale `latAccelFactor` with `STEER_MAX`". That is
+necessary but not sufficient — see the amended lesson below.
+
+**2. The 600 window opened at 4.0 m/s, inside the P-relay band.** Per-band
+decomposition of `000001a4`:
+
+```
+band (m/s)     n      railed%   |p|    |i|    |f|   |dLA|   mean|CAN|
+2.8–4.0      1195       58.1   7.33   0.02   0.67   0.47        196
+4.0–5.0      2193       32.0   3.85   0.02   0.53   0.29        148
+5.0–8.0      5408       25.5   2.52   0.04   0.65   0.56        127
+8.0–11.0     5274       36.9   1.79   0.05   1.36   1.48        184
+11.0–15.0   25762        3.8   0.36   0.09   0.52   0.63         67
+```
+
+Below 5 m/s, P is 6–11× the feedforward — that is lesson #4's relay, and a taller
+rail there is a bigger sawtooth. Genuine cornering demand only takes over by
+8–11 m/s. Ramp-in moved `2.8→4.0` ⇒ `5.0→6.5` m/s.
+
+**3. `low_speed_reset_threshold` was a degenerate expression.** It read
+`min(max(CP.minSteerSpeed, 0.3), 0.0447)`, and `max(x, 0.3) ≥ 0.3` makes the
+outer `min` return the constant `0.0447` for every input — both other terms dead.
+Now `max()` of all three ⇒ 0.3 m/s. Measured effect on `000001a4`: 6.5 s of
+engaged time between 0.0447 and 0.3 m/s where the integrator now resets instead
+of running, max `|i|` there 0.181 against a 3.66 clip. Correctness fix, not a
+tuning change; the creep relay (0.3–2 m/s) sits above the threshold either way.
+
+#### Measurements that supersede earlier prose
+
+- **Ceiling plateaus are short.** 87 episodes at `|CAN| ≥ 400`, p50 **0.07 s**,
+  p90 0.71 s, max 1.43 s. Only 12 episodes ≥ 0.5 s, totalling **11.7 s** — and
+  *all* of them sit between **5.7 and 9.6 m/s**. Above 11 m/s the whole route
+  contains 1.7 s of transient touches. "16% of tight-corner frames ≥ 400" is
+  true but is mostly flip transients, not sustained starvation. On the sustained
+  plateaus the deficit is real: desired 2.63 vs actual 2.17 m/s² (a/d 0.82).
+- **The plant is nonlinear at the rail.** Those plateaus delivered ~2.17 m/s² at
+  ≥400 CAN ≈ 190 CAN per m/s², vs the 112 nominal mapping. The "linear CAN
+  p50 = 509" extrapolation assumed that slope persists; if it steepens further,
+  600 buys less than the arithmetic suggests. Not settleable until driven.
+- **"lag 0 ms" at 70 km/h was broadband and wrong at the ripple frequency.**
+  Cross-spectra on three ≥20 s runs in 17.5–21.5 m/s: model→desired gain 1.00,
+  phase −6° to −7° (the tune adds nothing to the reference — the
+  `expected + jerk·τ` construction is algebraically the identity). But
+  desired→actual at the ripple peak is gain 0.90–1.39 at phase **−75° to −108°**
+  (0.36–0.45 s, the EPS lag), while broadband cross-correlation reads 0 frames.
+  Controller output ripple runs **255–386** against a static `v²/laf` of 104,
+  i.e. ~2.5–3.7× static gain, spent fighting a phase-lagged error it cannot win.
+  `|f| = 0.414` is not the anomaly — it is the reference itself (`|f|/|dLA| = 0.90`).
+- **The ripple frequency does not scale with √v.** Measured peaks: 70 km/h band
+  0.575 / 0.661 / 0.670 / 0.687 Hz; 120 km/h band 0.536 / 0.686 Hz. The
+  `f ≈ 0.126·√v` law predicts 0.56 → 0.71 Hz across that range and the measured
+  peak simply does not move. This kills speed-scheduling the notch and makes a
+  **fixed ~0.65 Hz notch** the right shape — it would serve both bands with far
+  less phase cost than widening the 0.3 Hz low-pass, which currently eats ~30° at
+  real-curve frequencies. Not implemented; wants its own A/B.
+- **Corner cutting is the model's path — confirmed harder.** Restricting to
+  well-tracked (a/d ∈ [0.95, 1.05]) *unrailed* corner frames, n = 2126: left
+  turns **+0.349 m**, right turns **−0.371 m**. Symmetric, on the path, path
+  inside. Lesson #5 stands and is now backed by tracking-matched frames rather
+  than episode anecdotes.
+- **The inside-offset metric cannot judge the 600 change.** An earlier claim here
+  that better tracking would deepen the measured cut does not hold: binned by
+  a/d, higher a/d goes with *less* inside offset (+0.484 m at a/d 0.5–0.7 →
+  +0.089 m at a/d 1.05–1.3, at 1 s lag). But that relation is confounded —
+  `dLA` already contains the model's path correction, so a/d > 1 co-occurs with
+  recovering *from* being inside. Use plateau episodes to judge 600, not offset.
+- **Creep railing is unwind-to-center, not cornering.** 93.5% of railed frames at
+  0.3–1.0 m/s have `|dLA| < 0.05` (desired is straight) with mean `|steering
+  angle|` 104°. Also: the worst band is **1–2 m/s (49.9% railed, |p| = 12.33)**,
+  not 0.3–1.0 m/s, which is only 405 frames. The `KP` table is ≈ `250/v²`, i.e.
+  a deliberate constant-gain-in-curvature-space schedule; the LSF multiplier
+  `(1 + LSF/KP)` is only 1.05–1.57 and is *not* the dominant low-speed gain.
+
+#### Still open (not implemented)
+
+- Fixed ~0.65 Hz reference notch, replacing the 0.3 Hz low-pass. A/B metric:
+  0.6–1.0 Hz band amplitude of `steeringAngleDeg` at 70 km/h.
+- Low-speed rework: give the angle-space assist ownership below ~2 m/s instead
+  of adding it on top of a railed lat-accel-space PID. Only an angle-space loop
+  degrades gracefully to `steerAtStandstill` (everything lat-accel-space
+  vanishes as v→0).
+- Narrow the 15–17 m/s ramp-out. The data shows 1.7 s of ≥400 CAN above 11 m/s
+  in the whole route, so the upper half of the window carries the 600 gain over
+  ~26k frames that never ask for it. Deferred until the 600 drive is evaluated.
+- `vEgo`/`vEgoRaw` skew: the profile writes `latAccelFactor` from Kalman
+  `CS.vEgo`, `carcontroller` rebuilds `STEER_MAX` from `CS.out.vEgoRaw`. Inside
+  the ramps the slope is ~160 CAN/(m/s), so a 0.2 m/s disagreement is a
+  transient ~5% gain error. The 112-invariance is exact only outside the ramps.
+- `PIDController` never re-clips a stored `i` when the limit *shrinks* on band
+  exit (`pid.py` bounds growth only). Measured `|i| ≤ 0.24` everywhere, so this
+  is theoretical today.
+- Route `000001a4` ran the **inverted** `get_lat_delay`, i.e. the stale
+  `LagdValueCache` + 0.1, and that cached value was never logged. Every
+  jerk-keyed number above is conditioned on an unknown effective τ. Pull the
+  applied `lat_delay` from the next route before treating them as comparable.
+
+### 2026-08-27 (later) — the ripple is at 0.69 Hz; LP replaced by a notch; adaptation built, validated, rejected
+
+**The 0.3 Hz low-pass was never active where the weave is felt.** Its blend ran
+`[20, 28] m/s`, so at 19.4 m/s (70 km/h) it was at exactly 0.0. Measured across
+the high-speed runs of `000001a4`, applying each filter as it would actually run
+on-car, the LP removed **9%** of 0.6–0.8 Hz reference energy. It was not
+under-performing; it was absent.
+
+**The ripple is at 0.69 Hz, not 0.75 and not 0.51–0.69.** Both earlier numbers
+were wrong, in opposite directions and for the same reason: curvature spectra go
+as `f^-3`, so `argmax` over a 0.4–1.1 Hz search band returns the *lowest bin*,
+not the bump. Every "peak" in the 0.508–0.687 list from earlier today was the
+background skirt. Fitting and dividing out the power-law background first gives
+an unambiguous answer on `000001a4` (engaged, ≥15 m/s, 7 runs Welch-averaged):
+
+```
+excess over fitted background:  0.60 Hz 1.8x   0.65 Hz 3.4x   0.69 Hz 14.8x
+                                0.74 Hz 6.5x   0.81 Hz 0.9x
+```
+
+The steering angle shows the **same 14.8× bump at 0.69 Hz**, so this is the
+frequency the driver feels, not just a number in the command.
+
+**Replaced with a fixed notch, 0.69 Hz, Q=2, blended in over 14–16 m/s.**
+Offline, on real logged curvature, causally filtered:
+
+```
+filter                              ripple 0.6-0.8 Hz kept   road <0.3 Hz kept
+LP 0.3 Hz, blend 20-28 m/s                   90.8%                 99.9%
+notch 0.69 Hz Q=2, blend 14-16 m/s            7.2%                 98.4%
+```
+
+Centre sweep is sharply peaked at 0.69 (0.62 → 20.8%, 0.65 → 12.6%, **0.69 →
+7.2%**, 0.72 → 8.0%, 0.75 → 12.4%), which independently confirms the measurement.
+Q sweep: Q=1 → 2.0% ripple / 96.3% road, Q=2 → 7.2% / 98.4%, Q=4 → 21.8% / 99.3%.
+
+#### The adaptive version was built, validated offline, and rejected on its numbers
+
+The plan was a self-learning notch converging from the 0.69 default. It was
+implemented and replayed through the full route before any on-car exposure. It
+loses to the fixed notch on every axis that matters:
+
+```
+frequency   depth        ripple kept   road kept
+fixed       full             7.2%        98.4%
+fixed       adaptive        33.2%        99.4%
+adaptive    full            21.6%        98.2%
+adaptive    adaptive        44.4%        99.4%
+```
+
+- **Frequency.** A 90 s window estimates the peak with IQR 0.128 Hz, comparable
+  to the notch's own −3 dB width (0.35 Hz). Tracking that estimate pulls the null
+  off the bump more often than onto it. Slowing the slew to 0.001 Hz/s helps only
+  marginally (37.0% kept) and never approaches the fixed 7.2%.
+- **Depth.** Keying depth on how strongly the ripple stands out fades the notch on
+  straight roads — which is exactly where the weave is most noticeable. The
+  metric and the symptom are anti-correlated.
+
+The estimator is kept as an **inert monitor**: it publishes `rippleMeasuredHz` and
+`rippleExcess` on `lateralTuneStateSP` and nothing reads them back into control.
+That still solves what adaptivity was for — noticing that a new model's ripple
+has moved — without paying per-window noise. Gating validated: `f_hz` moved on 2
+of 62502 frames below 15 m/s.
+
+Things worth keeping from the exercise, because they are cheap to get wrong again:
+
+1. **Never peak-pick a curvature spectrum without removing the background.**
+2. **A power-weighted centroid of the excess beats `argmax`** — same median
+   against truth, 35% less window-to-window spread (IQR 0.102 vs 0.156 Hz).
+3. **Validate an estimator offline against the corpus before wiring it to
+   control.** This one looked completely reasonable and was worse than a constant.
+
+#### Correction to this morning's "the ripple does not scale with sqrt(v)"
+
+That entry above is **wrong**, and wrong for the reason this entry is about: its
+peaks (0.575-0.687 at 70 km/h, 0.536-0.686 at 120 km/h) came from `argmax` on a
+sloped background. Divided by the fitted background, the peak moves cleanly with
+speed -- and *downward*, which is the opposite of the `0.126*sqrt(v)` law that
+the original scheduling attempt assumed:
+
+```
+band (m/s)   km/h      runs  secs   peak Hz  excess   0.69 notch |H| at peak
+15.0-17.5    54-63        1    22    0.741     7.3          0.27
+17.5-22.0    63-79        3   134    0.695    14.9          0.03
+22.0-28.0    79-101       8   358    0.602     4.9          0.48
+28.0-40.0   101-144       3   173    0.463     1.7          0.85
+```
+
+Steering angle reproduces the trend independently (0.787 / 0.695 / 0.602 /
+0.463), so it is in the plant response, not only in the command.
+
+So "one notch for all speeds" is now measured rather than assumed, and the
+measurement is a qualified yes: 0.69 Hz is near-optimal in the 63-79 km/h band
+where the ripple is by far the strongest (excess 14.9) and where the weave is
+actually reported, and it goes nearly transparent above 101 km/h where the excess
+has fallen to 1.7 and there is little left to remove. The weak spot is 79-101
+km/h (|H| = 0.48 against excess 4.9).
+
+A speed-scheduled centre is NOT ruled out -- it is unmeasured. The two bands that
+carry real evidence are 17.5-22 (134 s) and 22-28 (358 s); the endpoints are a
+single 22 s run and an excess of 1.7 that may be background residual. Deliberately
+not shipped with this batch: one route, and it would add a fifth stacked change.
+Confirm on a second route first.
+
+#### Reading the next route: what is and is not separable
+
+The notch (>=14 m/s) and the 600 envelope (5-15 m/s) are *nearly* disjoint, not
+disjoint:
+
+- **70 km/h weave (>=17.5 m/s)** -- notch only. 600 has exited by 17 m/s.
+- **22-50 km/h corners (6-14 m/s)** -- 600 only. The notch blend is 0 below 14.
+- **50-60 km/h (14-17 m/s)** -- BOTH partially active. Any change in sweepers at
+  that speed is confounded between them. Not a primary complaint band, but do not
+  read it as evidence for either change.
+
+One more framing trap: the "LP removed 9%" figure is **deployment-weighted**. At
+full blend a 0.3 Hz first-order LP removes ~60% at 0.7 Hz; it removed 9% because
+its blend was still 0.0 at the speed where the symptom lives. The lesson is that
+the blend was in the wrong place, not that low-passes do not work.
+
+#### Still open
+
+- The notch is calibrated to the model shipped 2026-08. On a model update, read
+  `rippleMeasuredHz` over a drive; if it has moved, re-run the offline validation
+  and move `RIPPLE_NOTCH_HZ` by hand. There is a test pinning the constant to
+  0.66–0.72 specifically so this cannot drift unnoticed.
+- The notch acts ≥14 m/s. The ripple is present below that too, but the relay
+  behaviour under ~8 m/s dominates there and is a separate problem.
+- Not yet driven. Stacked with the 600 envelope, the friction schedule, the
+  `lat_delay` fix and turn_intent gating. The notch and the 600 envelope act in
+  nearly disjoint speed bands (600: 5–15 m/s, notch: ≥14 m/s), so one drive can
+  evaluate both by splitting on speed.
+
 ## Lessons that keep being expensive
 
 These are the ones we have now paid for more than once.
@@ -42,6 +290,12 @@ These are the ones we have now paid for more than once.
    headroom.** `carcontroller` does `CAN = torque * STEER_MAX` and
    `torque ≈ lataccel / latAccelFactor`. Raising only the ceiling raises CAN
    per m/s² on every unsaturated command. That was the 500 experiment.
+   **Amended 2026-08-27: scaling `latAccelFactor` is necessary but not
+   sufficient.** It covers P/I/FF, whose torque is `lataccel/latAccelFactor`. It
+   does *not* cover any term whose normalized torque is dimensionless — friction
+   is one (`latAccelFactor` cancels), so its CAN scales with the ceiling
+   untouched. When changing `STEER_MAX`, enumerate the terms by whether
+   `latAccelFactor` survives the divide, and hold each one's CAN separately.
 2. **Panda `max_torque` must equal the peak car-layer request.** A mismatch
    clips with no alert. Tests in `test_lateral_tunes.py` read
    `hyundai_canfd.h` and walk 0–40 m/s.
@@ -50,12 +304,26 @@ These are the ones we have now paid for more than once.
    (`a6095657`, `95dc60fe`): the RT check rejected the message, reset
    `desired_torque_last` to 0, and the wheel dropout-ramped. Current
    `max_rt_delta = 375`.
-4. **Creep-band railing is P/LSF bang-bang, not missing torque.** A taller
-   rail there is a bigger sawtooth. 0–10 km/h stays 409 on purpose.
+4. **Creep-band railing is P bang-bang, not missing torque.** A taller rail
+   there is a bigger sawtooth. Measured 2026-08-27: it is the `KP` table
+   (≈`250/v²`, KP=250 at 1 m/s), *not* the low-speed factor — the LSF multiplier
+   `(1 + LSF/KP)` is only 1.05–1.57 across the whole speed range. The relay
+   extends to ~8 m/s, not ~3, so 600 now ramps in at 5.0–6.5 m/s.
 5. **Desired-path cut toward oncoming is not a torque-authority bug.**
    Left-handers on `000001a4` sat 35 cm left of center with `a/d ≈ 1` and 0%
    rail. More peak torque can make that worse.
-6. **Offroad / host-boot / constants readout never execute `if active:`.**
+6. **Gating a correction on "is the symptom strong right now" can be exactly
+   backwards.** Notch depth keyed on ripple prominence fades on straights --
+   which is where the weave is most felt. Before gating any correction on a
+   measure of its own symptom, check the sign of the correlation between the
+   metric and the complaint. Measured cost of getting this wrong: 7.2% -> 33.2%
+   of ripple energy kept. Any "only filter when the ripple is strong" scheme has
+   this failure mode.
+7. **A spectrum with a sloped background cannot be peak-picked directly.**
+   Curvature goes as `f^-3`; `argmax` over a search band returns its lowest bin.
+   Fit and divide out the background first. This produced two wrong ripple
+   frequencies (0.75, then 0.51-0.69) before the right one (0.69).
+8. **Offroad / host-boot / constants readout never execute `if active:`.**
    The 2026-08-24 `calibrated_pose` NameError crashed 0.1 s after engage
    with a clean offroad check. Fetch the route before forming a theory
    (`CLAUDE.md` post-mortem).

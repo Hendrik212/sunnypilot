@@ -478,6 +478,15 @@ struct LateralTuneStateSP @0xcb9fd56c7057593a {
   friction @2 :Float32;
   latAccelOffset @3 :Float32;
   profileId @4 :Text;
+
+  # Curvature-ripple notch. rippleNotchHz is what control actually applies (a constant
+  # today); rippleMeasuredHz and rippleExcess are the inert monitor's reading -- nothing
+  # reads them back into control. They exist so that a driving-model update moving the
+  # ripple is visible in a route without a manual spectral analysis. See
+  # sunnypilot/selfdrive/controls/lib/lateral_tunes/ripple_notch.py.
+  rippleNotchHz @5 :Float32;
+  rippleMeasuredHz @6 :Float32;
+  rippleExcess @7 :Float32;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

@@ -17,12 +17,13 @@ from collections import deque
 import numpy as np
 
 from opendbc.car.lateral import get_friction
-from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed
+from opendbc.sunnypilot.car.hyundai.lateral_limits import friction_for_speed, lat_accel_factor_for_speed
 from opendbc.sunnypilot.car.hyundai.values import IONIQ6_STARPILOT_TORQUE
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.controls.lib.drive_helpers import MIN_SPEED
 from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_shaping as i6
+from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ripple_notch as rn
 from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes.base import LateralTuneProfile
 
 # --- machinery this tune depends on that upstream v2 does not have ---
@@ -40,17 +41,15 @@ FF_ROLL_OFFSET_FADE_V = [0.0, 1.0]
 LOW_SPEED_X = [0, 10, 20, 30]
 LOW_SPEED_Y = [12, 10.5, 8, 5]
 
-# Curvature-ripple prefilter (reference-side only). Ioniq 6 model curvature carries a
-# ~0.78 Hz ripple on highway (measured at 123 km/h); this low-passes the REFERENCE before
-# it becomes torque. measurement is the loop's only feedback term, so it cannot move phase
-# margin. Speed-scheduled: inert below 20 m/s (72 km/h), blended in fully by 28 m/s.
+# Curvature-ripple notch (reference-side only). The Ioniq 6 model emits a 0.69 Hz ripple
+# on desired curvature -- 14.8x above the fitted road background, and the same 14.8x bump
+# appears in the steering angle, so it is what the driver feels. Constants, the measured
+# spectrum and the offline validation of every design choice live in ripple_notch.py.
 #
-# Route 000001a4 measured the 63-76 km/h weave at 0% rail with plant/model HP ratio ~1.0,
-# i.e. the weave is in the desired path and sits BELOW this blend-in. The prefilter does
-# not address it and is not expected to.
-CURVATURE_RIPPLE_FILTER_CUTOFF_HZ = 0.3
-CURVATURE_RIPPLE_FILTER_SPEED_BP = [20.0, 28.0]  # m/s: off below, full above
-CURVATURE_RIPPLE_FILTER_BLEND_V = [0.0, 1.0]
+# This replaces a 0.3 Hz first-order low-pass blended 20-28 m/s. That filter never touched
+# the 70 km/h weave it was aimed at (its blend was still 0.0 at 19.4 m/s) and cost ~0.5 s
+# of group delay at road frequencies where it did act. The notch keeps 7.2% of the ripple
+# against the LP's 90.8%, at 98.4% vs 99.9% of road content.
 
 # StarPilot latcontrol_torque.py PID. v2 constructs the controller with KP=1.0 / KI=0.3;
 # this profile replaces those with the gains the Ioniq 6 constants were calibrated against.
@@ -124,25 +123,38 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
   def _apply_speed_scheduled_factor(self, ctl, v_ego: float) -> None:
     # Scale latAccelFactor with STEER_MAX so unsaturated CAN/m/s^2 stays 409/3.66.
     # Without this, raising STEER_MAX is a gain change (the 500-at-3.66 mistake).
+    #
+    # friction rides the same schedule and for the same reason, but it needs its own
+    # formula: latAccelFactor cancels out of the friction term entirely, so scaling
+    # latAccelFactor alone leaves friction as a 37 -> 54 CAN gain change. See
+    # friction_for_speed(). Both are written from the module constants, never from the
+    # current torque_params, so repeated calls cannot compound.
     base = (IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] *
             i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT)
     laf = lat_accel_factor_for_speed(v_ego, base)
     if abs(ctl.torque_params.latAccelFactor - laf) > 1e-4:
       ctl.torque_params.latAccelFactor = laf
+      ctl.torque_params.friction = friction_for_speed(v_ego, IONIQ6_STARPILOT_TORQUE['FRICTION'])
       ctl.update_limits()
 
   def filter_desired_curvature(self, ctl, CS, desired_curvature: float, active: bool) -> float:
     # Strip the model's curvature ripple before it becomes torque, ahead of the
     # setpoint/feedforward split so both act on the same command. Stepped every frame,
     # active or not, so the state stays primed across the blend-in; while inactive the
-    # filter is pinned to the live command (which tracks measured curvature), so
-    # re-engaging never starts a time constant behind.
+    # notch is pinned to the live command (which tracks measured curvature), so
+    # re-engaging never starts a filter state behind.
+    #
+    # The monitor is fed unconditionally, engaged or not: the ripple is in the model's
+    # output during manual driving too, so it converges before the first engagement and
+    # its reading is not conditioned on the controller being in the loop.
+    self.ripple_monitor.update(desired_curvature, CS.vEgo)
+
     if not active:
-      self.curvature_ripple_filter.x = desired_curvature
+      self.curvature_ripple_notch.reset(desired_curvature)
       return desired_curvature
 
-    filtered = self.curvature_ripple_filter.update(desired_curvature)
-    blend = np.interp(CS.vEgo, CURVATURE_RIPPLE_FILTER_SPEED_BP, CURVATURE_RIPPLE_FILTER_BLEND_V)
+    filtered = self.curvature_ripple_notch.update(desired_curvature)
+    blend = np.interp(CS.vEgo, rn.RIPPLE_NOTCH_SPEED_BP, rn.RIPPLE_NOTCH_BLEND_V)
     return float(desired_curvature + blend * (filtered - desired_curvature))
 
   def init_controller(self, ctl, CP, CP_SP, CI) -> None:
@@ -163,14 +175,22 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     self.curvature_request_buffer = deque([0.] * ctl.lat_accel_request_buffer_len,
                                           maxlen=ctl.lat_accel_request_buffer_len)
     self.jerk_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * LP_FILTER_CUTOFF_HZ), ctl.dt)
-    self.curvature_ripple_filter = FirstOrderFilter(
-      0.0, 1 / (2 * np.pi * CURVATURE_RIPPLE_FILTER_CUTOFF_HZ), ctl.dt)
+    self.curvature_ripple_notch = rn.NotchFilter(ctl.dt, rn.RIPPLE_NOTCH_HZ, rn.RIPPLE_NOTCH_Q)
+    self.ripple_monitor = rn.RippleFrequencyMonitor(ctl.dt)
     self.directional_taper_filter = FirstOrderFilter(1.0, i6.IONIQ_6_DIRECTIONAL_TAPER_FILTER_RC, ctl.dt)
     self.prev_steering_pressed = False
     self.prev_desired_lateral_accel = 0.0
 
     ctl.measurement_rate_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * (MAX_LAT_JERK_UP - 0.5)), ctl.dt)
-    ctl.low_speed_reset_threshold = min(max(CP.minSteerSpeed, MIN_LATERAL_CONTROL_SPEED),
+    # max(), not min(): the PID should be reset below every speed at which lateral control
+    # is meaningful, so the threshold is the highest of the three, not the lowest. Written
+    # as min(max(...)) this collapsed to the constant 0.0447 m/s -- max(x, 0.3) is always
+    # >= 0.3, so min(.., 0.0447) always returned 0.0447 and both other terms were dead.
+    # Effect of the fix on route 1a4: 6.5 s of engaged time between 0.0447 and 0.3 m/s
+    # where the integrator now resets instead of running, max |i| there 0.181 against a
+    # 3.66 clip -- i.e. this is a correctness fix, not a tuning change. The creep relay
+    # (0.3-2 m/s) is above the threshold either way and is untouched by it.
+    ctl.low_speed_reset_threshold = max(CP.minSteerSpeed, MIN_LATERAL_CONTROL_SPEED,
                                         i6.IONIQ_6_LOW_SPEED_PID_RESET_SPEED)
 
   def apply_live_torque_params(self, ctl, latAccelFactor, latAccelOffset, friction) -> None:
