@@ -48,7 +48,12 @@ else:
 
   qt_libs = [f"Qt5{m}" for m in qt_modules]
 qt_env['QT3DIR'] = qt_env['QTDIR']
-qt_env.Tool('qt3')
+# SCons 4.5+ dropped the bundled qt3 tool. Replay/jotpluggler do not need it;
+# skip cabana rather than aborting the extras build.
+try:
+  qt_env.Tool('qt3')
+except Exception:
+  Return()
 
 qt_env['CPPPATH'] += qt_dirs
 qt_flags = [
