@@ -18,12 +18,11 @@ class LateralTuneProfile:
   profile_id = "upstream"
 
   # --- timing ---
-  # Added to the lat_delay the controller receives. openpilot/selfdrive/modeld/modeld.py
-  # sets LAT_SMOOTH_SECONDS = 0.0, so controlsd passes lat_delay == lateralDelay verbatim;
-  # a profile whose constants were calibrated against a fork that used a non-zero
-  # LAT_SMOOTH_SECONDS adds the difference back here. Because the shared constant is zero,
-  # this reproduces the other fork's lat_delay exactly rather than approximating it, and it
-  # needs no coordination with modeld.
+  # Added to the lat_delay the controller receives. controlsd passes
+  # lat_delay = lateralDelay + LAT_SMOOTH_SECONDS (modeld's constant). The shared modeld
+  # now sets LAT_SMOOTH_SECONDS = 0.1, matching StarPilot, so a profile calibrated against
+  # StarPilot leaves this at 0.0 -- both the lat_delay and the modeld source curvature LP
+  # are reproduced at the source, with no profile-side compensation needed.
   lat_delay_offset = 0.0
 
   # --- gains ---

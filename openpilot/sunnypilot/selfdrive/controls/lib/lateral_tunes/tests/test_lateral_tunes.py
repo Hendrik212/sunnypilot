@@ -100,7 +100,10 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     assert np.isclose(ctl.torque_params.friction, 0.12)
 
   def test_lat_delay_offset_matches_starpilot(self):
-    assert np.isclose(i6p.Ioniq6StarPilotProfile.lat_delay_offset, 0.1)
+    # modeld now sets LAT_SMOOTH_SECONDS = 0.1 (the source curvature LP), matching
+    # StarPilot, so the profile no longer compensates -- offset is 0.0 to avoid
+    # double-counting the 0.1 that controlsd already adds.
+    assert np.isclose(i6p.Ioniq6StarPilotProfile.lat_delay_offset, 0.0)
 
   def test_low_speed_factor_floor_matches_starpilot(self):
     from openpilot.selfdrive.controls.lib.drive_helpers import MIN_SPEED

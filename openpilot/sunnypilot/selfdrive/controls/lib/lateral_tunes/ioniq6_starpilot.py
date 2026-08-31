@@ -68,21 +68,26 @@ CENTER_CHATTER_JERK_DEADZONE_SPEED_V = [0.08, 0.12, 0.18, 0.18]  # m/s^3
 CENTER_CHATTER_JERK_DEADZONE_LAT_ACCEL_BP = [0.0, 0.18, 0.35]   # m/s^2
 CENTER_CHATTER_JERK_DEADZONE_LAT_ACCEL_V = [1.0, 1.0, 0.0]
 
-# StarPilot's modeld sets LAT_SMOOTH_SECONDS = 0.1; the shared modeld here sets 0.0, and
-# controlsd passes lat_delay = lateralDelay + LAT_SMOOTH_SECONDS. Adding the difference
-# back inside the profile therefore reproduces StarPilot's lat_delay EXACTLY, not
-# approximately. It matters: lat_delay is the denominator of raw_lateral_jerk, so without
-# it every jerk value is ~22% larger than the scale these constants were calibrated on
-# (measured lateralDelay on this car is 0.4585 s: 0.4585 vs 0.5585). The jerk-keyed
-# constants that would otherwise sit off their operating point are
-# IONIQ_6_DIRECTIONAL_TAPER_JERK_ONSET, IONIQ_6_FRICTION_JERK_RISE,
-# IONIQ_6_FRICTION_JERK_DEADZONE, IONIQ_6_2023_UNWIND_FF_JERK,
-# IONIQ_6_HIGHWAY_TRANSITION_OUTPUT_TAPER_JERK and the MAX_LAT_JERK_UP clip.
+# StarPilot's modeld sets LAT_SMOOTH_SECONDS = 0.1, which does TWO things, both derived
+# from that one constant: (1) it low-passes the model's published desiredCurvature via
+# smooth_value (tau=0.1, alpha=0.393 @20Hz) -- a first-order source LP that rounds the
+# curvature ramp before the controller ever sees it; and (2) controlsd adds 0.1 to
+# lat_delay. The shared modeld here now ALSO sets LAT_SMOOTH_SECONDS = 0.1 (see
+# openpilot/selfdrive/modeld/modeld.py), so both effects are reproduced at the source and
+# the profile no longer needs to compensate. The offset below is therefore 0.0.
 #
-# Only the controller-side effect is reproduced. StarPilot's 0.1 also low-passes the model's
-# published desiredCurvature and shifts the model's own action horizon (lat_action_t); both
-# live in modeld, and neither is reproduced here. See the profile docs for why.
-LAT_SMOOTH_SECONDS_OFFSET = 0.1
+# Previously the shared modeld was 0.0 and this offset was 0.1 to reproduce StarPilot's
+# lat_delay (effect 2) ONLY -- but that left the source LP (effect 1) missing, so the
+# controller operated on raw (sharper) desiredCurvature than StarPilot's. At low speed in
+# tight corners that drove the feedforward into rail-to-rail slams on corner unwind
+# (measured on route 000001ae, Aug 31 2026). Setting modeld to 0.1 fixes effect 1; this
+# offset returns to 0.0 so lat_delay is not double-counted (0.323 + 0.1 = 0.423, same as
+# before and same as StarPilot). lat_delay is the denominator of raw_lateral_jerk, so the
+# jerk-keyed constants (IONIQ_6_DIRECTIONAL_TAPER_JERK_ONSET, IONIQ_6_FRICTION_JERK_RISE,
+# IONIQ_6_FRICTION_JERK_DEADZONE, IONIQ_6_2023_UNWIND_FF_JERK,
+# IONIQ_6_HIGHWAY_TRANSITION_OUTPUT_TAPER_JERK, MAX_LAT_JERK_UP) stay on their operating
+# point. Measured lateralDelay on this car is ~0.323 s.
+LAT_SMOOTH_SECONDS_OFFSET = 0.0
 
 
 def get_center_chatter_friction_jerk_deadzone(v_ego, setpoint, vehicle_deadzone=0.0):
@@ -227,7 +232,10 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
              pid_log, lat_delay) -> float:
     self._apply_speed_scheduled_factor(ctl, CS.vEgo)
 
-    # Reproduce StarPilot's lat_delay (see LAT_SMOOTH_SECONDS_OFFSET).
+    # lat_delay already includes modeld's LAT_SMOOTH_SECONDS (0.1) via controlsd, matching
+    # StarPilot exactly. The profile offset is 0.0 now that modeld carries the 0.1 (see
+    # LAT_SMOOTH_SECONDS_OFFSET above); kept as a no-op for structural parity with the
+    # base profile interface.
     lat_delay = lat_delay + self.lat_delay_offset
 
     # steering-release I decay: bleed integrator when the driver lets go, so a resumed
