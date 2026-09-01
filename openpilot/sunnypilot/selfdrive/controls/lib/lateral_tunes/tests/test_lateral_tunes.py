@@ -310,6 +310,55 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
       else:
         assert amp > keep, (f, amp)
 
+  def test_creep_center_relief_fires_only_near_centre_at_creep(self):
+    """The relief must cut the near-centre creep error and nothing else. Measured envelope
+    on route 000001c5: 0.70 on the seg-22 ping-pong band, 0.000 on parking maneuvers and
+    0.000 on normal driving."""
+    f = i6.get_ioniq_6_2023_low_speed_center_error_scale
+    S = i6.IONIQ_6_2023_LOW_SPEED_CENTER_ERROR_SCALE
+
+    # the ping-pong case: creep, straight, model asking for nothing
+    near_centre = f(-0.002, 0.0, 1.5, 6.5)
+    assert near_centre < 0.5, near_centre
+
+    # must NOT touch real steering: past the angle gate, off centre, or during a jerk
+    assert f(-0.002, 0.0, 1.5, 460.0) == pytest.approx(1.0, abs=0.02)   # parking lock
+    assert f(-0.90, 0.0, 1.5, 6.5) == pytest.approx(1.0, abs=0.02)      # real turn command
+    assert f(-0.002, 2.0, 1.5, 6.5) == pytest.approx(1.0, abs=0.02)     # jerk commanded
+    # and effectively nothing above creep speed (<=1.1% at 8 m/s, none by 15)
+    assert f(-0.002, 0.0, 8.0, 6.5) > 0.98
+    for v in (15.0, 30.0):
+      assert f(-0.002, 0.0, v, 6.5) == pytest.approx(1.0, abs=1e-3), v
+
+    # bounded by the scale, never inverts or amplifies
+    for ds in (-1.0, -0.1, 0.0, 0.1, 1.0):
+      for v in (0.0, 1.0, 3.0, 10.0):
+        for ang in (0.0, 30.0, 200.0):
+          assert S - 1e-9 <= f(ds, 0.0, v, ang) <= 1.0 + 1e-9
+
+  def test_creep_center_relief_raises_the_rail_threshold(self):
+    """Sizing check. seg 22 railed on a raw error of 0.066 m/s^2. The relief must raise the
+    error needed to rail by >=2x across the creep band, and clear 0.066 from ~7 km/h up.
+
+    It does NOT clear 0.066 below that: the effective creep gain (kp ~250 at 1 m/s) is too
+    extreme for a bounded multiplier -- even S=0.03 only reaches 0.062 at 5.4 km/h. That is
+    a known limit, recorded so a future drive that still weaves under ~7 km/h points at the
+    gain table or the roll term rather than at this scale."""
+    prof = i6p.Ioniq6StarPilotProfile
+
+    def rail_error(v, scaled):
+      kp = np.interp(v, i6p.INTERP_SPEEDS, i6p.KP_INTERP)
+      lsf = (np.interp(v, i6p.LOW_SPEED_X, i6p.LOW_SPEED_Y) /
+             max(v, prof.low_speed_factor_min_speed)) ** 2
+      eff = kp * (1 + lsf / max(kp, 1e-3))
+      s = i6.get_ioniq_6_2023_low_speed_center_error_scale(-0.002, 0.0, v, 6.5) if scaled else 1.0
+      return 3.66 / (eff * s)
+
+    for v in (1.0, 1.5, 2.0, 2.5, 3.0):
+      assert rail_error(v, True) >= 2.0 * rail_error(v, False), v
+    for v in (2.0, 2.5, 3.0):          # ~7 km/h and up
+      assert rail_error(v, True) > 0.066, (v, rail_error(v, True))
+
   def test_monitor_measures_a_synthetic_ripple(self):
     """The monitor's one job. Feed a clean sinusoid at a known frequency and it must report
     it. This is the regression that would have caught the 0.45 Hz search floor: on Sep 1 the

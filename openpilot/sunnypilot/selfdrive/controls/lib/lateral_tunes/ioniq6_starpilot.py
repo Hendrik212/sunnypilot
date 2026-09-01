@@ -283,6 +283,13 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     current_kp = np.interp(CS.vEgo, ctl.pid._k_p[0], ctl.pid._k_p[1])
     error = setpoint - measurement
     error_with_lsf = error * (1 + low_speed_factor / max(current_kp, 1e-3))
+    # Near-centre creep relief. StarPilot gates its version to the 2025 path, so the 2023
+    # car otherwise runs the full creep gain (effective kp ~250 below 1.5 m/s) against
+    # camber-scale error and goes bang-bang -- see the shaping module for the measurement.
+    # Enveloped on speed, |setpoint|, jerk AND steering angle, so real parking maneuvers
+    # and all normal driving are untouched (measured envelope 0.000 on both).
+    error_with_lsf *= i6.get_ioniq_6_2023_low_speed_center_error_scale(
+      setpoint, desired_lateral_jerk, CS.vEgo, CS.steeringAngleDeg - params.angleOffsetDeg)
 
     pid_log.error = float(error_with_lsf)
     pid_log.actualLateralAccel = float(measurement)

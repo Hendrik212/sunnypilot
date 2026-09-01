@@ -463,6 +463,69 @@ def get_ioniq_6_highway_transition_output_taper_scale(desired_lateral_accel: flo
   reduction = IONIQ_6_HIGHWAY_TRANSITION_OUTPUT_TAPER_MAX * speed_weight * center_weight * jerk_weight
   return 1.0 - reduction
 
+# --- 2023 low-speed centre error relief -------------------------------------------------
+# StarPilot ships `get_ioniq_6_2025_low_speed_center_error_scale` but gates it to the 2025
+# path, so the 2023 car runs the full creep gain with no near-centre relief. Measured on
+# route 000001c5 seg 22 (straight stretch, 4-8 km/h, wheel swinging -29..+28 deg through
+# centre): desiredLateralAccel was -0.02..-0.001 (the model wants nothing) yet the output
+# slammed +1.00 -> -1.00 -> +0.71 in ~2 s. Among railed frames |P| p50 4.71 vs |ff| p50
+# 0.214 -- 22x P-driven -- on a raw error of only 0.066 m/s^2. The effective creep gain
+# (kp x low_speed_factor boost) is ~250 below 1.5 m/s, so 0.1 m/s^2 commands 10.7x the rail
+# at 1 m/s: the loop is bang-bang for any error above ~0.01 m/s^2. The persistent error is
+# road camber -- in that band |ff| p50 equals |roll_compensation| p50 exactly (30x the
+# desired lat accel, from 1.5 deg of camber). Roll is the bias, P is the amplifier.
+#
+# Same shape as the 2025 envelope, with two deliberate differences:
+#  * ERROR_SCALE 0.08, not StarPilot's 0.68, and a tighter speed gate (4.0/0.9 vs 5.0/1.3
+#    -- the wider one still cut error by 6% at 8 m/s, which is normal driving). Sizing
+#    against the gain table, the raw error needed to rail rises 2.0-2.9x across 3.6-11
+#    km/h (e.g. 0.037 -> 0.095 at 7.2 km/h), clearing the observed 0.066 from ~7 km/h up.
+#    HONEST LIMIT: below ~7 km/h it improves things 2.8x but still does not clear 0.066 --
+#    the underlying gain there (effective kp ~250) is too extreme for any bounded
+#    multiplier, and S=0.03 only reaches 0.062. If creep weave persists below ~7 km/h
+#    after a drive, the next lever is the gain table or the roll term, not this scale.
+#  * An added steering-ANGLE gate. |desiredLateralAccel| alone does NOT separate the two
+#    creep regimes (at 2 m/s even full lock is only ~0.44 m/s^2), so the bare 2025 envelope
+#    scores 0.507 on real parking maneuvers -- which legitimately need the rail (>=15 deg
+#    steering is 40% of engaged creep frames and 85-96% of those are railed). Adding the
+#    angle gate measures 0.70 on the ping-pong band and 0.000 on both parking maneuvers
+#    and normal driving.
+IONIQ_6_2023_LOW_SPEED_CENTER_ERROR_SCALE = 0.08
+IONIQ_6_2023_LOW_SPEED_CENTER_SPEED = 4.0
+IONIQ_6_2023_LOW_SPEED_CENTER_SPEED_WIDTH = 0.9
+IONIQ_6_2023_LOW_SPEED_CENTER_LAT = 0.22
+IONIQ_6_2023_LOW_SPEED_CENTER_LAT_WIDTH = 0.10
+IONIQ_6_2023_LOW_SPEED_CENTER_JERK = 0.30
+IONIQ_6_2023_LOW_SPEED_CENTER_JERK_WIDTH = 0.13
+IONIQ_6_2023_LOW_SPEED_CENTER_ANGLE = 40.0
+IONIQ_6_2023_LOW_SPEED_CENTER_ANGLE_WIDTH = 15.0
+
+
+def _ioniq_6_2023_low_speed_center_envelope(desired_lateral_accel: float, desired_lateral_jerk: float,
+                                            v_ego: float, steering_angle_deg: float) -> float:
+  speed_weight = _ioniq_6_sigmoid((IONIQ_6_2023_LOW_SPEED_CENTER_SPEED - max(v_ego, 0.0)) /
+                                  IONIQ_6_2023_LOW_SPEED_CENTER_SPEED_WIDTH)
+  center_weight = _ioniq_6_sigmoid((IONIQ_6_2023_LOW_SPEED_CENTER_LAT - abs(desired_lateral_accel)) /
+                                   IONIQ_6_2023_LOW_SPEED_CENTER_LAT_WIDTH)
+  calm_weight = _ioniq_6_sigmoid((IONIQ_6_2023_LOW_SPEED_CENTER_JERK - abs(desired_lateral_jerk)) /
+                                 IONIQ_6_2023_LOW_SPEED_CENTER_JERK_WIDTH)
+  angle_weight = _ioniq_6_sigmoid((IONIQ_6_2023_LOW_SPEED_CENTER_ANGLE - abs(steering_angle_deg)) /
+                                  IONIQ_6_2023_LOW_SPEED_CENTER_ANGLE_WIDTH)
+  return speed_weight * center_weight * calm_weight * angle_weight
+
+
+def get_ioniq_6_2023_low_speed_center_error_scale(desired_lateral_accel: float, desired_lateral_jerk: float,
+                                                  v_ego: float, steering_angle_deg: float) -> float:
+  """Cut the near-centre creep error so camber-scale error stops railing the loop.
+
+  Returns 1.0 (no change) outside the envelope: above ~4 m/s, off centre, during a jerk
+  command, or once the wheel is turned past ~40 deg.
+  """
+  envelope = _ioniq_6_2023_low_speed_center_envelope(desired_lateral_accel, desired_lateral_jerk,
+                                                     v_ego, steering_angle_deg)
+  return 1.0 - (1.0 - IONIQ_6_2023_LOW_SPEED_CENTER_ERROR_SCALE) * envelope
+
+
 def get_ioniq_6_low_speed_angle_assist_torque(desired_angle_deg: float, actual_angle_deg: float,
                                               current_output_torque: float, v_ego: float) -> float:
   angle_error = desired_angle_deg - actual_angle_deg
