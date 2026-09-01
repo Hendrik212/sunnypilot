@@ -74,8 +74,13 @@ RIPPLE_NOTCH_SPEED_BP = [14.0, 16.0]   # m/s
 RIPPLE_NOTCH_BLEND_V = [0.0, 1.0]
 
 # --- monitor (logged, never actuated) ---
-RIPPLE_SEARCH_HZ = (0.45, 1.05)
-RIPPLE_BACKGROUND_FIT_HZ = (0.15, 2.0)
+# Search band must cover every model family we might run, not just the small model's
+# 0.69 Hz bump: the chestnut big models put their ripple well below the old 0.45 Hz floor
+# (BMV4 measures 0.40-0.47 Hz, an earlier chestnut checkpoint 0.27 Hz), so a monitor
+# clamped to 0.45-1.05 was structurally blind to them and reported nothing. The background
+# fit band widens with it to keep the bump well inside the fitted region.
+RIPPLE_SEARCH_HZ = (0.20, 1.05)
+RIPPLE_BACKGROUND_FIT_HZ = (0.10, 2.0)
 RIPPLE_CLAMP_HZ = (0.50, 1.00)
 ESTIMATOR_TARGET_RATE_HZ = 5.0
 ESTIMATOR_WINDOW_S = 90.0
@@ -206,6 +211,11 @@ class RippleFrequencyMonitor:
     return acc / max(count, 1)
 
   def _estimate(self) -> None:
+    # `measured_hz` and `excess` are telemetry and are published UNCONDITIONALLY whenever a
+    # spectrum exists. Only `qualifying` (and therefore any notch retune) is gated. The
+    # previous version returned before assigning `measured_hz` on every gate failure, so a
+    # route whose ripple never cleared the gate logged a flat 0.0 -- indistinguishable from
+    # "no ripple" and useless for diagnosing an unfamiliar model.
     if self.in_band.mean() < ESTIMATOR_MIN_IN_BAND:
       self.qualifying = 0
       self.excess = 0.0
@@ -222,17 +232,15 @@ class RippleFrequencyMonitor:
     freqs = self._freqs[self._search]
     self.excess = float(band.max())
 
-    if self.excess < ESTIMATOR_MIN_EXCESS:
-      self.qualifying = 0
-      return
-
     # Power-weighted centroid of the excess, not argmax: same median against the offline
     # truth but 35% less spread window to window (IQR 0.102 vs 0.156 Hz on 000001a4).
     weight = np.maximum(band - 1.0, 0.0) ** 2
-    if weight.sum() <= 0.0:
+    if weight.sum() > 0.0:
+      self.measured_hz = float((freqs * weight).sum() / weight.sum())
+
+    if self.excess < ESTIMATOR_MIN_EXCESS or weight.sum() <= 0.0:
       self.qualifying = 0
       return
-    self.measured_hz = float((freqs * weight).sum() / weight.sum())
 
     self.qualifying += 1
     if self.qualifying < ESTIMATOR_CONSECUTIVE:

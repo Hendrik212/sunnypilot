@@ -4,12 +4,13 @@ Regression tests for the lateral tune profile layer.
 Covers:
   * the upstream path selects NO profile and is untouched;
   * the StarPilot profile owns its baseline, PID (KP=0.6/KI=0.35), and refuses torqued;
-  * StarPilot CAN envelope is speed-scheduled (650 creep+mid / 409 highway)
+  * StarPilot CAN envelope is speed-scheduled (409 creep / 650 mid / 409 highway)
     and the peak matches panda max_torque; unsaturated CAN/m/s^2 stays 409/3.66.
 """
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.honda.values import CAR as HONDA
@@ -77,8 +78,8 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
 
   def test_starpilot_baseline_is_owned_by_the_profile(self):
     ctl, _, CP = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
-    # The constructor applies the speed schedule at v=0; with the flat 650 low end that
-    # scales latAccelFactor by 650/409 over the base (3.0 x 1.22 = 3.66 -> 5.82).
+    # The constructor applies the speed schedule at v=0, so compare against the scheduled
+    # value rather than the raw base -- the schedule is the source of truth for both.
     from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed, friction_for_speed
     base = IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] * i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
     expected_laf = lat_accel_factor_for_speed(0.0, base)
@@ -96,8 +97,8 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     ctl.update_torque_parameters(2.5, 0.0, 0.005)
     after = (ctl.torque_params.latAccelFactor, ctl.torque_params.friction)
     assert before == after, f"live params overwrote the tune: {before} -> {after}"
-    # friction is the scheduled value at v=0 (0.09*409/650 = 0.0566 with the flat 650 low end),
-    # not the base 0.09 -- so check it equals the scheduled base, not a hardcoded constant.
+    # friction is the SCHEDULED value at v=0, not a hardcoded constant -- derive it from the
+    # schedule so this test survives future ceiling changes.
     from opendbc.sunnypilot.car.hyundai.lateral_limits import friction_for_speed
     assert np.isclose(ctl.torque_params.friction, friction_for_speed(0.0, IONIQ6_STARPILOT_TORQUE['FRICTION']))
 
@@ -163,7 +164,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     tuned_creep = CarControllerParams(CP, 2.0, CP_SP=CP_SP)
     tuned_slow = CarControllerParams(CP, 10.0, CP_SP=CP_SP)
     tuned_fast = CarControllerParams(CP, 25.0, CP_SP=CP_SP)
-    assert tuned_creep.STEER_MAX == 650  # 0-10 km/h now at the 650 rail (flat low end)
+    assert tuned_creep.STEER_MAX == 409  # 0-18 km/h stays at the StarPilot rail
     assert tuned_slow.STEER_MAX == 650 and tuned_fast.STEER_MAX == 409
     assert tuned_slow.STEER_DRIVER_ALLOWANCE == 75 and tuned_slow.STEER_THRESHOLD == 100
     assert (tuned_slow.STEER_DELTA_UP, tuned_slow.STEER_DELTA_DOWN) == (10, 8)
@@ -195,8 +196,8 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
       assert steer_max <= panda_max, f"car layer asks {steer_max} at {v} m/s, panda allows {panda_max}"
     assert worst == panda_max, f"panda envelope {panda_max} does not match peak request {worst}"
 
-    assert CarControllerParams(CP, 0.0, CP_SP=CP_SP).STEER_MAX == 650
-    assert CarControllerParams(CP, 5.0, CP_SP=CP_SP).STEER_MAX == 650
+    assert CarControllerParams(CP, 0.0, CP_SP=CP_SP).STEER_MAX == 409
+    assert CarControllerParams(CP, 5.0, CP_SP=CP_SP).STEER_MAX == 409
     assert CarControllerParams(CP, 6.5, CP_SP=CP_SP).STEER_MAX == 650
     assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_MAX == 650
     assert CarControllerParams(CP, 15.0, CP_SP=CP_SP).STEER_MAX == 650
@@ -256,7 +257,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
   def test_profile_schedules_friction_with_the_ceiling(self):
     """The invariance above is worthless unless the profile actually writes it each frame."""
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
-    for v, steer_max in ((0.0, 650), (10.0, 650), (30.0, 409)):
+    for v, steer_max in ((0.0, 409), (10.0, 650), (30.0, 409)):
       ctl.profile._apply_speed_scheduled_factor(ctl, v)
       assert np.isclose(ctl.torque_params.friction * steer_max, 0.09 * 409, rtol=1e-3), v
     # and it is idempotent -- repeated calls at one speed must not compound
@@ -308,6 +309,49 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
         assert amp < keep, (f, amp)
       else:
         assert amp > keep, (f, amp)
+
+  def test_monitor_measures_a_synthetic_ripple(self):
+    """The monitor's one job. Feed a clean sinusoid at a known frequency and it must report
+    it. This is the regression that would have caught the 0.45 Hz search floor: on Sep 1 the
+    monitor logged measured_hz = 0.0 for a whole route while the offline estimator found a
+    x12-x68 bump, because the big model's ripple sat below the search band."""
+    for f_true in (0.30, 0.45, 0.69, 0.90):
+      mon = rn.RippleFrequencyMonitor(DT_CTRL)
+      n = int(180.0 / DT_CTRL)
+      t = np.arange(n) * DT_CTRL
+      # ripple + pink-ish background so the power-law fit has something to fit
+      rng = np.random.default_rng(0)
+      bg = np.cumsum(rng.normal(0.0, 2e-5, n))
+      sig = 3e-3 * np.sin(2 * np.pi * f_true * t) + bg
+      for v in sig:
+        mon.update(float(v), 25.0)
+      assert mon.measured_hz == pytest.approx(f_true, abs=0.08), (f_true, mon.measured_hz)
+      assert mon.excess > rn.ESTIMATOR_MIN_EXCESS, (f_true, mon.excess)
+
+  def test_monitor_publishes_a_reading_on_every_spectrum(self):
+    """measured_hz/excess are telemetry and must be published whenever a spectrum exists;
+    only `qualifying` is gated. A flat 0.0 on a route with a real bump was the bug (Sep 1:
+    the monitor logged 0.0 for a whole route while the offline estimator found x12-x68).
+
+    NB the excess gate does NOT separate ripple from noise -- pure power-law noise scores
+    excess 5.7-9.7 here, versus a ~7.6 median on real qualifying windows (000001a4). What
+    actually protects the notch is that nothing reads `f_hz`
+    (see test_ripple_monitor_never_reaches_control) plus RIPPLE_CLAMP_HZ and the slow slew.
+    Do not treat `qualifying` as evidence a real ripple was found."""
+    mon = rn.RippleFrequencyMonitor(DT_CTRL)
+    n = int(180.0 / DT_CTRL)
+    rng = np.random.default_rng(1)
+    for v in np.cumsum(rng.normal(0.0, 3e-5, n)):
+      mon.update(float(v), 25.0)
+    assert mon.measured_hz > 0.0, "a spectrum existed but nothing was logged"
+    assert mon.excess > 0.0
+
+  def test_monitor_search_band_covers_the_big_model_ripple(self):
+    """BMV4 measures 0.40-0.47 Hz and an earlier chestnut checkpoint 0.27 Hz; the retune
+    clamp stays narrow so a wide search cannot drag the notch somewhere unvalidated."""
+    assert rn.RIPPLE_SEARCH_HZ[0] <= 0.25
+    assert rn.RIPPLE_BACKGROUND_FIT_HZ[0] < rn.RIPPLE_SEARCH_HZ[0]
+    assert rn.RIPPLE_CLAMP_HZ[0] >= 0.45 and rn.RIPPLE_CLAMP_HZ[1] <= 1.05
 
   def test_ripple_monitor_never_reaches_control(self):
     """The monitor is inert by construction: the notch frequency is the constant, and
