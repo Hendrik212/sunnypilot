@@ -4,7 +4,7 @@ Regression tests for the lateral tune profile layer.
 Covers:
   * the upstream path selects NO profile and is untouched;
   * the StarPilot profile owns its baseline, PID (KP=0.6/KI=0.35), and refuses torqued;
-  * StarPilot CAN envelope is speed-scheduled (409 creep / 600 mid / 409 highway)
+  * StarPilot CAN envelope is speed-scheduled (409 creep / 650 mid / 409 highway)
     and the peak matches panda max_torque; unsaturated CAN/m/s^2 stays 409/3.66.
 """
 from pathlib import Path
@@ -156,7 +156,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     tuned_slow = CarControllerParams(CP, 10.0, CP_SP=CP_SP)
     tuned_fast = CarControllerParams(CP, 25.0, CP_SP=CP_SP)
     assert tuned_creep.STEER_MAX == 409  # 0-10 km/h stays at the StarPilot rail
-    assert tuned_slow.STEER_MAX == 600 and tuned_fast.STEER_MAX == 409
+    assert tuned_slow.STEER_MAX == 650 and tuned_fast.STEER_MAX == 409
     assert tuned_slow.STEER_DRIVER_ALLOWANCE == 75 and tuned_slow.STEER_THRESHOLD == 100
     assert (tuned_slow.STEER_DELTA_UP, tuned_slow.STEER_DELTA_DOWN) == (10, 8)
     assert (tuned_fast.STEER_DELTA_UP, tuned_fast.STEER_DELTA_DOWN) == (2, 3)
@@ -189,9 +189,9 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
 
     assert CarControllerParams(CP, 0.0, CP_SP=CP_SP).STEER_MAX == 409
     assert CarControllerParams(CP, 5.0, CP_SP=CP_SP).STEER_MAX == 409
-    assert CarControllerParams(CP, 6.5, CP_SP=CP_SP).STEER_MAX == 600
-    assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_MAX == 600
-    assert CarControllerParams(CP, 15.0, CP_SP=CP_SP).STEER_MAX == 600
+    assert CarControllerParams(CP, 6.5, CP_SP=CP_SP).STEER_MAX == 650
+    assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_MAX == 650
+    assert CarControllerParams(CP, 15.0, CP_SP=CP_SP).STEER_MAX == 650
     assert CarControllerParams(CP, 17.0, CP_SP=CP_SP).STEER_MAX == 409
     assert CarControllerParams(CP, 30.0, CP_SP=CP_SP).STEER_MAX == 409
     assert ll.STARPILOT_STEER_MAX == panda_max
@@ -248,7 +248,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
   def test_profile_schedules_friction_with_the_ceiling(self):
     """The invariance above is worthless unless the profile actually writes it each frame."""
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
-    for v, steer_max in ((0.0, 409), (10.0, 600), (30.0, 409)):
+    for v, steer_max in ((0.0, 409), (10.0, 650), (30.0, 409)):
       ctl.profile._apply_speed_scheduled_factor(ctl, v)
       assert np.isclose(ctl.torque_params.friction * steer_max, 0.09 * 409, rtol=1e-3), v
     # and it is idempotent -- repeated calls at one speed must not compound
