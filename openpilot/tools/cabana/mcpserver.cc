@@ -8,6 +8,7 @@
 #include <QRegularExpression>
 #include <QThread>
 
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <algorithm>
@@ -828,8 +829,14 @@ QJsonObject McpServer::executeGetRouteInfo(const QJsonObject &args) {
     result["max_time"] = stream->maxSeconds();
     result["total_events"] = static_cast<int>(stream->allEvents().size());
     result["playback_speed"] = stream->getSpeed();
-    QDateTime beginTime = stream->beginDateTime();
-    if (beginTime.isValid()) result["begin_datetime"] = beginTime.toString(Qt::ISODate);
+    // beginDateTime() returns std::chrono::system_clock::time_point since upstream de-Qt'd
+    // the stream interface (#38718). AbstractStream's default is a default-constructed
+    // (epoch) time_point, which stands in for the old invalid QDateTime.
+    const auto begin_tp = stream->beginDateTime();
+    if (begin_tp.time_since_epoch().count() != 0) {
+      const auto begin_ms = std::chrono::duration_cast<std::chrono::milliseconds>(begin_tp.time_since_epoch()).count();
+      result["begin_datetime"] = QDateTime::fromMSecsSinceEpoch(begin_ms).toString(Qt::ISODate);
+    }
     QJsonObject messageStats;
     const auto &lastMessages = stream->lastMessages();
     messageStats["unique_messages"] = static_cast<int>(lastMessages.size());

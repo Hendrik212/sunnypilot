@@ -48,8 +48,10 @@ else:
 
   qt_libs = [f"Qt5{m}" for m in qt_modules]
 qt_env['QT3DIR'] = qt_env['QTDIR']
-# SCons 4.5+ dropped the bundled qt3 tool. Replay/jotpluggler do not need it;
-# skip cabana rather than aborting the extras build.
+# SCons 4.11 removed the bundled qt3 tool (4.5 is where it was renamed from 'qt', not
+# where it went away), and uv.lock pins 4.11.0 -- so cabana cannot build with the locked
+# toolchain. Replay/jotpluggler do not need qt3; skip cabana rather than aborting the
+# extras build. Install scons 4.10.0, the last version carrying the tool, to build it.
 try:
   qt_env.Tool('qt3')
 except Exception:
