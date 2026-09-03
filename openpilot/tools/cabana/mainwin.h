@@ -20,12 +20,14 @@
 #include "tools/cabana/tools/findsimilarbits.h"
 
 class McpServer;  // Forward declaration
+class QProgressDialog;
 
 class MainWindow : public QMainWindow {
   Q_OBJECT
 
 public:
   MainWindow(AbstractStream *stream, const QString &dbc_file);
+  ~MainWindow();
   void toggleChartsDocking();
   void showStatusMessage(const QString &msg, int timeout = 0) { statusBar()->showMessage(msg, timeout); }
   void loadFile(const QString &fn, SourceSet s = SOURCE_ALL);
@@ -45,10 +47,6 @@ public slots:
   void save();
   void saveAs();
   void saveToClipboard();
-
-signals:
-  void showMessage(const QString &msg, int timeout);
-  void updateProgressBar(uint64_t cur, uint64_t total, bool success);
 
 protected:
   void startStream(AbstractStream *stream, QString dbc_file);
@@ -109,6 +107,10 @@ protected:
   QString car_fingerprint;
   std::vector<uint8_t> default_state;
   McpServer *mcp_server = nullptr;
+  Connections connections_;
+  Connections stream_connections_;
+  Connection wait_dlg_connection_;
+  QProgressDialog *wait_dlg_ = nullptr;
 };
 
 class HelpOverlay : public QWidget {
