@@ -101,6 +101,10 @@ class SelfdriveD(CruiseHelper):
     ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan'] + ['modelDataV2SP', 'longitudinalPlanSP']
     if SIMULATION:
       ignore += ['cabinCameraState', 'managerState']
+      # torqued can't fit the lateral model until the car has actually moved, so its first
+      # valid frame lags engagement. In sim the car can't move until it engages, so this
+      # would deadlock -- ignore it the way replay ignores camera packets.
+      ignore += ['lateralTorqueParameters']
     if REPLAY:
       # no vipc in replay will make them ignored anyways
       ignore += ['narrowRoadCameraState', 'wideRoadCameraState']

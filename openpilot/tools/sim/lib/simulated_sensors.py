@@ -97,12 +97,16 @@ class SimulatedSensors:
 
   def send_camera_images(self, world: 'World'):
     world.image_lock.acquire()
+    # Single shared timestamp and frame_id for both cameras so they stay paired --
+    # modeld's dual-camera sync drain loops consume mismatched frames if narrow and
+    # wide drift apart in frame_id or timestamp.
+    eof_ns = int(time.monotonic() * 1e9)
     yuv = self.camerad.rgb_to_yuv(world.road_image)
-    self.camerad.cam_send_yuv_road(yuv)
+    self.camerad.cam_send_yuv_road(yuv, eof_ns=eof_ns)
 
     if world.dual_camera:
       yuv = self.camerad.rgb_to_yuv(world.wide_road_image)
-      self.camerad.cam_send_yuv_wide_road(yuv)
+      self.camerad.cam_send_yuv_wide_road(yuv, eof_ns=eof_ns)
 
   def update(self, simulator_state: 'SimulatorState', world: 'World'):
     now = time.monotonic()
