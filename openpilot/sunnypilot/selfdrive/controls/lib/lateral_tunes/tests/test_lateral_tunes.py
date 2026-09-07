@@ -215,6 +215,91 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
       p = CarControllerParams(CP, v, CP_SP=CP_SP)
       assert (p.STEER_MAX, p.STEER_DELTA_UP, p.STEER_DELTA_DOWN) == (270, 2, 3), v
 
+  def test_v3_limits_are_flat_650_across_all_speeds(self):
+    """v3 ships flat 650 STEER_MAX and 10/8 rate with no speed schedule, so every speed
+    band sees the same high-authority limits. This is the testing isolator: v1's control
+    law under maximum CAN authority, without the StarPilot speed schedule."""
+    from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
+
+    CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
+    CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HYUNDAI.HYUNDAI_IONIQ_6)
+
+    CP_SP.flags &= ~(HyundaiFlagsSP.LAT_TUNE_STARPILOT | HyundaiFlagsSP.LAT_TUNE_V3).value
+    CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_V3.value
+    for v in (0.0, 2.0, 5.0, 10.0, 15.0, 17.0, 20.0, 25.0, 30.0, 40.0):
+      p = CarControllerParams(CP, v, CP_SP=CP_SP)
+      assert p.STEER_MAX == 650, f"STEER_MAX at {v} m/s = {p.STEER_MAX}, expected 650"
+      assert p.STEER_DELTA_UP == 10, f"DELTA_UP at {v} m/s = {p.STEER_DELTA_UP}"
+      assert p.STEER_DELTA_DOWN == 8, f"DELTA_DOWN at {v} m/s = {p.STEER_DELTA_DOWN}"
+    assert ll.V3_STEER_MAX == 650
+
+  def test_v3_limits_do_not_leak_into_starpilot_or_stock(self):
+    """LAT_TUNE_V3 must not set LAT_TUNE_STARPILOT, and vice versa. Stock (neither flag)
+    stays at 270."""
+    CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
+    CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HYUNDAI.HYUNDAI_IONIQ_6)
+
+    CP_SP.flags &= ~(HyundaiFlagsSP.LAT_TUNE_STARPILOT | HyundaiFlagsSP.LAT_TUNE_V3).value
+    CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_V3.value
+    assert not (CP_SP.flags & HyundaiFlagsSP.LAT_TUNE_STARPILOT)
+    assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_MAX == 650
+
+    CP_SP.flags &= ~(HyundaiFlagsSP.LAT_TUNE_STARPILOT | HyundaiFlagsSP.LAT_TUNE_V3).value
+    CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
+    assert not (CP_SP.flags & HyundaiFlagsSP.LAT_TUNE_V3)
+    assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_MAX == 650  # scheduled peak
+    assert CarControllerParams(CP, 0.0, CP_SP=CP_SP).STEER_MAX == 409   # scheduled floor
+
+    CP_SP.flags &= ~(HyundaiFlagsSP.LAT_TUNE_STARPILOT | HyundaiFlagsSP.LAT_TUNE_V3).value
+    assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_MAX == 270
+
+  def test_has_increased_lat_limits_covers_v2_and_v3(self):
+    """The umbrella predicate is True for both v2 and v3; is_starpilot_lat_tune is v2 only."""
+    from opendbc.sunnypilot.car.hyundai.values import has_increased_lat_limits, is_starpilot_lat_tune
+
+    CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
+    CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
+
+    for tune in ("2.0", "3.0"):
+      assert has_increased_lat_limits(CP, tune, True), tune
+    assert not has_increased_lat_limits(CP, "0.0", True)
+    assert not has_increased_lat_limits(CP, "1.0", True)
+    assert not has_increased_lat_limits(CP, "2.0", False)  # EnforceTorqueControl off
+
+    assert is_starpilot_lat_tune(CP, "2.0", True)
+    assert not is_starpilot_lat_tune(CP, "3.0", True)  # v3 is NOT StarPilot
+    assert not is_starpilot_lat_tune(CP, "0.0", True)
+
+  def test_v3_controller_is_stock_v1_body(self):
+    """v3 is the stock v1 controller (KP=0.8/KI=0.15, lookahead-jerk) with VERSION=3 and
+    no profile hook."""
+    import openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v3 as v3
+    import openpilot.selfdrive.controls.lib.latcontrol_torque as v1
+
+    assert v3.VERSION == 3
+    assert v3.KP == v1.KP == 0.8
+    assert v3.KI == v1.KI == 0.15
+    assert v3.JERK_GAIN == v1.JERK_GAIN
+    assert v3.JERK_LOOKAHEAD_SECONDS == v1.JERK_LOOKAHEAD_SECONDS
+    # v3 must NOT import the profile registry (no StarPilot hook)
+    assert not hasattr(v3, 'get_lateral_tune_profile')
+
+  def test_v3_selects_no_profile(self):
+    """v3 (TorqueControlTune=3.0) must NOT get the StarPilot profile — it is v1 + limits only."""
+    from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import get_lateral_tune_profile
+
+    CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
+    CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HYUNDAI.HYUNDAI_IONIQ_6)
+
+    params = Params()
+    params.put_bool("EnforceTorqueControl", True, block=True)
+    params.put("TorqueControlTune", 3.0, block=True)
+    profile = get_lateral_tune_profile(CP, CP_SP, params)
+    assert profile is None, "v3 must not select a StarPilot profile"
+
   def test_starpilot_pid_gains_match_starpilot(self):
     """v2 constructs KP=1.0 / KI=0.3; the profile must overwrite those with StarPilot's
     0.6 / 0.35. Below 15 m/s the interp table is identical, so this only diverges on
