@@ -1,14 +1,18 @@
 {
   "v3.0": {
-    "version": "3.0"
+    "version": "3.0",
+    "description": "stock v1 + flat 650 limits"
   },
   "v2.0": {
-    "version": "2.0"
+    "version": "2.0",
+    "description": "StarPilot tune + ripple notch"
   },
   "v1.0": {
-    "version": "1.0"
+    "version": "1.0",
+    "description": "stock commaai"
   },
   "v0.0": {
-    "version": "0.0"
+    "version": "0.0",
+    "description": "sunnypilot baseline"
   }
 }

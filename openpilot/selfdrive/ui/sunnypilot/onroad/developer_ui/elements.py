@@ -225,6 +225,19 @@ class AEgoElement:
     return UiElement(value, "ACC.", self.unit, rl.WHITE)
 
 
+class TorqueVersionElement:
+  """Shows the active lateral torque controller version (v0/v1/v2/v3) in the dev UI."""
+
+  def __init__(self):
+    self.unit = ""
+
+  def update(self, sm, is_metric: bool) -> UiElement:
+    ts = sm['controlsState'].lateralControlState.torqueState
+    version = int(ts.version) if ts.active else -1
+    value = f"v{version}" if version >= 0 else "-"
+    return UiElement(value, "TUNE", self.unit, rl.WHITE)
+
+
 class LeadSpeedElement(LeadInfoElement):
   def __init__(self):
     self.unit = "km/h"

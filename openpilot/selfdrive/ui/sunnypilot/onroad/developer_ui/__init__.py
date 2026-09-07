@@ -12,7 +12,8 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui.elements import (
   UiElement, RelDistElement, RelSpeedElement, SteeringAngleElement,
   DesiredLateralAccelElement, ActualLateralAccelElement, DesiredSteeringAngleElement,
   AEgoElement, LeadSpeedElement, FrictionCoefficientElement, LatAccelFactorElement,
-  SteeringTorqueEpsElement, BearingDegElement, AltitudeElement, DesiredSteeringPIDElement
+  SteeringTorqueEpsElement, BearingDegElement, AltitudeElement, DesiredSteeringPIDElement,
+  TorqueVersionElement
 )
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -50,6 +51,7 @@ class DeveloperUiRenderer(Widget):
     self.lead_speed_elem = LeadSpeedElement()
     self.friction_elem = FrictionCoefficientElement()
     self.lat_accel_factor_elem = LatAccelFactorElement()
+    self.torque_version_elem = TorqueVersionElement()
     self.steering_torque_elem = SteeringTorqueEpsElement()
     self.bearing_elem = BearingDegElement()
     self.altitude_elem = AltitudeElement()
@@ -144,6 +146,7 @@ class DeveloperUiRenderer(Widget):
       override_active = ui_state.enforce_torque_control and ui_state.custom_torque_params and ui_state.torque_override_enabled
       if sm.valid['lateralTorqueParameters'] or sm.valid['lateralTuneStateSP'] or override_active:
         elements.extend([
+          self.torque_version_elem.update(sm, ui_state.is_metric),
           self.friction_elem.update(sm, ui_state.is_metric),
           self.lat_accel_factor_elem.update(sm, ui_state.is_metric),
         ])

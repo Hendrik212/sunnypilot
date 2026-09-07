@@ -176,7 +176,9 @@ class TorqueSettingsLayout(Widget):
 
     nodes = [TreeNode(tr("Default"))]
     for label in sorted_labels:
-      nodes.append(TreeNode(label))
+      desc = self.cached_torque_versions.get(label, {}).get("description", "")
+      display_name = f"{label} — {desc}" if desc else label
+      nodes.append(TreeNode(label, data={"display_name": display_name}))
 
     folders = [TreeFolder("", nodes)]
 
@@ -197,5 +199,6 @@ class TorqueSettingsLayout(Widget):
       current_ref=current_label,
       option_font_weight=FontWeight.UNIFONT,
       on_exit=handle_selection,
+      display_func=lambda node: node.data.get('display_name', node.ref),
     )
     gui_app.push_widget(self._torque_version_dialog)
