@@ -154,6 +154,14 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     # its reading is not conditioned on the controller being in the loop.
     self.ripple_monitor.update(desired_curvature, CS.vEgo)
 
+    # Re-centre the notch to the active model each frame. modelV2.big is set by controlsd
+    # (extension.update_model_v2) before this runs, so ctl.extension.model_v2 is fresh; a
+    # missing/None model_v2 (first frames) defaults to the small-model centre. set_frequency
+    # is a no-op unless the centre actually changed, so this is one comparison per frame.
+    mv = getattr(ctl.extension, "model_v2", None)
+    big = bool(getattr(mv, "big", False)) if mv is not None else False
+    self.curvature_ripple_notch.set_frequency(rn.ripple_notch_hz_for(big))
+
     if not active:
       self.curvature_ripple_notch.reset(desired_curvature)
       return desired_curvature

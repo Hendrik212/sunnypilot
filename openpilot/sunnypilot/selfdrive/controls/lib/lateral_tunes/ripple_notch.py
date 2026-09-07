@@ -62,12 +62,30 @@ chosen, and nothing reads it back into control. That still solves the problem ad
 was meant to solve -- noticing that a new driving model's ripple has moved -- without
 paying for per-window noise. If a future model's logged `measured_hz` sits somewhere else
 for a whole drive, re-centre RIPPLE_NOTCH_HZ by hand and re-run this validation.
+
+What IS done per-model is the *centre constant*, not adaptation: the big/chestnut model's
+ripple sits far from the small model's (route 000001d3 measures 0.52 Hz median, excess
+17x; the small model is 0.69 Hz), so a single centre cannot cover both. The notch reads
+`modelV2.big` each frame and selects between two validated constants; neither is an
+estimate and neither tracks a window, so the rejection above still holds.
 """
 import numpy as np
 
 # --- notch (acts on control) ---
+# Small (qcom) model. Measured 14.8x excess at 0.69 Hz on route 000001a4 in both desired
+# curvature and steering angle; the offline centre sweep is sharply peaked here.
 RIPPLE_NOTCH_HZ = 0.69
-RIPPLE_NOTCH_Q = 2.0     # -3 dB width f0/Q = 0.35 Hz; covers the 0.62-0.78 bump with margin
+# Big (chestnut) model. Route 000001d3 measures the ripple at 0.522 Hz median (p10 0.39,
+# p90 0.75, excess 17x, 100% of windows qualifying); earlier BMV4 measured 0.40-0.47 Hz.
+# At Q=2 the -3 dB band is 0.375-0.625 Hz, covering both with margin.
+RIPPLE_NOTCH_HZ_BIG = 0.50
+RIPPLE_NOTCH_Q = 2.0     # -3 dB width f0/Q; 0.35 Hz at 0.69, 0.25 Hz at 0.50
+
+
+def ripple_notch_hz_for(big: bool) -> float:
+  """Per-model notch centre. Small model = 0.69 Hz, big/chestnut = 0.50 Hz."""
+  return RIPPLE_NOTCH_HZ_BIG if big else RIPPLE_NOTCH_HZ
+
 # Speed blend. Starts below the 70 km/h band where the weave is felt; the old LP did not
 # begin until 20 m/s, which is why it never touched the symptom being complained about.
 RIPPLE_NOTCH_SPEED_BP = [14.0, 16.0]   # m/s

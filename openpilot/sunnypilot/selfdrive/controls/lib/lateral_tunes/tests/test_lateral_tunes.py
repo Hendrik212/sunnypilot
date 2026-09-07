@@ -310,6 +310,27 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
       else:
         assert amp > keep, (f, amp)
 
+  def test_big_notch_is_unity_at_dc_and_kills_its_centre(self):
+    """The big/chestnut-model notch must satisfy the same DC/centre invariants."""
+    dt = 0.01
+    n = rn.NotchFilter(dt, rn.RIPPLE_NOTCH_HZ_BIG, rn.RIPPLE_NOTCH_Q)
+    n.reset(0.02)
+    for _ in range(2000):
+      out = n.update(0.02)
+    assert np.isclose(out, 0.02, rtol=1e-6), out
+
+    # kills its own centre; passes a frequency well outside the band
+    for f, keep in ((rn.RIPPLE_NOTCH_HZ_BIG, 0.05), (0.05, 0.9), (3.0, 0.9)):
+      n = rn.NotchFilter(dt, rn.RIPPLE_NOTCH_HZ_BIG, rn.RIPPLE_NOTCH_Q)
+      t = np.arange(6000) * dt
+      x = np.sin(2 * np.pi * f * t)
+      y = np.array([n.update(v) for v in x])
+      amp = np.std(y[3000:]) / np.std(x[3000:])
+      if f == rn.RIPPLE_NOTCH_HZ_BIG:
+        assert amp < keep, (f, amp)
+      else:
+        assert amp > keep, (f, amp)
+
   def test_creep_center_relief_fires_only_near_centre_at_creep(self):
     """The relief must cut the near-centre creep error and nothing else. Measured envelope
     on route 000001c5: 0.70 on the seg-22 ping-pong band, 0.000 on parking maneuvers and
@@ -403,8 +424,8 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     assert rn.RIPPLE_CLAMP_HZ[0] >= 0.45 and rn.RIPPLE_CLAMP_HZ[1] <= 1.05
 
   def test_ripple_monitor_never_reaches_control(self):
-    """The monitor is inert by construction: the notch frequency is the constant, and
-    nothing on the profile feeds monitor output back into the filter. Validated offline:
+    """The monitor is inert by construction: the notch frequency is the per-model constant,
+    and nothing on the profile feeds monitor output back into the filter. Validated offline:
     tracking the estimate made the filter WORSE (7.2% -> 21.6% of ripple kept)."""
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
     prof = ctl.profile
@@ -414,7 +435,40 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     CS = car.CarState.new_message()
     CS.vEgo = 25.0
     prof.filter_desired_curvature(ctl, CS, 0.01, True)
+    # small model (model_v2 is None here) -> centre stays at the small constant, NOT 0.95
     assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
+
+  def test_notch_tracks_model_v2_big(self):
+    """The notch centre follows modelV2.big: big/chestnut -> 0.50 Hz, small -> 0.69 Hz.
+    model_v2 is set by controlsd (extension.update_model_v2) before filter_desired_curvature
+    runs. A missing model_v2 defaults to the small-model centre."""
+    from types import SimpleNamespace
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    prof = ctl.profile
+    CS = car.CarState.new_message()
+    CS.vEgo = 25.0
+
+    # default: no model_v2 yet -> small model
+    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
+    prof.filter_desired_curvature(ctl, CS, 0.01, True)
+    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
+
+    # big/chestnut model
+    ctl.extension.model_v2 = SimpleNamespace(big=True)
+    prof.filter_desired_curvature(ctl, CS, 0.01, True)
+    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ_BIG), prof.curvature_ripple_notch.f0
+
+    # back to small model
+    ctl.extension.model_v2 = SimpleNamespace(big=False)
+    prof.filter_desired_curvature(ctl, CS, 0.01, True)
+    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ), prof.curvature_ripple_notch.f0
+
+    # monitor is still inert under a model switch: forcing it elsewhere must not move the notch
+    prof.ripple_monitor.f_hz = 0.95
+    prof.ripple_monitor.measured_hz = 0.95
+    ctl.extension.model_v2 = SimpleNamespace(big=True)
+    prof.filter_desired_curvature(ctl, CS, 0.01, True)
+    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ_BIG)
 
   def test_notch_centre_matches_the_measured_ripple(self):
     """The whole design rests on this number. Measured on route 000001a4 against a fitted
@@ -430,6 +484,13 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     # The notch must sit inside the band the monitor is allowed to report, or a genuine
     # model shift would be clamped out of the logs before anyone could see it.
     assert rn.RIPPLE_CLAMP_HZ[0] < rn.RIPPLE_NOTCH_HZ < rn.RIPPLE_CLAMP_HZ[1]
+
+    # The big/chestnut-model centre: route 000001d3 measured 0.522 Hz median (excess 17x,
+    # 100% of windows qualifying); BMV4 measured 0.40-0.47 Hz. Same validation rule.
+    assert 0.45 <= rn.RIPPLE_NOTCH_HZ_BIG <= 0.55, rn.RIPPLE_NOTCH_HZ_BIG
+    # The two centres must be far enough apart that a single notch cannot cover both
+    # (the reason per-model selection exists).
+    assert abs(rn.RIPPLE_NOTCH_HZ - rn.RIPPLE_NOTCH_HZ_BIG) > 0.15
 
   def test_notch_speed_blend_covers_the_70kmh_weave(self):
     """The LP this replaced was still at blend 0.0 at 19.4 m/s (70 km/h) -- it never
@@ -462,6 +523,21 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     for _ in range(500):
       out = prof.filter_desired_curvature(ctl, CS, 0.02, True)
     assert np.isclose(out, 0.02, rtol=1e-6), out
+
+  def test_big_notch_attenuates_above_blend(self):
+    """The big/chestnut-model notch must attenuate its own 0.50 Hz centre above the blend,
+    and a model switch mid-stream re-centres the filter onto the new bump."""
+    from types import SimpleNamespace
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    prof = ctl.profile
+    CS = car.CarState.new_message()
+    CS.vEgo = 25.0
+    ctl.extension.model_v2 = SimpleNamespace(big=True)
+    prof.curvature_ripple_notch.reset(0.0)
+    t = np.arange(4000) * DT_CTRL
+    x = 0.01 * np.sin(2 * np.pi * rn.RIPPLE_NOTCH_HZ_BIG * t)
+    y = np.array([prof.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
+    assert np.std(y[2000:]) / np.std(x[2000:]) < 0.1
 
   def test_ripple_notch_primes_while_inactive(self):
     """Inactive must pin the notch to the live command, not run it."""
