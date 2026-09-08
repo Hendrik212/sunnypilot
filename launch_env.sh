@@ -25,6 +25,9 @@ export STAGING_ROOT="/data/safe_staging"
 # model manager bundle. The split-warp path warps on QCOM and ships 0.39 MB to AMD,
 # vs the fused path shipping 7.47 MB raw NV12 — needed to fit the 50 ms budget on comma 3X.
 BIG_PKL="$PWD/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl"
-if { [ -f "$BIG_PKL" ] || [ -f "${BIG_PKL}.chunkmanifest" ]; } && lsusb 2>/dev/null | grep -q "3801:0001"; then
+# Set unconditionally when chestnut is present: modeld's _pkl_exists() falls back to the
+# model manager bundle if this path has no .pkl and no .chunkmanifest yet (e.g. first boot,
+# before SConscript has compiled it).
+if lsusb 2>/dev/null | grep -q "3801:0001"; then
   export COMBINED_MODEL_PKL="$BIG_PKL"
 fi
