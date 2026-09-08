@@ -83,7 +83,7 @@ if not os.getenv('SKIP_TINYGRAD_COMPILE'):
       # Use sunnypilot's compile_modeld_v2.py with --split-warp for the chestnut big model.
       # Warp on QCOM (WARP_DEV), policy on AMD (DEV=USB+AMD:LLVM). Ships 0.39 MB warped frames
       # over USB instead of 7.47 MB raw NV12 — the fused path is over budget on comma 3X (1928x1208).
-      compile_script = os.path.join(os.path.dirname(modeld_dir), 'sunnypilot', 'modeld_v2', 'compile_modeld.py')
+      compile_script = os.path.join(os.path.dirname(os.path.dirname(modeld_dir)), 'sunnypilot', 'modeld_v2', 'compile_modeld.py')
       cmd = (f'{cmd_flags} WARP_DEV=QCOM {mac_brew_string} {taskset}python3 {compile_script} '
             f'--model-type supercombo --model-size {model_w}x{model_h} '
             f'--camera-resolutions {camera_res_args} '
