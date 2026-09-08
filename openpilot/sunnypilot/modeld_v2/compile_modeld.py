@@ -383,7 +383,7 @@ if __name__ == "__main__":
       features_slice = model_metadata['output_slices']['hidden_state']
       run_policy = make_run_policy(None, [model_runner], features_slice, derived_frame_skip, model_metadata['input_shapes'])
       make_policy_queues = partial(make_supercombo_input_queues, model_metadata['input_shapes'], derived_frame_skip)
-      make_random_model_inputs = partial(make_random_images, keys=['warped'], shape=(2, 6, model_h // 2, model_w // 2), device=Device.DEFAULT)
+      make_random_model_inputs = partial(make_random_images, keys=['warped'], shape=(2, 6, model_h // 2, model_w // 2), device=warp_dev)
       run_policy_jit = TinyJit(run_policy, prune=True)
       output_data['run_policy'] = compile_jit(run_policy_jit, POLICY_INPUTS, make_policy_queues, make_random_inputs=make_random_model_inputs)
 
