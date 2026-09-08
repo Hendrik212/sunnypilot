@@ -75,15 +75,18 @@ import numpy as np
 # Small (qcom) model. Measured 14.8x excess at 0.69 Hz on route 000001a4 in both desired
 # curvature and steering angle; the offline centre sweep is sharply peaked here.
 RIPPLE_NOTCH_HZ = 0.69
-# Big (chestnut) model. Route 000001d3 measures the ripple at 0.522 Hz median (p10 0.39,
-# p90 0.75, excess 17x, 100% of windows qualifying); earlier BMV4 measured 0.40-0.47 Hz.
-# At Q=2 the -3 dB band is 0.375-0.625 Hz, covering both with margin.
-RIPPLE_NOTCH_HZ_BIG = 0.50
-RIPPLE_NOTCH_Q = 2.0     # -3 dB width f0/Q; 0.35 Hz at 0.69, 0.25 Hz at 0.50
+# Big (chestnut) model. Cinque Terre (route 000001ee, highway 23-36 m/s) measures the
+# ripple at 0.31-0.37 Hz in desired curvature (peak 13.8x excess at 0.31 Hz / 29 m/s,
+# 12.0x at 0.365 Hz / 34 m/s) and the same band in steering angle. The previous 0.50 Hz
+# centre (calibrated against the d3/BMV4 checkpoints, which sat at 0.40-0.52 Hz) passed
+# 89% of this content through -- a full notch miss. Re-centred to 0.34 Hz: at Q=2 the
+# -3 dB band is 0.25-0.43 Hz, covering the observed 0.31-0.37 range with margin.
+RIPPLE_NOTCH_HZ_BIG = 0.34
+RIPPLE_NOTCH_Q = 2.0  # -3 dB width f0/Q; 0.35 Hz at 0.69, 0.17 Hz at 0.34
 
 
 def ripple_notch_hz_for(big: bool) -> float:
-  """Per-model notch centre. Small model = 0.69 Hz, big/chestnut = 0.50 Hz."""
+  """Per-model notch centre. Small model = 0.69 Hz, big/chestnut = 0.34 Hz (Cinque Terre)."""
   return RIPPLE_NOTCH_HZ_BIG if big else RIPPLE_NOTCH_HZ
 
 # Speed blend. Starts below the 70 km/h band where the weave is felt; the old LP did not
@@ -99,7 +102,10 @@ RIPPLE_NOTCH_BLEND_V = [0.0, 1.0]
 # fit band widens with it to keep the bump well inside the fitted region.
 RIPPLE_SEARCH_HZ = (0.20, 1.05)
 RIPPLE_BACKGROUND_FIT_HZ = (0.10, 2.0)
-RIPPLE_CLAMP_HZ = (0.50, 1.00)
+# Lowered from 0.50: Cinque Terre's big-model ripple measures 0.31 Hz, so a 0.50 floor
+# would clamp the monitor's reading up and hide the actual peak. 0.25 keeps the whole
+# observed 0.31-0.37 band inside the clamp.
+RIPPLE_CLAMP_HZ = (0.25, 1.00)
 ESTIMATOR_TARGET_RATE_HZ = 5.0
 ESTIMATOR_WINDOW_S = 90.0
 ESTIMATOR_NPERSEG = 384
