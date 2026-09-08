@@ -43,6 +43,46 @@ WARP_INPUTS = ['tfm', 'big_tfm']
 POLICY_INPUTS = ['img_q', 'big_img_q', 'feat_q', 'desire_q', 'packed_npy_inputs']
 nv12_copy_size = stock.nv12_copy_size
 
+
+def make_split_warp(nv12, model_w, model_h, warp_dev: str):
+  """Warp that runs on warp_dev (e.g. QCOM) instead of Device.DEFAULT (e.g. AMD).
+  Moves raw frames to warp_dev, warps there, returns a small warped tensor on warp_dev.
+  The run_policy JIT then moves the warped tensor to Device.DEFAULT for model compute.
+  This avoids shipping 7.47 MB of raw NV12 over USB; instead only 0.39 MB of warped frames cross."""
+  cam_w, cam_h, stride, y_height, uv_height, _ = nv12
+  uv_offset = stride * y_height
+  stride_pad = stride - cam_w
+
+  def frame_prepare_on_dev(input_frame, M_inv):
+    # Same as stock.make_frame_prepare but with M_inv_uv on warp_dev instead of Device.DEFAULT
+    M_inv_uv = M_inv * Tensor([[1.0, 1.0, 0.5], [1.0, 1.0, 0.5], [2.0, 2.0, 1.0]], device=warp_dev)
+    uv = input_frame[uv_offset:uv_offset + uv_height * stride].reshape(uv_height, stride)
+    with Context(SPLIT_REDUCEOP=0):
+      y = stock.warp_perspective_tinygrad(input_frame[:cam_h*stride],
+                                          M_inv, (model_w, model_h),
+                                          (cam_h, cam_w), stride_pad).realize()
+      u = stock.warp_perspective_tinygrad(uv[:cam_h//2, :cam_w:2].flatten(),
+                                          M_inv_uv, (model_w//2, model_h//2),
+                                          (cam_h//2, cam_w//2), 0).realize()
+      v = stock.warp_perspective_tinygrad(uv[:cam_h//2, 1:cam_w:2].flatten(),
+                                          M_inv_uv, (model_w//2, model_h//2),
+                                          (cam_h//2, cam_w//2), 0).realize()
+    yuv = y.cat(u).cat(v).reshape((model_h * 3 // 2, model_w))
+    return stock.frames_to_tensor(yuv)
+
+  def warp(tfm, big_tfm, frame, big_frame):
+    tfm = tfm.to(warp_dev)
+    big_tfm = big_tfm.to(warp_dev)
+    frame = frame.to(warp_dev)
+    big_frame = big_frame.to(warp_dev)
+    Tensor.realize(tfm, big_tfm, frame, big_frame)
+
+    warped_frame = frame_prepare_on_dev(frame, tfm).unsqueeze(0)
+    warped_big_frame = frame_prepare_on_dev(big_frame, big_tfm).unsqueeze(0)
+    return Tensor.cat(warped_frame, warped_big_frame)
+
+  return warp
+
 def _detect_desire_key(shapes: dict) -> str | None:
   return next((key for key in shapes if key.startswith('desire')), None)
 
@@ -311,6 +351,9 @@ if __name__ == "__main__":
   parser.add_argument('--off-policy-onnx', help='off-policy ONNX (for vision_multi_policy)')
   parser.add_argument('--on-policy-onnx', help='on-policy ONNX (for vision_multi_policy)')
   parser.add_argument('--supercombo-onnx', help='supercombo ONNX (for supercombo)')
+  parser.add_argument('--split-warp', action='store_true',
+                      help='supercombo only: emit separate warp (on WARP_DEV) + run_policy (on Device.DEFAULT) '
+                           'instead of fusing into run_model. Reduces USB transfer from raw NV12 to warped 0.39 MB.')
 
   args = parser.parse_args()
   model_w, model_h = args.model_size
@@ -327,19 +370,43 @@ if __name__ == "__main__":
     model_metadata = make_metadata_dict(args.supercombo_onnx)
     output_data['metadata'] = {'model': model_metadata, **model_metadata}
     output_data['input_devices'] = {'model': Device.DEFAULT}
-    output_data['run_model'] = {}
     derived_frame_skip = args.frame_skip or derive_frame_skip({}, model_metadata['input_shapes'])
     model_runner = OnnxRunner(args.supercombo_onnx)
-    run_policy = stock.make_run_policy(model_runner, model_metadata, derived_frame_skip)
-    for cam_w, cam_h in args.camera_resolutions:
-      print(f"Compiling unified run_model JIT for {cam_w}x{cam_h}...")
-      nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
-      frame_copy_size = stock.nv12_copy_size(nv12.stride, nv12.y_height, nv12.uv_height)
-      make_model_queues = partial(stock.make_input_queues, model_metadata['input_shapes'], derived_frame_skip,
-                                  frame_copy_size=frame_copy_size)
-      warp = stock.make_warp(nv12, model_w, model_h)
-      run_model_jit = TinyJit(stock.make_run_model(warp, run_policy, model_metadata, frame_copy_size), prune=True)
-      output_data['run_model'][(cam_w, cam_h)] = compile_jit(run_model_jit, stock.MODELD_INPUTS, make_model_queues, benchmark_runs=args.benchmark_runs)
+
+    if args.split_warp:
+      # Split-warp: warp on WARP_DEV (QCOM), run_policy on Device.DEFAULT (AMD).
+      # Ships 0.39 MB warped frames over USB instead of 7.47 MB raw NV12.
+      # The runtime (modeld_v2/modeld.py) handles this via is_run_model=False + warp_dev metadata.
+      warp_dev = os.getenv('WARP_DEV', 'QCOM')
+      print(f"Compiling split-warp supercombo: warp on {warp_dev}, policy on {Device.DEFAULT}")
+      features_slice = model_metadata['output_slices']['hidden_state']
+      run_policy = make_run_policy(None, [model_runner], features_slice, derived_frame_skip, model_metadata['input_shapes'])
+      make_policy_queues = partial(make_supercombo_input_queues, model_metadata['input_shapes'], derived_frame_skip, device=Device.DEFAULT)
+      make_random_model_inputs = partial(make_random_images, keys=['warped'], shape=(2, 6, model_h // 2, model_w // 2), device=Device.DEFAULT)
+      run_policy_jit = TinyJit(run_policy, prune=True)
+      output_data['run_policy'] = compile_jit(run_policy_jit, POLICY_INPUTS, make_policy_queues, make_random_inputs=make_random_model_inputs)
+
+      for cam_w, cam_h in args.camera_resolutions:
+        print(f"Compiling split warp JIT for {cam_w}x{cam_h} on {warp_dev}...")
+        nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
+        frame_copy_size = stock.nv12_copy_size(nv12.stride, nv12.y_height, nv12.uv_height)
+        make_random_warp_inputs = partial(make_random_images, keys=['frame', 'big_frame'], shape=frame_copy_size, device=warp_dev)
+        warp = TinyJit(make_split_warp(nv12, model_w, model_h, warp_dev), prune=True)
+        output_data[(cam_w, cam_h)] = compile_jit(warp, WARP_INPUTS, make_warp_queues, make_random_inputs=make_random_warp_inputs)
+
+      output_data['metadata']['warp_dev'] = warp_dev
+    else:
+      output_data['run_model'] = {}
+      run_policy = stock.make_run_policy(model_runner, model_metadata, derived_frame_skip)
+      for cam_w, cam_h in args.camera_resolutions:
+        print(f"Compiling unified run_model JIT for {cam_w}x{cam_h}...")
+        nv12 = stock.NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
+        frame_copy_size = stock.nv12_copy_size(nv12.stride, nv12.y_height, nv12.uv_height)
+        make_model_queues = partial(stock.make_input_queues, model_metadata['input_shapes'], derived_frame_skip,
+                                    frame_copy_size=frame_copy_size)
+        warp = stock.make_warp(nv12, model_w, model_h)
+        run_model_jit = TinyJit(stock.make_run_model(warp, run_policy, model_metadata, frame_copy_size), prune=True)
+        output_data['run_model'][(cam_w, cam_h)] = compile_jit(run_model_jit, stock.MODELD_INPUTS, make_model_queues, benchmark_runs=args.benchmark_runs)
   else:
     vision_runner = OnnxRunner(args.vision_onnx) if args.vision_onnx else None
     if args.model_type == 'vision_policy':
