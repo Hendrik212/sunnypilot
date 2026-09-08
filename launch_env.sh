@@ -20,3 +20,11 @@ if [ -z "$AGNOS_VERSION" ]; then
 fi
 
 export STAGING_ROOT="/data/safe_staging"
+
+# If a split-warp chestnut big model was compiled by SConscript, use it instead of the
+# model manager bundle. The split-warp path warps on QCOM and ships 0.39 MB to AMD,
+# vs the fused path shipping 7.47 MB raw NV12 — needed to fit the 50 ms budget on comma 3X.
+BIG_PKL="$PWD/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl"
+if [ -f "$BIG_PKL" ] && lsusb 2>/dev/null | grep -q "3801:0001"; then
+  export COMBINED_MODEL_PKL="$BIG_PKL"
+fi

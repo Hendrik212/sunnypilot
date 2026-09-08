@@ -66,6 +66,7 @@ compile_modeld_script = [
   File(f"{modeld_dir}/get_model_metadata.py"),
   File("#openpilot/system/camerad/cameras/nv12_info.py"),
   File("#openpilot/common/hardware/hw.py"),
+  File("#openpilot/sunnypilot/modeld_v2/compile_modeld.py"),
 ]
 model_w, model_h = MEDMODEL_INPUT_SIZE
 frame_skip = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ
@@ -78,11 +79,23 @@ if not os.getenv('SKIP_TINYGRAD_COMPILE'):
     camera_res_args = ' '.join(f'{cw}x{ch}' for cw, ch in camera_configs)
     # CPU 7 is isolated with isolcpus on AGNOS, so explicitly pin the compiler to it.
     taskset = 'taskset -c 7 ' if arch == 'comma_arm64' else ''
-    cmd = (f'{cmd_flags} {mac_brew_string} {taskset}python3 {modeld_dir}/compile_modeld.py '
-          f'--model-size {model_w}x{model_h} '
-          f'--camera-resolutions {camera_res_args} '
-          f'--onnx {File(f"models/{file_prefix}driving_supercombo.onnx").abspath} '
-          f'--output {target_pkl_path} --frame-skip {frame_skip}')
+    if chestnut:
+      # Use sunnypilot's compile_modeld_v2.py with --split-warp for the chestnut big model.
+      # Warp on QCOM (WARP_DEV), policy on AMD (DEV=USB+AMD:LLVM). Ships 0.39 MB warped frames
+      # over USB instead of 7.47 MB raw NV12 — the fused path is over budget on comma 3X (1928x1208).
+      compile_script = os.path.join(os.path.dirname(modeld_dir), 'sunnypilot', 'modeld_v2', 'compile_modeld.py')
+      cmd = (f'{cmd_flags} WARP_DEV=QCOM {mac_brew_string} {taskset}python3 {compile_script} '
+            f'--model-type supercombo --model-size {model_w}x{model_h} '
+            f'--camera-resolutions {camera_res_args} '
+            f'--supercombo-onnx {File(f"models/{file_prefix}driving_supercombo.onnx").abspath} '
+            f'--split-warp '
+            f'--output {target_pkl_path} --frame-skip {frame_skip}')
+    else:
+      cmd = (f'{cmd_flags} {mac_brew_string} {taskset}python3 {modeld_dir}/compile_modeld.py '
+            f'--model-size {model_w}x{model_h} '
+            f'--camera-resolutions {camera_res_args} '
+            f'--onnx {File(f"models/{file_prefix}driving_supercombo.onnx").abspath} '
+            f'--output {target_pkl_path} --frame-skip {frame_skip}')
     onnx_sizes_sum = sum(os.path.getsize(f) for f in driving_onnx_deps)
     chunk_targets = get_chunk_targets(target_pkl_path, estimate_pickle_max_size(onnx_sizes_sum))
     def do_compile(target, source, env, command=cmd, pkl=target_pkl_path, chunks=chunk_targets):
