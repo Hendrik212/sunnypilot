@@ -113,6 +113,17 @@ if not os.getenv('SKIP_TINYGRAD_COMPILE'):
       # compile_modeld_v2.py already chunks the output; only chunk for the stock compiler
       if not _chestnut:
         chunk_file(pkl, chunks)
+      else:
+        # The v2 compiler chunks to the *actual* pkl size (e.g. 17 chunks named
+        # chunkNNof17), but scons declared `chunks` for the *estimated* max (e.g. 33,
+        # named chunkNNof33). The stock path pads via chunk_file; without it the trailing
+        # targets never exist (different ofNN names) and scons rebuilds every boot.
+        # Reassemble the v2 output and re-chunk to the declared targets so the names,
+        # count, and manifest all match what scons expects.
+        from openpilot.common.file_chunker import open_file_chunked
+        with open_file_chunked(pkl) as src, open(pkl, 'wb') as dst:
+          dst.write(src.read())
+        chunk_file(pkl, chunks)
     def do_chunk(target, source, env, pkl=target_pkl_path, chunks=chunk_targets):
       chunk_file(pkl, chunks)
     actions = Action(do_compile, "  [CHESTNUT] $TARGET") if chestnut else [cmd, Action(do_chunk, "  [CHUNK] $TARGET")]
