@@ -37,6 +37,7 @@ from tinygrad import dtypes
 from tinygrad.device import Device
 from tinygrad.engine.jit import TinyJit
 from tinygrad.tensor import Tensor
+from tinygrad.helpers import Context
 
 MODEL_TYPES = ('vision_policy', 'supercombo', 'vision_multi_policy')
 WARP_INPUTS = ['tfm', 'big_tfm']
