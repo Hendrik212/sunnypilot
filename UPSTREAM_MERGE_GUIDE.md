@@ -243,6 +243,39 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 | `opendbc/car/hyundai/radar_interface.py` | Pulled from `upstream/hyundai-radar-tracks` topic branch, not `master` — see radar-tracks note in Step 5 |
 | `opendbc/sunnypilot/car/hyundai/radar_interface_ext.py` | Same — pulled from the radar-tracks branch, kept in sync with radar_interface.py |
 
+### modeld / Chestnut big model (sunnypilot main repo)
+
+The chestnut split-warp compile path is entirely fork-local. Upstream does not have
+`--split-warp`, `WARP_DEV`, or the re-chunk fix. A conflict-free merge of upstream's
+`SConscript` or `compile_modeld.py` **will silently drop these and reintroduce the
+bugs they fix** — so after any merge that touches modeld, re-verify every line below.
+
+| File | Fork-local change | If dropped |
+|------|-------------------|-----------|
+| `openpilot/selfdrive/modeld/SConscript` | Chestnut branch routes to `sunnypilot/modeld_v2/compile_modeld.py` with `WARP_DEV=QCOM --split-warp` | Build uses the fused `run_model` → 7.47 MB/frame USB transfer → frame drops on comma 3X |
+| `openpilot/selfdrive/modeld/SConscript` | `do_compile` `_chestnut` guard skips double-chunking (v2 compiler already chunks) | `No such file or directory` — chunks a deleted `.pkl`, build fails |
+| `openpilot/selfdrive/modeld/SConscript` | `do_compile` reassembles + re-chunks to declared targets (commit `02403e55a2`) | **Rebuild-on-every-boot**: v2 writes 17 `chunkNNof17`, scons expects 33 `chunkNNof33` → 16 missing targets → recompile every boot (~10 min, blocks manager) |
+| `openpilot/sunnypilot/modeld_v2/compile_modeld.py` | `make_random_model_inputs` creates `warped` on `warp_dev`, not `Device.DEFAULT` | `JitError: args mismatch in JIT` swallowed by `load_big`'s `except` → modeld crash-loops `exitCode=1`, nothing in swaglog |
+| `openpilot/sunnypilot/modeld_v2/compile_modeld.py` | `make_split_warp()` + `--split-warp` argparse branch | No split-warp path at all |
+| `launch_env.sh` | Sets `COMBINED_MODEL_PKL` unconditionally when `lsusb` shows `3801:0001` | modeld uses the model-manager bundle (small model) instead of the compiled big pkl |
+| `openpilot/selfdrive/modeld/dmonitoringmodeld.py` | `config_realtime_process(6, 5)` (was `(7, 5)`) | dmon shares core 7 with modeld → core saturation → ~2 ms slower, more drops |
+
+> **Post-merge checklist for modeld** (do this even if the merge was conflict-free):
+> 1. `grep -n 'split-warp\|WARP_DEV\|_chestnut\|open_file_chunked' openpilot/selfdrive/modeld/SConscript` — all four must return hits.
+> 2. `grep -n 'device=warp_dev' openpilot/sunnypilot/modeld_v2/compile_modeld.py` — the `warped` JIT-input fix must be present.
+> 3. `grep -n 'COMBINED_MODEL_PKL' launch_env.sh` — must set it when chestnut present.
+> 4. Boot the device and confirm manager starts **without** a `compile_modeld` process (if it recompiles, the re-chunk fix was dropped).
+>
+> **Why scons usually won't rebuild the big model on a merge:** `SConstruct` uses
+> `Decider('MD5-timestamp')` — mtime check first, and only if mtime changed does it
+> compute an MD5 and compare to the cached content hash. So a `git merge` that updates
+> a dep file's mtime but not its content → **no rebuild**. Only a real content change
+> (new ONNX, changed compiler, moved tinygrad submodule pointer) triggers a recompile.
+> This holds as long as `.sconsign.dblite` persists (it does, in the repo dir on device).
+> A merge that touches `SConscript` itself *can* invalidate the target definition
+> regardless of content — so expect one rebuild after a SConscript-touching merge, then
+> none. See [[chestnut-model-compile-workflow]] for the full gotcha list.
+
 ### panda Submodule
 
 | File | Change |
@@ -268,6 +301,126 @@ GIT_LFS_SKIP_PUSH=1 git push origin isla-master
 > | 5           | 140          |
 >
 > Upstream sunnypilot stock CANFD values for reference: `STEER_MAX=270`, `STEER_DELTA_UP=2`, `STEER_DELTA_DOWN=3`, `max_rt_delta=112`.
+
+## Preparing a New Big Model (Chestnut / comma 3X)
+
+When commaai releases a new driving model (e.g. a successor to Cinque Terre), it ships
+as a new `driving_supercombo.onnx` in `openpilot/selfdrive/modeld/models/`. The chestnut
+big-model path must compile it with `--split-warp` (warp on QCOM, policy on AMD) — the
+fused path ships 7.47 MB raw NV12 per frame over USB and drops frames on the comma 3X's
+1928×1208 sensor. This is the procedure that worked for Cinque Terre (2026-09-08).
+
+### 1. Swap in the new ONNX
+
+```bash
+cd /mnt/sdc1/openpilot/sunnypilot-isla
+
+# The big model ONNX is LFS-tracked. Fetch from commaai's server.
+git fetch commaai master
+git checkout commaai/master -- openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx
+
+# Verify it's the right model — record the sha for later comparison
+sha256sum openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx
+```
+
+> If the ONNX is chunked on disk (LFS may store it as `.onnx.chunk*` + `.chunkmanifest`),
+> reassemble first: `cat big_driving_supercombo.onnx.chunk* > big_driving_supercombo.onnx`.
+
+### 2. Confirm the split-warp compile path is intact
+
+Run the post-merge checklist above (step 1–3). The `--split-warp` flag, `WARP_DEV=QCOM`,
+the `_chestnut` guard, and the re-chunk fix must all be present in `SConscript`. If a
+recent merge dropped any of them, restore from the last known-good commit before compiling.
+
+### 3. Iterate the compile standalone over SSH — NOT via SConscript+reboot
+
+This is the single most important process lesson: **never iterate `compile_modeld.py`
+through `SConscript` + reboot cycles.** Each trivial error (wrong path, missing import,
+kwarg collision) costs a full 10-min boot *and* blocks manager from starting. Run the
+compiler directly over SSH and fix errors in seconds:
+
+```bash
+ssh ioniq_local 'sudo systemctl stop comma.service; sleep 4
+  cd /data/openpilot && GMMU=0 PYTHONPATH=/data/openpilot DEV=USB+AMD:LLVM WARP_DEV=QCOM \
+  FLOAT16=1 JIT_BATCH_SIZE=0 TC_OPT=2 TC_OCCUPANCY_OPT=1 \
+  taskset -c 7 /usr/local/venv/bin/python3 openpilot/sunnypilot/modeld_v2/compile_modeld.py \
+    --model-type supercombo --model-size 512x256 --camera-resolutions 1928x1208 \
+    --supercombo-onnx openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx \
+    --split-warp --output /tmp/test.pkl --frame-skip 4'
+```
+
+Only wire it into SConscript once it works end to end. See [[chestnut-model-compile-workflow]]
+for why and the full gotcha list.
+
+> **Cannot cross-compile on the dev box.** The dev box has gfx1100 (RDNA3) and no Adreno;
+> the chestnut eGPU is GFX12/RDNA4 and the warp runs on QCOM Adreno 690. tinygrad's JIT
+> emits device-specific ISA and captures real GPU command buffers, so the pkl is not
+> portable across GPU archs. Compile on the device. (pkls *are* portable across identical
+> hardware — sunnypilot's model manager downloads precompiled pkls from HuggingFace — but
+> our dev box is not identical to the comma 3X+chestnut.)
+
+### 4. The one non-obvious bug to watch for
+
+`make_random_model_inputs` for `run_policy` must create the `warped` tensor on
+**`warp_dev`** (QCOM), not `Device.DEFAULT` (AMD). `warped` is the warp JIT's *output*,
+so at runtime it arrives on QCOM. TinyJit validates input device signatures at
+`jit.py:280` *before* the function body runs, so `run_policy`'s own
+`warped.to(Device.DEFAULT)` never gets a chance. The failure is a bare
+`JitError: args mismatch in JIT` that `load_big`'s `except` swallows — modeld crash-loops
+with `exitCode=1` and **nothing in swaglog**. If modeld dies silently after a model
+compile, this is the first thing to check.
+
+### 5. Deploy and verify onroad
+
+Once the standalone compile succeeds, push the new ONNX + any compiler fixes, then let
+SConscript compile the real pkl on the next boot:
+
+```bash
+# On the dev box:
+GIT_LFS_SKIP_PUSH=1 git push origin isla-master
+
+# On the device:
+cd /data/openpilot && git pull --ff-only origin isla-master
+sudo systemctl restart comma.service
+# Wait ~10 min for the one-time compile, then verify:
+```
+
+Verify the result (the staged script lives at `/data/measure_exec.py` on the device):
+
+```bash
+ssh ioniq_local 'cd /data/openpilot && PYTHONPATH=/data/openpilot/openpilot \
+  /usr/local/venv/bin/python3 /data/measure_exec.py'
+```
+
+Expected for a healthy split-warp big model on comma 3X:
+- `modelExecutionTime` p50 ≈ **33 ms**, p99 < 36 ms, std < 1 ms
+- `P(>50ms) = 0.00%`
+- `frameDropPerc` p50 = 0.00, max = 0.00 (engage blocks when > 1.0)
+- `big model = 100%` of frames (no silent fallback to small model)
+
+Baseline (fused, for comparison): p50 49.2, p99 52.0, P(>50ms) 22.7%, drops 4–6%.
+
+### 6. Back up the working pkl
+
+Once verified, back up the chunks immediately — two prior attempts were lost to rebuilds
+that deleted chunks mid-copy:
+
+```bash
+mkdir -p /mnt/sdc1/openpilot/model_backups/<model-name>-splitwarp-<date>
+scp ioniq_local:'/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl.chunk*' \
+  /mnt/sdc1/openpilot/model_backups/<model-name>-splitwarp-<date>/
+# Verify byte-identical:
+sha_device=$(ssh ioniq_local 'cd /data/openpilot/openpilot/selfdrive/modeld/models && cat big_driving_tinygrad.pkl.chunk*of* | sha256sum')
+sha_local=$(cat /mnt/sdc1/openpilot/model_backups/<model-name>-splitwarp-<date>/big_driving_tinygrad.pkl.chunk*of* | sha256sum)
+[ "$sha_device" = "$sha_local" ] && echo "backup verified" || echo "MISMATCH"
+```
+
+### 7. Confirm no rebuild on subsequent boots
+
+After the one-time compile, restart the service once more and confirm `compile_modeld`
+does **not** run (manager should come up directly within ~30 s). If it recompiles again,
+the re-chunk fix (`02403e55a2`) was dropped or the chunk targets don't match — see the
+modeld post-merge checklist above.
 
 ## Git LFS Handling
 
