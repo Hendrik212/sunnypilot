@@ -108,7 +108,8 @@ def get_driverstate_packet(model_output, frame_id: int, location_ts: int, exec_t
 
 
 def main():
-  config_realtime_process(7, 5)
+  # core 7 is shared with modeld, which saturates it on chestnut (94% measured); core 6 is idle (16%)
+  config_realtime_process(6, 5)
 
   cloudlog.warning("connecting to cabin stream")
   vipc_client = VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_CABIN, True)
