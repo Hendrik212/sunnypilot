@@ -353,8 +353,7 @@ if __name__ == "__main__":
   parser.add_argument('--on-policy-onnx', help='on-policy ONNX (for vision_multi_policy)')
   parser.add_argument('--supercombo-onnx', help='supercombo ONNX (for supercombo)')
   parser.add_argument('--split-warp', action='store_true',
-                      help='supercombo only: emit separate warp (on WARP_DEV) + run_policy (on Device.DEFAULT) '
-                           'instead of fusing into run_model. Reduces USB transfer from raw NV12 to warped 0.39 MB.')
+                      help='supercombo only: warp on WARP_DEV + run_policy on Device.DEFAULT instead of fused run_model; ships 0.39 MB warped, not raw NV12')
 
   args = parser.parse_args()
   model_w, model_h = args.model_size
