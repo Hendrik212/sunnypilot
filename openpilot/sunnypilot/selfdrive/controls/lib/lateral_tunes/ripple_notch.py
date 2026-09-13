@@ -69,9 +69,9 @@ ripple sits far from the small model's (route 000001d3 measures 0.52 Hz median, 
 `modelV2.big` each frame and selects between two validated constants; neither is an
 estimate and neither tracks a window, so the rejection above still holds.
 
-## 2026-09-13: the notch is DISABLED (RIPPLE_NOTCH_ENABLED = False)
+## 2026-09-13: the notch is a LOOP filter; it stays armed, the fix is lead (LatLookaheadOffset)
 
-Three drives changed the picture. Keep this section before re-arming anything.
+Five drives changed the picture. Read this section before touching either constant.
 
 1. The premise "reference-side filtering cannot cost phase margin" is wrong on this car.
    It holds for the torque loop (the measurement is untouched), but the driving model IS
@@ -110,9 +110,22 @@ The rate limiter is on its 2/3-per-frame limit ~30% of frames at every highway s
 but at the mode frequency it costs 2 deg: raising it would not help the weave. The EPS
 is the plant. Of the lag we own, the notch was the only element with no measured benefit.
 
-Disabling it removes 19 deg of outer-loop lag at 0.35 Hz. The mode is expected to move
-up in frequency and shrink, not vanish. The next lever, if needed, is the model lookahead
-(lat_action_t, a param override): +0.1 s is ~+13 deg of lead at 0.35 Hz.
+4. Disabling the notch (route 00000208) confirmed the budget -- weave energy halved -- and
+   exposed the other half of the trade: a 0.5-1.0 Hz ring came up 5-10x at the wheel
+   ("centre chatter"), INCLUDING in the model's pre-notch output. The notch was damping
+   that band too. It read ~1x "excess" because broadband ringing sits AT the background
+   level; in absolute power it was 60-77% of the 0.5-1.0 Hz content. Judge any filter here
+   on absolute band power as well as excess. Gain cuts only move ringing between bands.
+
+5. What the loop lacks is phase LEAD, and the model lookahead gives it at every frequency
+   at once. `LatLookaheadOffset` (modeld, param, default 0.0; +0.10 s = +13 deg at 0.35 Hz,
+   +25 deg at 0.69 Hz) with this notch ARMED, route 00000209 vs 00000204: weave-band PID
+   energy -26%, model command -38%, chatter at the wheel back to notch-on level, 0.31-0.35
+   Hz excess median 3.4x vs 6.1x, straight-road centre rms 0.10 m vs 0.21 m. Cost: model
+   command 1-2 Hz noise 3x (absorbed before the wheel), hint of running ~9 cm wide in
+   R<1.4 km bends. That is the current configuration.
+
+RIPPLE_NOTCH_ENABLED exists so the disabled state can be reproduced; it is True.
 
 The monitor keeps running. If a future bundle brings a real 0.69 Hz ripple back, it
 shows as `rippleMeasuredHz` ~0.69 with `rippleExcess` >> 3 during MANUAL driving as
@@ -133,9 +146,9 @@ RIPPLE_NOTCH_HZ = 0.69
 # -3 dB band is 0.25-0.43 Hz, covering the observed 0.31-0.37 range with margin.
 RIPPLE_NOTCH_HZ_BIG = 0.34
 RIPPLE_NOTCH_Q = 2.0  # -3 dB width f0/Q; 0.35 Hz at 0.69, 0.17 Hz at 0.34
-# Master switch. False since 2026-09-13: the notch is inside the model's outer loop and
-# was adding lag at the 0.31-0.35 Hz closed-loop weave while its target ripple is absent
-# on the current bundle. See the module docstring before flipping this back.
+# Master switch. Off for one drive on 2026-09-13 (00000208): halved the weave, 5-10x more
+# 0.5-1 Hz chatter. Kept ON; the weave is addressed with lead (LatLookaheadOffset) instead.
+# See the module docstring before flipping this.
 RIPPLE_NOTCH_ENABLED = True
 
 
