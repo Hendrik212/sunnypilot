@@ -164,16 +164,9 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
 
     if not active:
       self.curvature_ripple_notch.reset(desired_curvature)
-      self.loop_mode_notch.reset(desired_curvature)
       return desired_curvature
 
     filtered = self.curvature_ripple_notch.update(desired_curvature)
-    # Second stage for the closed-loop 0.31 Hz weave (000001f9). Stepped every active frame
-    # regardless of model so its state stays primed across a big<->small fallback; only its
-    # output is gated. Cascaded biquads commute, so the order is immaterial.
-    loop_filtered = self.loop_mode_notch.update(filtered)
-    if rn.loop_mode_notch_active_for(big):
-      filtered = loop_filtered
     blend = np.interp(CS.vEgo, rn.RIPPLE_NOTCH_SPEED_BP, rn.RIPPLE_NOTCH_BLEND_V)
     return float(desired_curvature + blend * (filtered - desired_curvature))
 
@@ -196,7 +189,6 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
                                           maxlen=ctl.lat_accel_request_buffer_len)
     self.jerk_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * LP_FILTER_CUTOFF_HZ), ctl.dt)
     self.curvature_ripple_notch = rn.NotchFilter(ctl.dt, rn.RIPPLE_NOTCH_HZ, rn.RIPPLE_NOTCH_Q)
-    self.loop_mode_notch = rn.NotchFilter(ctl.dt, rn.LOOP_MODE_NOTCH_HZ, rn.RIPPLE_NOTCH_Q)
     self.ripple_monitor = rn.RippleFrequencyMonitor(ctl.dt)
     self.directional_taper_filter = FirstOrderFilter(1.0, i6.IONIQ_6_DIRECTIONAL_TAPER_FILTER_RC, ctl.dt)
     self.prev_steering_pressed = False

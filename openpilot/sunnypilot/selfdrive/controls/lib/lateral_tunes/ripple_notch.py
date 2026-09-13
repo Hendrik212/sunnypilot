@@ -68,48 +68,6 @@ ripple sits far from the small model's (route 000001d3 measures 0.52 Hz median, 
 17x; the small model is 0.69 Hz), so a single centre cannot cover both. The notch reads
 `modelV2.big` each frame and selects between two validated constants; neither is an
 estimate and neither tracks a window, so the rejection above still holds.
-
-## The 0.34 Hz closed-loop mode (route 000001f9, 2026-09-10)
-
-Route 000001f9 (small model, no chestnut, 155 segments) shows a second, distinct weave
-that the model-ripple story above does NOT explain. Segments 121-123 (25.4 m/s cruise,
-what the driver reported as highway ping-pong) carry a sharp 0.31 Hz bump, 17-18x above
-background in desired curvature and 17-24x in steering angle, with the SAME bump in the
-P, I and F terms of the torque PID. Its discriminating property: it is absent during
-manual driving at the same speeds on the same route (segments 66/67/105/117: excess 2-4x
-in desired curvature) and present only while engaged. So it is a closed-loop mode of
-model + controller + car, not the model's open-loop output. It also sits weakly at 34 m/s
-(segment 34: 5-8x), i.e. the mode is always there and the frequency does not scale with
-speed -- a fixed ~3.2 s time constant in the loop. Ruled out on the same logs: lateral
-delay estimate (0.346-0.356 s throughout), STEER_MAX saturation (0%), driver torque (0%).
-The CAN rate limiter (2/3 per frame above 19.4 m/s) is on its limit ~30% of frames at
-every highway speed and is the largest measured lag in the loop, but it is not what
-selects 25 m/s over 34 m/s.
-
-At 0.69 Hz these segments contain nothing (excess ~1.0): the small-model ripple notch is
-not mis-placed, it is aimed at a bump that was not present on that drive.
-
-With hindsight the "big-model ripple" behind RIPPLE_NOTCH_HZ_BIG is the same mode: 000001ee
-measured 0.31-0.37 Hz on engaged data only, and the same 0.31-0.35 Hz band now appears on
-the small model whenever it is engaged. The 0.34 Hz constant is kept, but its premise is
-"break the loop at the mode frequency", not "remove the model's own output".
-
-A reference notch does act on a closed-loop mode -- the model IS the lane-position
-controller, and its command is the loop signal -- but only at the notch frequency. It is
-a symptom-level fix; the loop's phase margin is unchanged and the mode can re-emerge where
-the notch is shallow. Replaying the real 000001f9 desired curvature through NotchFilter at
-the controller's 100 Hz (mode band 0.25-0.43 Hz kept / road <0.20 Hz kept):
-
-    config             seg121        seg122        seg123      | seg34 (34 m/s)  seg61 (39 m/s)
-    0.69 only (was)    91.0 / 98.2   92.7 / 97.6   93.3 / 99.4 | 90.0 / 99.0     87.8 / 98.4
-    0.34 only          15.1 / 96.1   16.3 / 88.8   27.5 / 98.2 | 20.3 / 94.9     26.6 / 91.7
-    dual 0.34 + 0.69   13.9 / 94.3   15.1 / 86.7   25.9 / 97.6 | 17.9 / 94.1     23.0 / 90.3
-
-Residual excess at 0.31 Hz: 17.1 -> 4.6 (seg121), 17.8 -> 4.1 (seg122). The 0.69 stage
-adds ~2% road cost and nothing against this mode; it is kept for the small model because
-the 000001a4 ripple it was validated on is a different, real phenomenon that simply was
-not exercised on 000001f9. The big model already runs 0.34 and gains nothing from a second
-stage at the same centre, so LOOP_MODE_NOTCH_HZ is applied to the small model only.
 """
 import numpy as np
 
@@ -125,21 +83,11 @@ RIPPLE_NOTCH_HZ = 0.69
 # -3 dB band is 0.25-0.43 Hz, covering the observed 0.31-0.37 range with margin.
 RIPPLE_NOTCH_HZ_BIG = 0.34
 RIPPLE_NOTCH_Q = 2.0  # -3 dB width f0/Q; 0.35 Hz at 0.69, 0.17 Hz at 0.34
-# Closed-loop weave mode (route 000001f9 seg 121-123: 0.31 Hz, engaged only, 17-24x). Same
-# centre and Q as the big-model constant, which covers the same mode; cascaded after the
-# 0.69 Hz ripple notch on the small model only. See the module docstring.
-LOOP_MODE_NOTCH_HZ = 0.34
 
 
 def ripple_notch_hz_for(big: bool) -> float:
   """Per-model notch centre. Small model = 0.69 Hz, big/chestnut = 0.34 Hz (Cinque Terre)."""
   return RIPPLE_NOTCH_HZ_BIG if big else RIPPLE_NOTCH_HZ
-
-
-def loop_mode_notch_active_for(big: bool) -> bool:
-  """Second stage at LOOP_MODE_NOTCH_HZ. Off for the big model, whose ripple notch is already
-  centred there: two biquads at one centre would double the depth and widen the road cost."""
-  return not big
 
 # Speed blend. Starts below the 70 km/h band where the weave is felt; the old LP did not
 # begin until 20 m/s, which is why it never touched the symptom being complained about.

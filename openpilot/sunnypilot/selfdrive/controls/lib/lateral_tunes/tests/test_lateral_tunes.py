@@ -395,54 +395,6 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
       else:
         assert amp > keep, (f, amp)
 
-  def test_loop_mode_notch_is_small_model_only_and_kills_0p31(self):
-    """The 0.34 Hz second stage covers the closed-loop 0.31 Hz weave of route 000001f9
-    (engaged-only, absent in manual driving). It is cascaded on the small model and must
-    be a no-op on the big model, whose ripple notch is already centred at 0.34 Hz -- two
-    biquads at one centre would double the depth and widen the road cost."""
-    from types import SimpleNamespace
-    assert rn.loop_mode_notch_active_for(False)
-    assert not rn.loop_mode_notch_active_for(True)
-    assert np.isclose(rn.LOOP_MODE_NOTCH_HZ, rn.RIPPLE_NOTCH_HZ_BIG)
-
-    dt = 0.01
-    t = np.arange(6000) * dt
-    x = 0.01 * np.sin(2 * np.pi * 0.31 * t)  # the measured mode, in the 0.34 notch's -3 dB band
-
-    def run(big):
-      ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
-      ctl.extension.model_v2 = SimpleNamespace(big=big)
-      CS = car.CarState.new_message()
-      CS.vEgo = 25.0
-      return np.array([ctl.profile.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
-
-    small = np.std(run(False)[3000:]) / np.std(x[3000:])
-    big = np.std(run(True)[3000:]) / np.std(x[3000:])
-    # 0.31 Hz sits 0.03 Hz off the 0.34 centre: a Q=2 biquad keeps ~35% amplitude (~12%
-    # power) there, which is the ~15% mode-band-kept the 000001f9 replay measured.
-    assert small < 0.40, small
-    # big: the single 0.34 stage, NOT two of them -- the 0.69 stage is inert at 0.31 Hz,
-    # so the two models must attenuate this mode alike.
-    assert big < 0.40, big
-    assert abs(big - small) < 0.05, (big, small)
-
-    # road content below the notch is left alone
-    x_road = 0.01 * np.sin(2 * np.pi * 0.15 * t)
-    x, x_road = x_road, x
-    road = np.std(run(False)[3000:]) / np.std(x[3000:])
-    assert road > 0.9, road
-    x = x_road
-
-    # DC unity survives the cascade, so a steady corner is not biased
-    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
-    ctl.extension.model_v2 = SimpleNamespace(big=False)
-    CS = car.CarState.new_message()
-    CS.vEgo = 25.0
-    ctl.profile.filter_desired_curvature(ctl, CS, 0.02, False)  # inactive: pins both stages
-    for _ in range(2000):
-      out = ctl.profile.filter_desired_curvature(ctl, CS, 0.02, True)
-    assert np.isclose(out, 0.02, rtol=1e-6), out
-
   def test_big_notch_is_unity_at_dc_and_kills_its_centre(self):
     """The big/chestnut-model notch must satisfy the same DC/centre invariants."""
     dt = 0.01
@@ -554,9 +506,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     clamp stays narrow so a wide search cannot drag the notch somewhere unvalidated."""
     assert rn.RIPPLE_SEARCH_HZ[0] <= 0.25
     assert rn.RIPPLE_BACKGROUND_FIT_HZ[0] < rn.RIPPLE_SEARCH_HZ[0]
-    # floor lowered 0.50 -> 0.25 so the 0.31-0.37 Hz band of the big model / loop mode is
-    # not clamped out of the logs; ceiling unchanged
-    assert 0.20 <= rn.RIPPLE_CLAMP_HZ[0] <= 0.30 and rn.RIPPLE_CLAMP_HZ[1] <= 1.05
+    assert rn.RIPPLE_CLAMP_HZ[0] >= 0.45 and rn.RIPPLE_CLAMP_HZ[1] <= 1.05
 
   def test_ripple_monitor_never_reaches_control(self):
     """The monitor is inert by construction: the notch frequency is the per-model constant,
@@ -620,9 +570,9 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     # model shift would be clamped out of the logs before anyone could see it.
     assert rn.RIPPLE_CLAMP_HZ[0] < rn.RIPPLE_NOTCH_HZ < rn.RIPPLE_CLAMP_HZ[1]
 
-    # The big/chestnut-model centre: route 000001ee measured 0.31-0.37 Hz, and 000001f9
-    # shows the same band as an engaged-only loop mode on the small model. Same rule.
-    assert 0.31 <= rn.RIPPLE_NOTCH_HZ_BIG <= 0.37, rn.RIPPLE_NOTCH_HZ_BIG
+    # The big/chestnut-model centre: route 000001d3 measured 0.522 Hz median (excess 17x,
+    # 100% of windows qualifying); BMV4 measured 0.40-0.47 Hz. Same validation rule.
+    assert 0.45 <= rn.RIPPLE_NOTCH_HZ_BIG <= 0.55, rn.RIPPLE_NOTCH_HZ_BIG
     # The two centres must be far enough apart that a single notch cannot cover both
     # (the reason per-model selection exists).
     assert abs(rn.RIPPLE_NOTCH_HZ - rn.RIPPLE_NOTCH_HZ_BIG) > 0.15
@@ -654,7 +604,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     y = np.array([prof.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
     assert np.std(y[2000:]) / np.std(x[2000:]) < 0.1
 
-    prof.filter_desired_curvature(ctl, CS, 0.02, False)  # inactive frame pins every stage
+    prof.curvature_ripple_notch.reset(0.02)
     for _ in range(500):
       out = prof.filter_desired_curvature(ctl, CS, 0.02, True)
     assert np.isclose(out, 0.02, rtol=1e-6), out
