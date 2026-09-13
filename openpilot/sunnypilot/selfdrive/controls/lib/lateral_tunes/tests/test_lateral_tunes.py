@@ -592,7 +592,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     0.69 Hz target is absent on the current bundle. The command must pass through
     byte-for-byte at every speed, but the filter keeps stepping so re-arming at runtime
     never starts from a stale state, and the monitor keeps being fed."""
-    assert rn.RIPPLE_NOTCH_ENABLED is False
+    assert rn.RIPPLE_NOTCH_ENABLED is True  # re-armed 2026-09-13 evening: disabling it brought centre chatter (0.5-1 Hz content the notch was suppressing)
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
     prof = ctl.profile
     CS = car.CarState.new_message()

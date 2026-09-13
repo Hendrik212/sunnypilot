@@ -136,7 +136,7 @@ RIPPLE_NOTCH_Q = 2.0  # -3 dB width f0/Q; 0.35 Hz at 0.69, 0.17 Hz at 0.34
 # Master switch. False since 2026-09-13: the notch is inside the model's outer loop and
 # was adding lag at the 0.31-0.35 Hz closed-loop weave while its target ripple is absent
 # on the current bundle. See the module docstring before flipping this back.
-RIPPLE_NOTCH_ENABLED = False
+RIPPLE_NOTCH_ENABLED = True
 
 
 def ripple_notch_hz_for(big: bool) -> float:
