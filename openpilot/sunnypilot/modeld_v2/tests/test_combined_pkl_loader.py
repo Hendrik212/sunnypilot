@@ -229,6 +229,7 @@ class TestBundleOverrides(OpenpilotTestCase):
     arch = ARCHETYPES[archetype_name]
     state = model_state_factory(arch)
     assert state.LAT_SMOOTH_SECONDS == 0.1
+    assert state.BUNDLE_LAT_SMOOTH_SECONDS == 0.1  # retained for a negative LatSmoothSeconds
     assert state.LONG_SMOOTH_SECONDS == 0.3
 
   @parameterized.expand(ARCHETYPE_NAMES, names=["archetype_name"])

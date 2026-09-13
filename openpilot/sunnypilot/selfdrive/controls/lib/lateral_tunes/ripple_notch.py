@@ -138,14 +138,15 @@ import numpy as np
 # Small (qcom) model. Measured 14.8x excess at 0.69 Hz on route 000001a4 in both desired
 # curvature and steering angle; the offline centre sweep is sharply peaked here.
 RIPPLE_NOTCH_HZ = 0.69
-# Big (chestnut) model. Cinque Terre (route 000001ee, highway 23-36 m/s) measures the
-# ripple at 0.31-0.37 Hz in desired curvature (peak 13.8x excess at 0.31 Hz / 29 m/s,
-# 12.0x at 0.365 Hz / 34 m/s) and the same band in steering angle. The previous 0.50 Hz
-# centre (calibrated against the d3/BMV4 checkpoints, which sat at 0.40-0.52 Hz) passed
-# 89% of this content through -- a full notch miss. Re-centred to 0.34 Hz: at Q=2 the
-# -3 dB band is 0.25-0.43 Hz, covering the observed 0.31-0.37 range with margin.
-RIPPLE_NOTCH_HZ_BIG = 0.34
-RIPPLE_NOTCH_Q = 2.0  # -3 dB width f0/Q; 0.35 Hz at 0.69, 0.17 Hz at 0.34
+# Big (chestnut) model. Cinque Terre (route 000001ee, highway 23-36 m/s) measured
+# 0.31-0.37 Hz in desired curvature (13.8x at 0.31 Hz / 29 m/s) and the notch was centred
+# there (0.34) on 2026-09-08. That band is the closed-loop lane-keeping mode (docstring,
+# 2026-09-13), and a notch centred ON the mode adds lag exactly where the loop needs lead:
+# the cascaded 0.34 Hz stage on the small model moved the weave to 0.23 Hz within an hour.
+# Re-centred to the small model's 0.69 Hz until a big-model ripple is shown on MANUAL
+# driving data; the per-model selection is kept so that can be dialled in per bundle.
+RIPPLE_NOTCH_HZ_BIG = RIPPLE_NOTCH_HZ
+RIPPLE_NOTCH_Q = 2.0  # -3 dB width f0/Q; 0.35 Hz at 0.69
 # Master switch. Off for one drive on 2026-09-13 (00000208): halved the weave, 5-10x more
 # 0.5-1 Hz chatter. Kept ON; the weave is addressed with lead (LatLookaheadOffset) instead.
 # See the module docstring before flipping this.
@@ -153,7 +154,7 @@ RIPPLE_NOTCH_ENABLED = True
 
 
 def ripple_notch_hz_for(big: bool) -> float:
-  """Per-model notch centre. Small model = 0.69 Hz, big/chestnut = 0.34 Hz (Cinque Terre)."""
+  """Per-model notch centre. Both 0.69 Hz today (see RIPPLE_NOTCH_HZ_BIG); kept per model."""
   return RIPPLE_NOTCH_HZ_BIG if big else RIPPLE_NOTCH_HZ
 
 # Speed blend. Starts below the 70 km/h band where the weave is felt; the old LP did not

@@ -104,7 +104,10 @@ class ModelState(ModelStateBase):
     self.generation = model_bundle.generation if model_bundle is not None else None
     overrides = {override.key: override.value for override in model_bundle.overrides} if model_bundle else {}
 
-    self.LAT_SMOOTH_SECONDS = float(overrides.get('lat', ".0"))
+    # Bundle defaults. LAT_SMOOTH_SECONDS can be overridden at runtime by the LatSmoothSeconds
+    # param (main loop); the bundle value is kept so a negative param restores it.
+    self.BUNDLE_LAT_SMOOTH_SECONDS = float(overrides.get('lat', ".0"))
+    self.LAT_SMOOTH_SECONDS = self.BUNDLE_LAT_SMOOTH_SECONDS
     self.LONG_SMOOTH_SECONDS = float(overrides.get('long', ".0"))
     self.lat_lookahead_offset = 0.0  # refreshed from the LatLookaheadOffset param in the main loop
     self.MIN_LAT_CONTROL_SPEED = 0.3
@@ -468,6 +471,16 @@ def main(demo=False):
       # at 0.69 Hz. Deliberately NOT routed through lat_delay, which the torque controller
       # also reads as the true actuator delay. Default 0.0 = stock behaviour.
       model.lat_lookahead_offset = float(params.get("LatLookaheadOffset", return_default=True))
+      # Source LP on the published desiredCurvature (smooth_value, tau = this value), applied
+      # for generation >= 10 bundles. It is compensated: the same tau is added to lat_delay
+      # below, so lat_action_t moves out by tau and the LP's lag is cancelled to first order
+      # below ~1 Hz (tau = 0.1: +0.2 deg at 0.35 Hz, +1.4 at 0.69, +4 at 1.0) while 1-2 Hz
+      # command noise drops roughly by half. controlsd adds the stock LAT_SMOOTH_SECONDS
+      # (0.1) to its lat_delay unconditionally, so 0.1 here is the value that makes the
+      # torque controller's delay accounting true; the CD210 bundle ships 'lat': '.0'.
+      # Negative = use the bundle's own override (the default).
+      lat_smooth = float(params.get("LatSmoothSeconds", return_default=True))
+      model.LAT_SMOOTH_SECONDS = lat_smooth if lat_smooth >= 0.0 else model.BUNDLE_LAT_SMOOTH_SECONDS
       model.PLANPLUS_CONTROL = params.get("PlanplusControl", return_default=True)
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS

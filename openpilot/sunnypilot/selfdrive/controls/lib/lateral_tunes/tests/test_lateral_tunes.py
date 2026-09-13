@@ -525,36 +525,40 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
 
   def test_notch_tracks_model_v2_big(self):
-    """The notch centre follows modelV2.big: big/chestnut -> 0.50 Hz, small -> 0.69 Hz.
-    model_v2 is set by controlsd (extension.update_model_v2) before filter_desired_curvature
-    runs. A missing model_v2 defaults to the small-model centre."""
+    """The notch centre follows modelV2.big. model_v2 is set by controlsd
+    (extension.update_model_v2) before filter_desired_curvature runs. A missing model_v2
+    defaults to the small-model centre. The two centres are equal in production today, so
+    the big one is patched apart here to make the switch observable."""
     from types import SimpleNamespace
+    from unittest import mock
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
     prof = ctl.profile
     CS = car.CarState.new_message()
     CS.vEgo = 25.0
 
-    # default: no model_v2 yet -> small model
-    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
-    prof.filter_desired_curvature(ctl, CS, 0.01, True)
-    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
+    big_hz = 0.50
+    with mock.patch.object(rn, "RIPPLE_NOTCH_HZ_BIG", big_hz):
+      # default: no model_v2 yet -> small model
+      assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
+      prof.filter_desired_curvature(ctl, CS, 0.01, True)
+      assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ)
 
-    # big/chestnut model
-    ctl.extension.model_v2 = SimpleNamespace(big=True)
-    prof.filter_desired_curvature(ctl, CS, 0.01, True)
-    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ_BIG), prof.curvature_ripple_notch.f0
+      # big/chestnut model
+      ctl.extension.model_v2 = SimpleNamespace(big=True)
+      prof.filter_desired_curvature(ctl, CS, 0.01, True)
+      assert np.isclose(prof.curvature_ripple_notch.f0, big_hz), prof.curvature_ripple_notch.f0
 
-    # back to small model
-    ctl.extension.model_v2 = SimpleNamespace(big=False)
-    prof.filter_desired_curvature(ctl, CS, 0.01, True)
-    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ), prof.curvature_ripple_notch.f0
+      # back to small model
+      ctl.extension.model_v2 = SimpleNamespace(big=False)
+      prof.filter_desired_curvature(ctl, CS, 0.01, True)
+      assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ), prof.curvature_ripple_notch.f0
 
-    # monitor is still inert under a model switch: forcing it elsewhere must not move the notch
-    prof.ripple_monitor.f_hz = 0.95
-    prof.ripple_monitor.measured_hz = 0.95
-    ctl.extension.model_v2 = SimpleNamespace(big=True)
-    prof.filter_desired_curvature(ctl, CS, 0.01, True)
-    assert np.isclose(prof.curvature_ripple_notch.f0, rn.RIPPLE_NOTCH_HZ_BIG)
+      # monitor is still inert under a model switch: forcing it elsewhere must not move the notch
+      prof.ripple_monitor.f_hz = 0.95
+      prof.ripple_monitor.measured_hz = 0.95
+      ctl.extension.model_v2 = SimpleNamespace(big=True)
+      prof.filter_desired_curvature(ctl, CS, 0.01, True)
+      assert np.isclose(prof.curvature_ripple_notch.f0, big_hz)
 
   def test_notch_centre_matches_the_measured_ripple(self):
     """The whole design rests on this number. Measured on route 000001a4 against a fitted
@@ -571,13 +575,13 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     # model shift would be clamped out of the logs before anyone could see it.
     assert rn.RIPPLE_CLAMP_HZ[0] < rn.RIPPLE_NOTCH_HZ < rn.RIPPLE_CLAMP_HZ[1]
 
-    # The big/chestnut-model centre: route 000001ee measured 0.31-0.37 Hz (engaged only;
-    # now understood as the closed-loop mode -- see the module docstring). Kept as the
-    # documented constant; the notch is switched off.
-    assert 0.31 <= rn.RIPPLE_NOTCH_HZ_BIG <= 0.37, rn.RIPPLE_NOTCH_HZ_BIG
-    # The two centres must be far enough apart that a single notch cannot cover both
-    # (the reason per-model selection exists).
-    assert abs(rn.RIPPLE_NOTCH_HZ - rn.RIPPLE_NOTCH_HZ_BIG) > 0.15
+    # The big/chestnut-model centre: route 000001ee measured 0.31-0.37 Hz engaged-only,
+    # now understood as the closed-loop lane-keeping mode (module docstring, 2026-09-13).
+    # A notch ON the mode adds lag where the loop needs lead, so the big model uses the
+    # small model's centre until a ripple is shown on manual-driving data. Re-separating
+    # the two requires that evidence, not a new number here.
+    assert rn.RIPPLE_NOTCH_HZ_BIG == rn.RIPPLE_NOTCH_HZ, rn.RIPPLE_NOTCH_HZ_BIG
+    assert not (0.25 <= rn.RIPPLE_NOTCH_HZ_BIG <= 0.45), "big-model notch sits on the loop mode"
 
   def test_notch_speed_blend_covers_the_70kmh_weave(self):
     """The LP this replaced was still at blend 0.0 at 19.4 m/s (70 km/h) -- it never
