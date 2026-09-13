@@ -25,10 +25,13 @@ def smooth_value(val, prev_val, tau, dt=DT_MDL):
   alpha = 1 - np.exp(-dt/tau) if tau > 0 else 1
   return alpha * val + (1 - alpha) * prev_val
 
-def clip_curvature(v_ego, prev_curvature, new_curvature, roll) -> tuple[float, bool]:
+def clip_curvature(v_ego, prev_curvature, new_curvature, roll, jerk_factor=1.0) -> tuple[float, bool]:
   # This function respects ISO lateral jerk and acceleration limits + a max curvature
+  # jerk_factor < 1.0 tightens the rate clamp only (lane-change pace shaping,
+  # sunnypilot/selfdrive/controls/lib/lane_change_shaper.py); the accel envelope and the
+  # saturation report are unchanged by it.
   v_ego = max(v_ego, MIN_SPEED)
-  max_curvature_rate = MAX_LATERAL_JERK / (v_ego ** 2)  # inexact calculation, check https://github.com/commaai/openpilot/pull/24755
+  max_curvature_rate = (MAX_LATERAL_JERK * jerk_factor) / (v_ego ** 2)  # inexact calculation, check https://github.com/commaai/openpilot/pull/24755
   new_curvature = np.clip(new_curvature,
                           prev_curvature - max_curvature_rate * DT_CTRL,
                           prev_curvature + max_curvature_rate * DT_CTRL)

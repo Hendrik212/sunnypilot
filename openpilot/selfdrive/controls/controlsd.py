@@ -175,7 +175,15 @@ class Controls(ControlsExt):
       # hold is no longer being applied (see the note in turn_intent/__init__.py).
       self.turn_intent.reset()
     self.turn_intent_was_active = getattr(lat_profile, "uses_turn_intent_hold", False)
-    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
+    # Lane-change pace shaping (sunnypilot/.../lane_change_shaper.py): tightens the
+    # curvature-rate clamp while the model is executing a lane change, releases after.
+    # Inert (factor 1.0) at the default LaneChangeSmoothing = 10.
+    in_lane_change = model_v2.meta.laneChangeState in (LaneChangeState.laneChangeStarting,
+                                                       LaneChangeState.laneChangeFinishing)
+    jerk_factor = self.lane_change_shaper.update(in_lane_change and CC.latActive, CS.vEgo,
+                                                 new_desired_curvature, self.desired_curvature)
+    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll,
+                                                               jerk_factor)
     lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 
     actuators.curvature = self.desired_curvature
