@@ -506,7 +506,8 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     clamp stays narrow so a wide search cannot drag the notch somewhere unvalidated."""
     assert rn.RIPPLE_SEARCH_HZ[0] <= 0.25
     assert rn.RIPPLE_BACKGROUND_FIT_HZ[0] < rn.RIPPLE_SEARCH_HZ[0]
-    assert rn.RIPPLE_CLAMP_HZ[0] >= 0.45 and rn.RIPPLE_CLAMP_HZ[1] <= 1.05
+    # floor lowered 0.50 -> 0.25 so the 0.31-0.37 Hz band is not clamped out of the logs
+    assert 0.20 <= rn.RIPPLE_CLAMP_HZ[0] <= 0.30 and rn.RIPPLE_CLAMP_HZ[1] <= 1.05
 
   def test_ripple_monitor_never_reaches_control(self):
     """The monitor is inert by construction: the notch frequency is the per-model constant,
@@ -570,9 +571,10 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     # model shift would be clamped out of the logs before anyone could see it.
     assert rn.RIPPLE_CLAMP_HZ[0] < rn.RIPPLE_NOTCH_HZ < rn.RIPPLE_CLAMP_HZ[1]
 
-    # The big/chestnut-model centre: route 000001d3 measured 0.522 Hz median (excess 17x,
-    # 100% of windows qualifying); BMV4 measured 0.40-0.47 Hz. Same validation rule.
-    assert 0.45 <= rn.RIPPLE_NOTCH_HZ_BIG <= 0.55, rn.RIPPLE_NOTCH_HZ_BIG
+    # The big/chestnut-model centre: route 000001ee measured 0.31-0.37 Hz (engaged only;
+    # now understood as the closed-loop mode -- see the module docstring). Kept as the
+    # documented constant; the notch is switched off.
+    assert 0.31 <= rn.RIPPLE_NOTCH_HZ_BIG <= 0.37, rn.RIPPLE_NOTCH_HZ_BIG
     # The two centres must be far enough apart that a single notch cannot cover both
     # (the reason per-model selection exists).
     assert abs(rn.RIPPLE_NOTCH_HZ - rn.RIPPLE_NOTCH_HZ_BIG) > 0.15
@@ -584,34 +586,56 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     assert np.interp(16.7, rn.RIPPLE_NOTCH_SPEED_BP, rn.RIPPLE_NOTCH_BLEND_V) == 1.0
     assert np.interp(10.0, rn.RIPPLE_NOTCH_SPEED_BP, rn.RIPPLE_NOTCH_BLEND_V) == 0.0
 
-  def test_ripple_notch_is_inert_below_blend_in(self):
-    """Below the blend the command must pass through byte-for-byte; above it the ripple
-    band must actually be attenuated."""
+  def test_ripple_notch_is_disabled_passthrough(self):
+    """RIPPLE_NOTCH_ENABLED is False (2026-09-13): the notch sits inside the driving
+    model's outer loop and added 19 deg of lag at the 0.35 Hz closed-loop weave while its
+    0.69 Hz target is absent on the current bundle. The command must pass through
+    byte-for-byte at every speed, but the filter keeps stepping so re-arming at runtime
+    never starts from a stale state, and the monitor keeps being fed."""
+    assert rn.RIPPLE_NOTCH_ENABLED is False
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
     prof = ctl.profile
     CS = car.CarState.new_message()
-
-    CS.vEgo = 10.0
-    prof.curvature_ripple_notch.reset(0.0)
-    assert prof.filter_desired_curvature(ctl, CS, 0.02, True) == 0.02
-
-    # At 25 m/s, a sustained tone at the notch centre must come out attenuated while a
-    # constant command passes untouched.
-    CS.vEgo = 25.0
-    prof.curvature_ripple_notch.reset(0.0)
-    t = np.arange(4000) * DT_CTRL
+    t = np.arange(2000) * DT_CTRL
     x = 0.01 * np.sin(2 * np.pi * rn.RIPPLE_NOTCH_HZ * t)
-    y = np.array([prof.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
-    assert np.std(y[2000:]) / np.std(x[2000:]) < 0.1
+    for v_ego in (10.0, 25.0, 35.0):
+      CS.vEgo = v_ego
+      prof.filter_desired_curvature(ctl, CS, float(x[0]), False)
+      y = np.array([prof.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
+      assert np.array_equal(y, x), v_ego
+    # the filter state moved with the input even though its output was not used
+    assert prof.curvature_ripple_notch.x1 == x[-1]
+    # monitor still fed
+    assert prof.ripple_monitor._acc_n > 0 or prof.ripple_monitor.filled > 0
 
-    prof.curvature_ripple_notch.reset(0.02)
-    for _ in range(500):
-      out = prof.filter_desired_curvature(ctl, CS, 0.02, True)
-    assert np.isclose(out, 0.02, rtol=1e-6), out
+  def test_ripple_notch_would_attenuate_if_enabled(self):
+    """Guard the filter itself against bit-rot while it is switched off: the exact
+    profile path, with the switch forced on, must still kill its centre above the blend
+    and pass a constant untouched. Restored from the pre-2026-09-13 assertions."""
+    from unittest import mock
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    prof = ctl.profile
+    CS = car.CarState.new_message()
+    with mock.patch.object(rn, "RIPPLE_NOTCH_ENABLED", True):
+      CS.vEgo = 10.0
+      prof.curvature_ripple_notch.reset(0.0)
+      assert prof.filter_desired_curvature(ctl, CS, 0.02, True) == 0.02  # below blend
+
+      CS.vEgo = 25.0
+      prof.curvature_ripple_notch.reset(0.0)
+      t = np.arange(4000) * DT_CTRL
+      x = 0.01 * np.sin(2 * np.pi * rn.RIPPLE_NOTCH_HZ * t)
+      y = np.array([prof.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
+      assert np.std(y[2000:]) / np.std(x[2000:]) < 0.1
+
+      prof.filter_desired_curvature(ctl, CS, 0.02, False)
+      for _ in range(500):
+        out = prof.filter_desired_curvature(ctl, CS, 0.02, True)
+      assert np.isclose(out, 0.02, rtol=1e-6), out
 
   def test_big_notch_attenuates_above_blend(self):
-    """The big/chestnut-model notch must attenuate its own 0.50 Hz centre above the blend,
-    and a model switch mid-stream re-centres the filter onto the new bump."""
+    """The big/chestnut-model notch must attenuate its own centre above the blend when the
+    switch is on (bit-rot guard), and be a passthrough with the switch as shipped."""
     from types import SimpleNamespace
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
     prof = ctl.profile
@@ -621,8 +645,14 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     prof.curvature_ripple_notch.reset(0.0)
     t = np.arange(4000) * DT_CTRL
     x = 0.01 * np.sin(2 * np.pi * rn.RIPPLE_NOTCH_HZ_BIG * t)
-    y = np.array([prof.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
+    from unittest import mock
+    with mock.patch.object(rn, "RIPPLE_NOTCH_ENABLED", True):
+      y = np.array([prof.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
     assert np.std(y[2000:]) / np.std(x[2000:]) < 0.1
+    # and with the switch as shipped, the same tone passes through untouched
+    prof.curvature_ripple_notch.reset(0.0)
+    y = np.array([prof.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
+    assert np.array_equal(y, x)
 
   def test_ripple_notch_primes_while_inactive(self):
     """Inactive must pin the notch to the live command, not run it."""

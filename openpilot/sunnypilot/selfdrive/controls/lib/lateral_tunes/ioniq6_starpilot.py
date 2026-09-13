@@ -166,7 +166,11 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
       self.curvature_ripple_notch.reset(desired_curvature)
       return desired_curvature
 
+    # Stepped even while disabled so the state is primed if the switch is ever flipped
+    # back at runtime; only the output is gated.
     filtered = self.curvature_ripple_notch.update(desired_curvature)
+    if not rn.RIPPLE_NOTCH_ENABLED:
+      return desired_curvature
     blend = np.interp(CS.vEgo, rn.RIPPLE_NOTCH_SPEED_BP, rn.RIPPLE_NOTCH_BLEND_V)
     return float(desired_curvature + blend * (filtered - desired_curvature))
 

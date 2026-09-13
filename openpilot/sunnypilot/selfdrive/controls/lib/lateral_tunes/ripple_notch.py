@@ -68,6 +68,56 @@ ripple sits far from the small model's (route 000001d3 measures 0.52 Hz median, 
 17x; the small model is 0.69 Hz), so a single centre cannot cover both. The notch reads
 `modelV2.big` each frame and selects between two validated constants; neither is an
 estimate and neither tracks a window, so the rejection above still holds.
+
+## 2026-09-13: the notch is DISABLED (RIPPLE_NOTCH_ENABLED = False)
+
+Three drives changed the picture. Keep this section before re-arming anything.
+
+1. The premise "reference-side filtering cannot cost phase margin" is wrong on this car.
+   It holds for the torque loop (the measurement is untouched), but the driving model IS
+   the lane-position controller: it sees the car through the camera and its curvature
+   command is the outer loop's signal. Any filter on that command is a filter inside the
+   outer loop, and a notch adds phase lag below its centre. Proven the hard way: a second
+   0.34 Hz stage cascaded on the small model (commit cea8834369, reverted in ef533427d3)
+   removed the 0.31 Hz weave it targeted and the loop moved to 0.23 Hz -- where the new
+   stage had added 32 deg of lag -- with excess 11-45x in nearly every highway segment of
+   route 00000202 instead of one stretch of 000001f9. The driver felt it within an hour.
+
+2. The 0.31-0.35 Hz "ripple" is a closed-loop mode, not model output. Routes 000001f9
+   and 00000204 (small model, CD210 bundle): 17-55x above background in desired
+   curvature, steering angle and the P/I/F terms alike while engaged at 25-33 m/s,
+   2-4x during manual driving at the same speeds on the same routes. RIPPLE_NOTCH_HZ_BIG
+   = 0.34 was calibrated on engaged-only 000001ee data in that same band, so it was most
+   likely this mode too, and by (1) a notch centred ON the mode is the worst possible
+   choice for it.
+
+3. The 0.69 Hz ripple the small-model notch was built for is not produced by the current
+   bundle. Over 84 engaged highway windows of 00000204 the 0.69 Hz bin measures 0.6x
+   median / 2.3x max; 00000202 and 000001f9 read the same. The notch was 19 deg of lag at
+   0.35 Hz for nothing.
+
+Measured loop phase budget at the 0.35 Hz mode (00000204 seg 46/77, cross-spectral
+phase between consecutive logged signals, coherence >= 0.96 at every stage, signs
+resolved from each pair's DC correlation):
+
+    model curv -> setpoint (0.69 notch + 1.2 Hz jerk LP)     -33 deg  (notch alone -19)
+    setpoint -> PID output (jerk lead, FF on raw request)     +33 deg
+    PID output -> applied torque (CAN rate limiter)            -2 deg
+    applied torque -> steering angle (EPS + rack)             -90 deg  (0.35 s delay ~ -44)
+    steering angle -> lateral accel                            -9 deg
+
+The rate limiter is on its 2/3-per-frame limit ~30% of frames at every highway speed,
+but at the mode frequency it costs 2 deg: raising it would not help the weave. The EPS
+is the plant. Of the lag we own, the notch was the only element with no measured benefit.
+
+Disabling it removes 19 deg of outer-loop lag at 0.35 Hz. The mode is expected to move
+up in frequency and shrink, not vanish. The next lever, if needed, is the model lookahead
+(lat_action_t, a param override): +0.1 s is ~+13 deg of lead at 0.35 Hz.
+
+The monitor keeps running. If a future bundle brings a real 0.69 Hz ripple back, it
+shows as `rippleMeasuredHz` ~0.69 with `rippleExcess` >> 3 during MANUAL driving as
+well as engaged -- that is the test that separates a model ripple from a loop mode --
+and the notch can be re-armed for that bundle. Do not re-arm it on engaged data alone.
 """
 import numpy as np
 
@@ -83,6 +133,10 @@ RIPPLE_NOTCH_HZ = 0.69
 # -3 dB band is 0.25-0.43 Hz, covering the observed 0.31-0.37 range with margin.
 RIPPLE_NOTCH_HZ_BIG = 0.34
 RIPPLE_NOTCH_Q = 2.0  # -3 dB width f0/Q; 0.35 Hz at 0.69, 0.17 Hz at 0.34
+# Master switch. False since 2026-09-13: the notch is inside the model's outer loop and
+# was adding lag at the 0.31-0.35 Hz closed-loop weave while its target ripple is absent
+# on the current bundle. See the module docstring before flipping this back.
+RIPPLE_NOTCH_ENABLED = False
 
 
 def ripple_notch_hz_for(big: bool) -> float:
