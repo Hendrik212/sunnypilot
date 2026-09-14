@@ -16,6 +16,7 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
+from openpilot.sunnypilot.selfdrive.controls.lib.lane_centre_assist import LaneCentreAssist
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_shaper import LaneChangeShaper
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 import LatControlTorque as LatControlTorqueV2
@@ -31,6 +32,8 @@ class ControlsExt(ModelStateBase):
     self.blinker_pause_lateral = BlinkerPauseLateral()
     self.lane_change_shaper = LaneChangeShaper()
     self.lane_change_shaper.get_params(params)
+    self.lane_centre_assist = LaneCentreAssist()
+    self.lane_centre_assist.get_params(params)
 
     cloudlog.info("controlsd_ext is waiting for CarParamsSP")
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
@@ -70,6 +73,7 @@ class ControlsExt(ModelStateBase):
     if time.monotonic() - self._param_update_time > PARAMS_UPDATE_PERIOD:
       self.blinker_pause_lateral.get_params()
       self.lane_change_shaper.get_params(self.params)
+      self.lane_centre_assist.get_params(self.params)
 
       if self.CP.lateralTuning.which() == 'torque':
         self.lat_delay = get_lat_delay(self.params, sm["lateralDelay"].lateralDelay)
@@ -135,7 +139,8 @@ class ControlsExt(ModelStateBase):
     pm.send('carControlSP', cc_sp_send)
 
   @staticmethod
-  def publish_lateral_tune_state(LaC, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
+  def publish_lateral_tune_state(LaC, sm: messaging.SubMaster, pm: messaging.PubMaster,
+                                 lane_centre: LaneCentreAssist | None = None) -> None:
     """Publish the torque params the lateral controller ACTUALLY applied.
 
     Distinct from lateralTorqueParameters, which carries torqued's ESTIMATE: a lateral tune
@@ -162,9 +167,13 @@ class ControlsExt(ModelStateBase):
     if monitor is not None:
       state.rippleMeasuredHz = float(monitor.measured_hz)
       state.rippleExcess = float(monitor.excess)
+    if lane_centre is not None:
+      state.laneCentreOffset = float(lane_centre.offset)
+      state.laneCentreCorrection = float(lane_centre.correction)
+      state.laneCentreActive = bool(lane_centre.active)
     pm.send('lateralTuneStateSP', msg)
 
   def run_ext(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
     CC_SP = self.state_control_ext(sm)
     self.publish_ext(CC_SP, sm, pm)
-    self.publish_lateral_tune_state(self.LaC, sm, pm)
+    self.publish_lateral_tune_state(self.LaC, sm, pm, self.lane_centre_assist)

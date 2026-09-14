@@ -253,6 +253,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LatLookaheadOffset", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"LatSmoothSeconds", {PERSISTENT | BACKUP, FLOAT, "-1.0"}},
     {"LaneChangeSmoothing", {PERSISTENT | BACKUP, INT, "10"}},
+    {"LaneCentreGain", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"LaneTurnDesire", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"LaneTurnValue", {PERSISTENT | BACKUP, FLOAT, "19.0"}},
     {"PlanplusControl", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
