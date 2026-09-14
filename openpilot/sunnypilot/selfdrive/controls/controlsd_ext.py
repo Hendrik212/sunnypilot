@@ -23,6 +23,15 @@ from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 import Lat
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v3 import LatControlTorque as LatControlTorqueV3
 
 
+# Speed-dependent steering delay (port of sunnypilot/sunnypilot#2029). When Live Steer
+# Delay learning is off, the cached LagdValueCache is the highway base and an extra
+# LagdCityDelayBoost (default 0.30 s, capped at 0.50 s total) is added at low speed to
+# improve turn-in; it fades to zero by 80 km/h so highway behaviour is unchanged.
+CITY_SPEED_KPH = 50.0
+HIGHWAY_SPEED_KPH = 80.0
+MAX_DELAY = 0.50
+
+
 class ControlsExt(ModelStateBase):
   def __init__(self, CP: structs.CarParams, params: Params):
     ModelStateBase.__init__(self)
@@ -34,6 +43,8 @@ class ControlsExt(ModelStateBase):
     self.lane_change_shaper.get_params(params)
     self.lane_centre_assist = LaneCentreAssist()
     self.lane_centre_assist.get_params(params)
+    self.city_delay_boost = 0.30
+    self.lagd_toggle = True
 
     cloudlog.info("controlsd_ext is waiting for CarParamsSP")
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
@@ -69,6 +80,22 @@ class ControlsExt(ModelStateBase):
     else:
       return lac
 
+  @staticmethod
+  def speed_dependent_delay(v_ego: float, highway_delay: float, city_boost: float) -> float:
+    """Highway delay at high speed, highway + city_boost (capped at MAX_DELAY) at low speed,
+    linear fade between 50 and 80 km/h. city_boost <= 0 = highway_delay everywhere."""
+    highway_delay = min(highway_delay, MAX_DELAY)
+    if city_boost <= 0.0:
+      return highway_delay
+    city_delay = min(highway_delay + city_boost, MAX_DELAY)
+    speed_kph = v_ego * 3.6
+    if speed_kph <= CITY_SPEED_KPH:
+      return city_delay
+    if speed_kph >= HIGHWAY_SPEED_KPH:
+      return highway_delay
+    ratio = (speed_kph - CITY_SPEED_KPH) / (HIGHWAY_SPEED_KPH - CITY_SPEED_KPH)
+    return city_delay + ratio * (highway_delay - city_delay)
+
   def get_params_sp(self, sm: messaging.SubMaster) -> None:
     if time.monotonic() - self._param_update_time > PARAMS_UPDATE_PERIOD:
       self.blinker_pause_lateral.get_params()
@@ -77,6 +104,11 @@ class ControlsExt(ModelStateBase):
 
       if self.CP.lateralTuning.which() == 'torque':
         self.lat_delay = get_lat_delay(self.params, sm["lateralDelay"].lateralDelay)
+        try:
+          self.city_delay_boost = float(self.params.get("LagdCityDelayBoost", return_default=True))
+        except (TypeError, ValueError):
+          self.city_delay_boost = 0.0
+        self.lagd_toggle = self.params.get_bool("LagdToggle")
 
       self._param_update_time = time.monotonic()
 

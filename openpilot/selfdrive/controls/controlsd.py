@@ -94,6 +94,15 @@ class Controls(ControlsExt):
       device_motion = Pose.from_device_motion(self.sm['deviceMotion'])
       self.calibrated_pose = self.pose_calibrator.build_calibrated_pose(device_motion)
 
+  def _effective_lat_delay(self, v_ego: float) -> float:
+    """Per-frame delay: the highway base (self.lat_delay, updated every 3 s) plus the
+    speed-dependent city boost that fades to zero by 80 km/h. When Live Steer Delay is on,
+    self.lat_delay is the live value and city_delay_boost is unused (get_lat_delay returns
+    the live delay directly when LagdToggle is True, so the boost has no effect)."""
+    if self.city_delay_boost > 0.0 and not self.lagd_toggle:
+      return self.speed_dependent_delay(v_ego, self.lat_delay, self.city_delay_boost)
+    return self.lat_delay
+
   def state_control(self):
     CS = self.sm['carState']
 
@@ -117,7 +126,7 @@ class Controls(ControlsExt):
 
       self.LaC.extension.update_model_v2(self.sm['modelV2'])
 
-      self.LaC.extension.update_lateral_lag(self.lat_delay)
+      self.LaC.extension.update_lateral_lag(self._effective_lat_delay(CS.vEgo))
 
     long_plan = self.sm['longitudinalPlan']
     model_v2 = self.sm['modelV2']
@@ -192,7 +201,7 @@ class Controls(ControlsExt):
                                                  new_desired_curvature, self.desired_curvature)
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll,
                                                                jerk_factor)
-    lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
+    lat_delay = self._effective_lat_delay(CS.vEgo) + LAT_SMOOTH_SECONDS
 
     actuators.curvature = self.desired_curvature
     steer, lateral_output, lac_log = self.LaC.update(CC.latActive, CS, self.VM, lp,
