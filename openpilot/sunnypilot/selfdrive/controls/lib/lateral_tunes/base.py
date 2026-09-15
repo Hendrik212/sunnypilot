@@ -12,6 +12,9 @@ value and every hook is a no-op. A concrete profile overrides only what it needs
 """
 
 
+from openpilot.common.params import Params
+
+
 class LateralTuneProfile:
   # Identity. Used to decide whether controller state can be carried across a live tune
   # switch (controlsd.check_lateral_control_version). Must be unique per profile.
@@ -66,6 +69,11 @@ class LateralTuneProfile:
 
   def prime_inactive(self, ctl, CS, desired_curvature, measurement) -> None:
     """Keep profile-owned state primed while lateral is inactive."""
+
+  def get_params(self, params: Params) -> None:
+    """Re-read any profile-owned live params. Called from controlsd_ext.get_params_sp on the
+    same ~3 s cadence as the other live params (LaneChangeSmoothing, LaneCentreGain, ...), NOT
+    every frame. The default is a no-op: profiles with nothing tunable need not override it."""
 
   def update(self, ctl, active, CS, VM, params, steer_limited_by_safety,
              desired_curvature, measured_curvature, measurement, calibrated_pose,

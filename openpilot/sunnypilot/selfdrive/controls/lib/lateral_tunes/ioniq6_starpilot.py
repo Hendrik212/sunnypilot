@@ -21,6 +21,7 @@ from opendbc.sunnypilot.car.hyundai.lateral_limits import friction_for_speed, la
 from opendbc.sunnypilot.car.hyundai.values import IONIQ6_STARPILOT_TORQUE
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.common.params import Params
 from openpilot.selfdrive.controls.lib.drive_helpers import MIN_SPEED
 from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_shaping as i6
 from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ripple_notch as rn
@@ -126,6 +127,14 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
   # ~5% of intended, and at creep the friction term IS the entire feedforward.
   use_live_torque_params = False
 
+  def get_params(self, params: Params) -> None:
+    cap = params.get("LatAccelFactorCap", return_default=True)
+    try:
+      cap = float(cap) if cap is not None else -1.0
+    except (TypeError, ValueError):
+      cap = -1.0
+    self.lat_accel_factor_cap = cap
+
   def _apply_speed_scheduled_factor(self, ctl, v_ego: float) -> None:
     # Scale latAccelFactor with STEER_MAX so unsaturated CAN/m/s^2 stays 409/3.66.
     # Without this, raising STEER_MAX is a gain change (the 500-at-3.66 mistake).
@@ -138,6 +147,12 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     base = (IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] *
             i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT)
     laf = lat_accel_factor_for_speed(v_ego, base)
+    # LatAccelFactorCap (live param, <= 0 = off): caps the 6.5-15 m/s plateau (5.82) down
+    # toward the 0/17 m/s floor (3.66) without touching it or the friction schedule -- this
+    # deliberately breaks the CAN-invariant above by request (2026-09-15: 5.82 felt too
+    # high in that band), trading torque-per-lat-accel consistency for less gain there.
+    if self.lat_accel_factor_cap > 0.0:
+      laf = min(laf, self.lat_accel_factor_cap)
     if abs(ctl.torque_params.latAccelFactor - laf) > 1e-4:
       ctl.torque_params.latAccelFactor = laf
       ctl.torque_params.friction = friction_for_speed(v_ego, IONIQ6_STARPILOT_TORQUE['FRICTION'])
@@ -176,6 +191,8 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     return float(desired_curvature + blend * (filtered - desired_curvature))
 
   def init_controller(self, ctl, CP, CP_SP, CI) -> None:
+    # Set before the first _apply_speed_scheduled_factor call below.
+    self.lat_accel_factor_cap = -1.0
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
     # written once at fingerprint time, so on a live switch from upstream it still holds the
     # UPSTREAM factor -- multiplying that by 1.22 would give a gain that is neither tune.

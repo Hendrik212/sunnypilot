@@ -352,6 +352,65 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
       ctl.profile._apply_speed_scheduled_factor(ctl, 10.0)
     assert ctl.torque_params.friction == first
 
+  def test_lat_accel_factor_cap_leaves_floor_and_friction_untouched(self):
+    """LatAccelFactorCap only clips the 6.5-15 m/s plateau (5.82) toward the floor (3.66);
+    the floor itself and the friction schedule are unaffected, by design."""
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import friction_for_speed
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    params = Params()
+    params.put("LatAccelFactorCap", 4.8, block=True)
+    ctl.profile.get_params(params)
+    for v, expect_capped in ((0.0, False), (10.0, True), (30.0, False)):
+      ctl.profile._apply_speed_scheduled_factor(ctl, v)
+      if expect_capped:
+        assert np.isclose(ctl.torque_params.latAccelFactor, 4.8, rtol=1e-3), v
+      else:
+        assert np.isclose(ctl.torque_params.latAccelFactor, 3.66, rtol=1e-3), v
+      # friction schedule is untouched by the cap
+      assert np.isclose(ctl.torque_params.friction,
+                        friction_for_speed(v, IONIQ6_STARPILOT_TORQUE['FRICTION']), rtol=1e-3), v
+
+  def test_lat_accel_factor_cap_default_is_off(self):
+    """Sentinel default (-1.0, and any unset/bad param) must reproduce the uncapped schedule."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed
+    base = IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] * i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
+    for v in (0.0, 10.0, 30.0):
+      ctl.profile._apply_speed_scheduled_factor(ctl, v)
+      assert np.isclose(ctl.torque_params.latAccelFactor, lat_accel_factor_for_speed(v, base), rtol=1e-3), v
+
+  def test_lat_accel_factor_cap_bad_param_is_off(self):
+    class _BadParam:
+      def __init__(self, v):
+        self.v = v
+
+      def get(self, key, return_default=False):
+        assert key == "LatAccelFactorCap"
+        return self.v
+
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    for bad in (None, "", "abc"):
+      ctl.profile.get_params(_BadParam(bad))
+      assert ctl.profile.lat_accel_factor_cap <= 0.0
+    # well-formed but non-positive values are also "off" (only a positive cap clips)
+    for v in (-5.0, 0.0):
+      params = Params()
+      params.put("LatAccelFactorCap", v, block=True)
+      ctl.profile.get_params(params)
+      assert ctl.profile.lat_accel_factor_cap <= 0.0
+
+  def test_lat_accel_factor_cap_above_schedule_is_a_noop(self):
+    """A cap set above the plateau value must not change anything."""
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    base = IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] * i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
+    params = Params()
+    params.put("LatAccelFactorCap", 10.0, block=True)
+    ctl.profile.get_params(params)
+    for v in (0.0, 10.0, 30.0):
+      ctl.profile._apply_speed_scheduled_factor(ctl, v)
+      assert np.isclose(ctl.torque_params.latAccelFactor, lat_accel_factor_for_speed(v, base), rtol=1e-3), v
+
   def test_low_speed_reset_threshold_is_not_degenerate(self):
     """Was min(max(minSteerSpeed, 0.3), 0.0447), which is the constant 0.0447 for every
     input -- both other terms dead. The reset must sit at the highest of the three."""

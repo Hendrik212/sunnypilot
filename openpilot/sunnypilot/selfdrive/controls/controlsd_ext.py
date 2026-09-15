@@ -109,6 +109,9 @@ class ControlsExt(ModelStateBase):
         except (TypeError, ValueError):
           self.city_delay_boost = 0.0
         self.lagd_toggle = self.params.get_bool("LagdToggle")
+        profile = getattr(self.LaC, "profile", None)
+        if profile is not None:
+          profile.get_params(self.params)
 
       self._param_update_time = time.monotonic()
 
