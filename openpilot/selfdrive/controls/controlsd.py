@@ -96,11 +96,13 @@ class Controls(ControlsExt):
 
   def _effective_lat_delay(self, v_ego: float) -> float:
     """Per-frame delay: the highway base (self.lat_delay, updated every 3 s) plus the
-    speed-dependent city boost that fades to zero by 80 km/h. When Live Steer Delay is on,
-    self.lat_delay is the live value and city_delay_boost is unused (get_lat_delay returns
-    the live delay directly when LagdToggle is True, so the boost has no effect)."""
+    speed-dependent city boost that fades to zero by highway_speed_kph (default 80 km/h,
+    live-tunable via LagdHighwaySpeedKmh). When Live Steer Delay is on, self.lat_delay is
+    the live value and city_delay_boost is unused (get_lat_delay returns the live delay
+    directly when LagdToggle is True, so the boost has no effect)."""
     if self.city_delay_boost > 0.0 and not self.lagd_toggle:
-      return self.speed_dependent_delay(v_ego, self.lat_delay, self.city_delay_boost)
+      return self.speed_dependent_delay(v_ego, self.lat_delay, self.city_delay_boost,
+                                        self.city_speed_kph, self.highway_speed_kph)
     return self.lat_delay
 
   def state_control(self):

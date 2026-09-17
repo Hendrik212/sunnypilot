@@ -26,7 +26,9 @@ from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v3 import Lat
 # Speed-dependent steering delay (port of sunnypilot/sunnypilot#2029). When Live Steer
 # Delay learning is off, the cached LagdValueCache is the highway base and an extra
 # LagdCityDelayBoost (default 0.30 s, capped at 0.50 s total) is added at low speed to
-# improve turn-in; it fades to zero by 80 km/h so highway behaviour is unchanged.
+# improve turn-in; it fades to zero by HIGHWAY_SPEED_KPH so highway behaviour is unchanged.
+# The fade band endpoints (CITY_SPEED_KPH..HIGHWAY_SPEED_KPH) are live-tunable via the
+# LagdCitySpeedKmh / LagdHighwaySpeedKmh params (<=0 = the code default here).
 CITY_SPEED_KPH = 50.0
 HIGHWAY_SPEED_KPH = 80.0
 MAX_DELAY = 0.50
@@ -45,6 +47,8 @@ class ControlsExt(ModelStateBase):
     self.lane_centre_assist.get_params(params)
     self.city_delay_boost = 0.30
     self.lagd_toggle = True
+    self.city_speed_kph = CITY_SPEED_KPH
+    self.highway_speed_kph = HIGHWAY_SPEED_KPH
 
     cloudlog.info("controlsd_ext is waiting for CarParamsSP")
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
@@ -81,19 +85,23 @@ class ControlsExt(ModelStateBase):
       return lac
 
   @staticmethod
-  def speed_dependent_delay(v_ego: float, highway_delay: float, city_boost: float) -> float:
+  def speed_dependent_delay(v_ego: float, highway_delay: float, city_boost: float,
+                            city_speed_kph: float = CITY_SPEED_KPH,
+                            highway_speed_kph: float = HIGHWAY_SPEED_KPH) -> float:
     """Highway delay at high speed, highway + city_boost (capped at MAX_DELAY) at low speed,
-    linear fade between 50 and 80 km/h. city_boost <= 0 = highway_delay everywhere."""
+    linear fade between city_speed_kph and highway_speed_kph. city_boost <= 0 = highway_delay
+    everywhere. Endpoints default to the module constants (50/80 km/h) but are live-overridable
+    via LagdCitySpeedKmh / LagdHighwaySpeedKmh (the instance passes its cached values)."""
     highway_delay = min(highway_delay, MAX_DELAY)
     if city_boost <= 0.0:
       return highway_delay
     city_delay = min(highway_delay + city_boost, MAX_DELAY)
     speed_kph = v_ego * 3.6
-    if speed_kph <= CITY_SPEED_KPH:
+    if speed_kph <= city_speed_kph:
       return city_delay
-    if speed_kph >= HIGHWAY_SPEED_KPH:
+    if speed_kph >= highway_speed_kph:
       return highway_delay
-    ratio = (speed_kph - CITY_SPEED_KPH) / (HIGHWAY_SPEED_KPH - CITY_SPEED_KPH)
+    ratio = (speed_kph - city_speed_kph) / (highway_speed_kph - city_speed_kph)
     return city_delay + ratio * (highway_delay - city_delay)
 
   def get_params_sp(self, sm: messaging.SubMaster) -> None:
@@ -109,6 +117,16 @@ class ControlsExt(ModelStateBase):
         except (TypeError, ValueError):
           self.city_delay_boost = 0.0
         self.lagd_toggle = self.params.get_bool("LagdToggle")
+        # Fade-band endpoints (live params, <=0 = code default). city_speed_kph is where the
+        # full city delay stops holding; highway_speed_kph is where it has fully faded to the
+        # highway base. Default band 50->80 km/h; user-tuned 80->100 km/h (2026-09-17).
+        for key, attr, default in (("LagdCitySpeedKmh", "city_speed_kph", CITY_SPEED_KPH),
+                                   ("LagdHighwaySpeedKmh", "highway_speed_kph", HIGHWAY_SPEED_KPH)):
+          try:
+            v = float(self.params.get(key, return_default=True))
+          except (TypeError, ValueError):
+            v = default
+          setattr(self, attr, default if v <= 0.0 else v)
         profile = getattr(self.LaC, "profile", None)
         if profile is not None:
           profile.get_params(self.params)
