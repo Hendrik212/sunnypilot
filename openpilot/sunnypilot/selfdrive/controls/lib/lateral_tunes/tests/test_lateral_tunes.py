@@ -319,32 +319,43 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     assert ioniq_up.profile is None
     assert np.isclose(np.interp(30.0, ioniq_up.pid._k_p[0], ioniq_up.pid._k_p[1]), 1.0)
 
-  def test_lat_accel_factor_scales_with_steer_max(self):
-    """Unsaturated CAN/m/s^2 must stay 409/3.66 as STEER_MAX changes."""
-    from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed, steer_max_for_speed
+  def test_lat_accel_factor_scales_with_laf_ceiling(self):
+    """Unsaturated CAN/m/s^2 must stay 409/3.66 as the LAF ceiling changes. LAF is scheduled
+    against the decoupled LAF ceiling (not the real CAN STEER_MAX), so the invariant is
+    laf_ceil / laf == 409 / 3.66 -- including in the decoupled region (17-24 m/s) where the
+    real STEER_MAX has already fallen to 409 but the LAF ceiling is still 650."""
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed, _laf_ceil_for_speed
     base = IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] * i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
     assert np.isclose(base, 3.66)
-    for v in (0.0, 5.0, 6.5, 10.0, 15.0, 17.0, 30.0):
-      sm = steer_max_for_speed(v)
+    default_mps = 80.0 / 3.6
+    for v in (0.0, 5.0, 6.5, 10.0, 15.0, 17.0, 20.0, 22.0, 24.0, 27.0, 30.0):
+      ceil = _laf_ceil_for_speed(v, default_mps)
       laf = lat_accel_factor_for_speed(v, base)
-      assert np.isclose(sm / laf, 409 / 3.66, rtol=1e-3), (v, sm, laf)
+      assert np.isclose(ceil / laf, 409 / 3.66, rtol=1e-3), (v, ceil, laf)
 
-  def test_friction_can_is_invariant_to_steer_max(self):
+  def test_friction_can_is_invariant_to_laf_ceiling(self):
     """latAccelFactor cancels out of the friction term (get_friction multiplies by it, the
-    feedforward divide cancels it), so friction's CAN contribution is friction*STEER_MAX and
-    scaling latAccelFactor alone does NOT hold it. It must stay 0.09*409 = 37 CAN."""
-    from opendbc.sunnypilot.car.hyundai.lateral_limits import friction_for_speed, steer_max_for_speed
+    feedforward divide cancels it), so friction's CAN contribution is friction*laf_ceil and
+    it must stay 0.09*409 = 37 CAN -- now against the decoupled LAF ceiling, not the real
+    STEER_MAX. In the decoupled region (17-24 m/s) the real STEER_MAX is 409 but friction is
+    still the 650-band value 0.0567, so friction*STEER_MAX is NOT 37 there -- by design."""
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import friction_for_speed, _laf_ceil_for_speed
     base = IONIQ6_STARPILOT_TORQUE['FRICTION']
-    for v in (0.0, 5.0, 6.5, 10.0, 15.0, 17.0, 30.0):
-      can = friction_for_speed(v, base) * steer_max_for_speed(v)
+    default_mps = 80.0 / 3.6
+    for v in (0.0, 5.0, 6.5, 10.0, 15.0, 17.0, 20.0, 22.0, 24.0, 27.0, 30.0):
+      can = friction_for_speed(v, base) * _laf_ceil_for_speed(v, default_mps)
       assert np.isclose(can, base * 409, rtol=1e-3), (v, can)
 
   def test_profile_schedules_friction_with_the_ceiling(self):
-    """The invariance above is worthless unless the profile actually writes it each frame."""
+    """The invariance above is worthless unless the profile actually writes it each frame --
+    against the LAF ceiling, including in the decoupled region where it differs from STEER_MAX."""
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import _laf_ceil_for_speed
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
-    for v, steer_max in ((0.0, 409), (10.0, 650), (30.0, 409)):
+    default_mps = 80.0 / 3.6
+    for v in (0.0, 10.0, 20.0, 30.0):
       ctl.profile._apply_speed_scheduled_factor(ctl, v)
-      assert np.isclose(ctl.torque_params.friction * steer_max, 0.09 * 409, rtol=1e-3), v
+      ceil = _laf_ceil_for_speed(v, default_mps)
+      assert np.isclose(ctl.torque_params.friction * ceil, 0.09 * 409, rtol=1e-3), v
     # and it is idempotent -- repeated calls at one speed must not compound
     ctl.profile._apply_speed_scheduled_factor(ctl, 10.0)
     first = ctl.torque_params.friction
@@ -385,8 +396,11 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
         self.v = v
 
       def get(self, key, return_default=False):
-        assert key == "LatAccelFactorCap"
-        return self.v
+        if key == "LatAccelFactorCap":
+          return self.v
+        # LatAccelFactorHighSpeedKmh -- return the default so get_params' own fallback path
+        # is not the thing under test here
+        return None
 
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
     for bad in (None, "", "abc"):
@@ -411,7 +425,82 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
       ctl.profile._apply_speed_scheduled_factor(ctl, v)
       assert np.isclose(ctl.torque_params.latAccelFactor, lat_accel_factor_for_speed(v, base), rtol=1e-3), v
 
-  def test_low_speed_reset_threshold_is_not_degenerate(self):
+  def test_laf_friction_plateau_extends_to_high_speed_kmh(self):
+    """Default 80 km/h threshold: the 650-plateau (LAF 5.82 / friction 0.0567) holds to
+    22.22 m/s, then ramps to the 409 floor (3.66 / 0.090) over 2 m/s. The real STEER_MAX
+    has already dropped to 409 at 17 m/s -- this is the decoupled region."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    for v in (20.0, 22.0):
+      ctl.profile._apply_speed_scheduled_factor(ctl, v)
+      assert np.isclose(ctl.torque_params.latAccelFactor, 5.82, rtol=1e-3), v
+      assert np.isclose(ctl.torque_params.friction, 0.09 * 409 / 650, rtol=1e-3), v
+    # past the 2 m/s ramp (24.22 -> 26.22): fully on the floor
+    ctl.profile._apply_speed_scheduled_factor(ctl, 27.0)
+    assert np.isclose(ctl.torque_params.latAccelFactor, 3.66, rtol=1e-3)
+    assert np.isclose(ctl.torque_params.friction, 0.09, rtol=1e-3)
+
+  def test_laf_friction_high_speed_is_live_tunable(self):
+    """Setting LatAccelFactorHighSpeedKmh moves the plateau end. At 100 km/h (27.78 m/s),
+    25 m/s is inside the plateau (LAF 5.82) where the 80 km/h default would have ramped to 3.66."""
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    params = Params()
+    params.put("LatAccelFactorHighSpeedKmh", 100.0, block=True)
+    ctl.profile.get_params(params)
+    assert ctl.profile.laf_high_speed_mps is not None
+    assert np.isclose(ctl.profile.laf_high_speed_mps, 100.0 / 3.6, rtol=1e-3)
+    ctl.profile._apply_speed_scheduled_factor(ctl, 25.0)
+    assert np.isclose(ctl.torque_params.latAccelFactor, 5.82, rtol=1e-3)
+    # and the default (unset) at 25 m/s is already on the floor past the ramp
+    ctl2, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    ctl2.profile._apply_speed_scheduled_factor(ctl2, 25.0)
+    assert np.isclose(ctl2.torque_params.latAccelFactor, 3.66, rtol=1e-3)
+
+  def test_laf_friction_high_speed_sentinel_is_default(self):
+    """An unset / <=0 param means use the code default (80 km/h). A fresh Params returns the
+    schema default "80.0" via return_default, and a <=0 value maps to None -- both must
+    produce the same schedule as passing high_speed_mps=None to the functions."""
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import lat_accel_factor_for_speed
+    base = IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] * i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT
+    # fresh Params: key is known, return_default gives "80.0" -> 22.22 mps (the default)
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    ctl.profile.get_params(Params())
+    assert ctl.profile.laf_high_speed_mps is None or \
+      np.isclose(ctl.profile.laf_high_speed_mps, 80.0 / 3.6, rtol=1e-3)
+    for v in (10.0, 20.0, 25.0, 30.0):
+      ctl.profile._apply_speed_scheduled_factor(ctl, v)
+      assert np.isclose(ctl.torque_params.latAccelFactor, lat_accel_factor_for_speed(v, base), rtol=1e-3), v
+    # <=0 explicit value -> None -> same default schedule
+    params = Params()
+    params.put("LatAccelFactorHighSpeedKmh", 0.0, block=True)
+    ctl2, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    ctl2.profile.get_params(params)
+    assert ctl2.profile.laf_high_speed_mps is None
+    for v in (20.0, 25.0):
+      ctl2.profile._apply_speed_scheduled_factor(ctl2, v)
+      assert np.isclose(ctl2.torque_params.latAccelFactor, lat_accel_factor_for_speed(v, base), rtol=1e-3), v
+
+  def test_laf_friction_high_speed_bad_param_is_default(self):
+    """Bad values (None, "", "abc") fall back to the code default, matching LatAccelFactorCap's
+    pattern. A non-positive well-formed value also means default."""
+    class _BadParam:
+      def __init__(self, v):
+        self.v = v
+
+      def get(self, key, return_default=False):
+        if key == "LatAccelFactorHighSpeedKmh":
+          return self.v
+        return None
+
+    ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    for bad in (None, "", "abc"):
+      ctl.profile.get_params(_BadParam(bad))
+      assert ctl.profile.laf_high_speed_mps is None
+    # non-positive well-formed values are also "default"
+    for v in (-5.0, 0.0):
+      params = Params()
+      params.put("LatAccelFactorHighSpeedKmh", v, block=True)
+      ctl.profile.get_params(params)
+      assert ctl.profile.laf_high_speed_mps is None
     """Was min(max(minSteerSpeed, 0.3), 0.0447), which is the constant 0.0447 for every
     input -- both other terms dead. The reset must sit at the highest of the three."""
     ctl, _, CP = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)

@@ -134,9 +134,18 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     except (TypeError, ValueError):
       cap = -1.0
     self.lat_accel_factor_cap = cap
+    # LatAccelFactorHighSpeedKmh (live param, <=0 = code default 80 km/h): the speed where
+    # the LAF/friction plateau (650-equiv) ends and ramps to the floor. Decoupled from the
+    # CAN STEER_MAX ceiling, which still drops at 61 km/h. None = use the code default.
+    hskmh = params.get("LatAccelFactorHighSpeedKmh", return_default=True)
+    try:
+      hskmh = float(hskmh) if hskmh is not None else 0.0
+    except (TypeError, ValueError):
+      hskmh = 0.0
+    self.laf_high_speed_mps = None if hskmh <= 0.0 else hskmh / 3.6
 
   def _apply_speed_scheduled_factor(self, ctl, v_ego: float) -> None:
-    # Scale latAccelFactor with STEER_MAX so unsaturated CAN/m/s^2 stays 409/3.66.
+    # Scale latAccelFactor with the LAF ceiling so unsaturated CAN/m/s^2 stays 409/3.66.
     # Without this, raising STEER_MAX is a gain change (the 500-at-3.66 mistake).
     #
     # friction rides the same schedule and for the same reason, but it needs its own
@@ -144,18 +153,25 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     # latAccelFactor alone leaves friction as a 37 -> 54 CAN gain change. See
     # friction_for_speed(). Both are written from the module constants, never from the
     # current torque_params, so repeated calls cannot compound.
+    #
+    # The LAF ceiling is decoupled from the real CAN STEER_MAX (which still drops at 17 m/s):
+    # its 650-plateau extends to self.laf_high_speed_mps (default 80 km/h) before ramping to
+    # 409. So above 61 km/h the controller gain stays at the plateau while the CAN ceiling
+    # is already at its floor -- a pure controller-gain change, by request (2026-09-17).
     base = (IONIQ6_STARPILOT_TORQUE['LAT_ACCEL_FACTOR'] *
             i6.IONIQ_6_BASE_LAT_ACCEL_FACTOR_MULT)
-    laf = lat_accel_factor_for_speed(v_ego, base)
-    # LatAccelFactorCap (live param, <= 0 = off): caps the 6.5-15 m/s plateau (5.82) down
-    # toward the 0/17 m/s floor (3.66) without touching it or the friction schedule -- this
-    # deliberately breaks the CAN-invariant above by request (2026-09-15: 5.82 felt too
-    # high in that band), trading torque-per-lat-accel consistency for less gain there.
+    laf = lat_accel_factor_for_speed(v_ego, base, self.laf_high_speed_mps)
+    # LatAccelFactorCap (live param, <= 0 = off): caps the plateau (5.82) down toward the
+    # floor (3.66) without touching it or the friction schedule -- this deliberately breaks
+    # the CAN-invariant above by request (2026-09-15: 5.82 felt too high in that band),
+    # trading torque-per-lat-accel consistency for less gain there. With the decoupled
+    # ceiling the plateau now spans 23-80 km/h, so the cap applies across that whole band.
     if self.lat_accel_factor_cap > 0.0:
       laf = min(laf, self.lat_accel_factor_cap)
     if abs(ctl.torque_params.latAccelFactor - laf) > 1e-4:
       ctl.torque_params.latAccelFactor = laf
-      ctl.torque_params.friction = friction_for_speed(v_ego, IONIQ6_STARPILOT_TORQUE['FRICTION'])
+      ctl.torque_params.friction = friction_for_speed(v_ego, IONIQ6_STARPILOT_TORQUE['FRICTION'],
+                                                       self.laf_high_speed_mps)
       ctl.update_limits()
 
   def filter_desired_curvature(self, ctl, CS, desired_curvature: float, active: bool) -> float:
@@ -192,6 +208,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
 
   def init_controller(self, ctl, CP, CP_SP, CI) -> None:
     # Set before the first _apply_speed_scheduled_factor call below.
+    self.laf_high_speed_mps = None
     self.lat_accel_factor_cap = -1.0
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
     # written once at fingerprint time, so on a live switch from upstream it still holds the
