@@ -111,7 +111,6 @@ class ModelState(ModelStateBase):
     self.BUNDLE_LAT_SMOOTH_SECONDS = float(overrides.get('lat', ".0"))
     self.LAT_SMOOTH_SECONDS = self.BUNDLE_LAT_SMOOTH_SECONDS
     self.LONG_SMOOTH_SECONDS = float(overrides.get('long', ".0"))
-    self.lat_lookahead_offset = 0.0  # refreshed from the LatLookaheadOffset param in the main loop
     self.MIN_LAT_CONTROL_SPEED = 0.3
     self.PLANPLUS_CONTROL: float = 1.0
     self.chestnut = chestnut
@@ -491,11 +490,6 @@ def main(demo=False):
     v_ego = max(sm["carState"].vEgo, 0.)
     if sm.frame % 60 == 0:
       model.lat_delay = get_lat_delay(params, sm["lateralDelay"].lateralDelay)
-      # Extra lookahead on the lateral action point only. Phase lead for the outer
-      # (model-in-the-loop) lane-keeping loop: +0.10 s is ~+13 deg at 0.35 Hz and ~+25 deg
-      # at 0.69 Hz. Deliberately NOT routed through lat_delay, which the torque controller
-      # also reads as the true actuator delay. Default 0.0 = stock behaviour.
-      model.lat_lookahead_offset = float(params.get("LatLookaheadOffset", return_default=True))
       # Source LP on the published desiredCurvature (smooth_value, tau = this value), applied
       # for generation >= 10 bundles. It is compensated: the same tau is added to lat_delay
       # below, so lat_action_t moves out by tau and the LP's lag is cancelled to first order
@@ -540,7 +534,7 @@ def main(demo=False):
 
     frame_delay = DT_MDL # compensate for time passed since the frame was captured: current_time - timestamp_eof is 50ms on average
     action_delay = DT_MDL / 2 # middle of the interval between model output (current state) and next frame (expected state)
-    lat_action_t = lat_delay + frame_delay + action_delay + model.lat_lookahead_offset
+    lat_action_t = lat_delay + frame_delay + action_delay
     long_action_t = long_delay + frame_delay + action_delay
 
     inputs:dict[str, np.ndarray] = {

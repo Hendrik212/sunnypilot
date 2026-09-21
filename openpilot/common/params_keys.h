@@ -250,7 +250,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LagdToggle", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"LagdToggleDelay", {PERSISTENT | BACKUP, FLOAT, "0.2"}},
     {"LagdValueCache", {PERSISTENT, FLOAT, "0.2"}},
-    {"LatLookaheadOffset", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"LatSmoothSeconds", {PERSISTENT | BACKUP, FLOAT, "-1.0"}},
     {"LaneChangeSmoothing", {PERSISTENT | BACKUP, INT, "10"}},
     {"LaneCentreGain", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
