@@ -490,12 +490,16 @@ struct LateralTuneStateSP @0xcb9fd56c7057593a {
   rippleMeasuredHz @6 :Float32;
   rippleExcess @7 :Float32;
 
-  # Lane-centre assist (sunnypilot/selfdrive/controls/lib/lane_centre_assist.py).
-  # laneCentreOffset is the bumper offset from the model's lane centre (m, positive = car
-  # left of centre), laneCentreCorrection the curvature added to the model command (1/m).
+  # Dynamic lane centering (sunnypilot/selfdrive/controls/lib/dynamic_lane_centering.py).
+  # laneCentreOffset is the applied (rate-limited) lane offset (m, positive = right of the
+  # lane centre), laneCentreOffsetTarget the target for the current lane position,
+  # laneCentreCorrection the curvature added to the model command (1/m), laneCentrePosition
+  # the debounced lane position (0 unknown, 1 single, 2 right, 3 middle, 4 left).
   laneCentreOffset @8 :Float32;
   laneCentreCorrection @9 :Float32;
   laneCentreActive @10 :Bool;
+  laneCentrePosition @11 :UInt8;
+  laneCentreOffsetTarget @12 :Float32;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

@@ -9,6 +9,7 @@ import pyray as rl
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.mici.onroad.torque_bar import TorqueBar
 from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import DeveloperUiRenderer, DeveloperUiState, get_bottom_dev_ui_offset
+from openpilot.selfdrive.ui.sunnypilot.onroad.lane_centering_panel import LaneCenteringPanel
 from openpilot.selfdrive.ui.sunnypilot.onroad.road_name import RoadNameRenderer
 from openpilot.selfdrive.ui.sunnypilot.onroad.rocket_fuel import RocketFuel
 from openpilot.selfdrive.ui.sunnypilot.onroad.speed_limit import SpeedLimitRenderer
@@ -37,6 +38,7 @@ class HudRendererSP(HudRenderer):
     self.circular_alerts_renderer = CircularAlertsRenderer()
     self.speed_renderer = SpeedRenderer()
     self._torque_bar = TorqueBar(scale=3.0, always=True)
+    self.lane_centering_panel = LaneCenteringPanel()
 
     self.pcm_cruise_speed: bool = True
     self.show_icbm_status: bool = False
@@ -144,3 +146,7 @@ class HudRendererSP(HudRenderer):
     self.turn_signal_controller.render(rect)
     self.circular_alerts_renderer.render(rect)
     self.rocket_fuel.render(rect, ui_state.sm)
+    self.lane_centering_panel.render(self.lane_centering_panel.layout_rect(rect))
+
+  def user_interacting(self) -> bool:
+    return super().user_interacting() or self.lane_centering_panel.is_pressed

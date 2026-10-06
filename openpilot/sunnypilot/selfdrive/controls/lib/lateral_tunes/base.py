@@ -72,7 +72,7 @@ class LateralTuneProfile:
 
   def get_params(self, params: Params) -> None:
     """Re-read any profile-owned live params. Called from controlsd_ext.get_params_sp on the
-    same ~3 s cadence as the other live params (LaneChangeSmoothing, LaneCentreGain, ...), NOT
+    same ~3 s cadence as the other live params (LaneChangeSmoothing, LaneCenteringGain, ...), NOT
     every frame. The default is a no-op: profiles with nothing tunable need not override it."""
 
   def update(self, ctl, active, CS, VM, params, steer_limited_by_safety,
