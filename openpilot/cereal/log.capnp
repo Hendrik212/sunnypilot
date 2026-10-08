@@ -2608,6 +2608,7 @@ struct Event {
     clocks @35 :Clocks;
     deviceState @6 :DeviceState;
     chestnutState @152 :ChestnutState;
+    chestnutGpuState @153 :ChestnutState;
     logMessage @18 :Text;
     errorLogMessage @85 :Text;
 
@@ -2658,9 +2659,11 @@ struct Event {
     modelDataV2SP @116 :Custom.ModelDataV2SP;
     # isla fork custom messages — must stay at the highest sequential ordinals (capnp forbids holes);
     # bump these whenever an upstream merge adds new Event ordinals above them.
-    # upstream added chestnutState @152; mqtt follows.
-    mqttPubQueue @153 :MqttPubQueue;
-    mqttRecvQueue @154 :MqttRecvQueue;
+    # upstream added chestnutState @152 and chestnutGpuState @153; mqtt follows.
+    # (moved 153/154 -> 154/155 in the Oct 2026 merge: routes logged before it decode mqtt
+    # only with the old schema.)
+    mqttPubQueue @154 :MqttPubQueue;
+    mqttRecvQueue @155 :MqttRecvQueue;
     lateralTuneStateSP @136 :Custom.LateralTuneStateSP;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
