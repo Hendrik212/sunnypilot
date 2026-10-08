@@ -160,3 +160,33 @@ def test_params_defaults_and_clipping():
   d.get_params(_P(LaneCentering=True, LaneCenterOffset=1.0, LaneCenteringGain=None))
   assert d.offset_mag == 0.3
   assert d.controller.gain == 0.30
+
+
+def test_geometry_only_recomputed_on_new_model_frames(monkeypatch):
+  calls = []
+  orig = dlc.LaneCenteringController._raw_correction
+  monkeypatch.setattr(dlc.LaneCenteringController, "_raw_correction",
+                      staticmethod(lambda *a, **k: calls.append(1) or orig(*a, **k)))
+  d = _dyn()
+  _run(d, _model(lane_right=False), 1.0)  # 100 frames, a new model frame every 5th
+  assert len(calls) == 20
+
+
+def test_status():
+  St = dlc.LaneCenteringStatus
+  assert DynamicLaneCentering().status == St.OFF
+  d = _dyn(LaneCenterOffset=0.3, LaneCenteringDeadband=0.0, LaneCenteringPauseOnSignal=True)
+  _run(d, _model(lane_right=False), 1.0, lat_active=False)
+  assert d.status == St.STANDBY
+  _run(d, _model(inner_prob=0.4), 1.0)
+  assert d.status == St.NO_LINES
+  _run(d, _model(lane_right=True), 2.0)  # MIDDLE not yet adopted: offset 0, path on the centre
+  assert d.status == St.CENTERED
+  _run(d, _model(lane_right=False), 15.0)
+  assert d.status == St.NUDGE_RIGHT
+  _run(d, _model(lane_right=False, model_y=0.6), 5.0)  # path well right of the target
+  assert d.status == St.NUDGE_LEFT
+  d.update(0.0, _model(lane_right=False), True, True, V, True, True, False)  # blinker
+  assert d.status == St.PAUSED
+  d.update(0.0, _model(lane_right=False), True, True, V, True, False, True)  # driver override
+  assert d.status == St.PAUSED

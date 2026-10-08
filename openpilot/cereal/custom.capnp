@@ -494,12 +494,15 @@ struct LateralTuneStateSP @0xcb9fd56c7057593a {
   # laneCentreOffset is the applied (rate-limited) lane offset (m, positive = right of the
   # lane centre), laneCentreOffsetTarget the target for the current lane position,
   # laneCentreCorrection the curvature added to the model command (1/m), laneCentrePosition
-  # the debounced lane position (0 unknown, 1 single, 2 right, 3 middle, 4 left).
+  # the debounced lane position (0 unknown, 1 single, 2 right, 3 middle, 4 left),
+  # laneCentreStatus what the controller is doing (LaneCenteringStatus in lane_centering.py:
+  # 0 off, 1 standby, 2 paused, 3 no lines, 4 centered, 5 nudging left, 6 nudging right).
   laneCentreOffset @8 :Float32;
   laneCentreCorrection @9 :Float32;
   laneCentreActive @10 :Bool;
   laneCentrePosition @11 :UInt8;
   laneCentreOffsetTarget @12 :Float32;
+  laneCentreStatus @13 :UInt8;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

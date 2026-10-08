@@ -33,7 +33,7 @@ import numpy as np
 from openpilot.cereal import log
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL, DT_MDL
-from openpilot.sunnypilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
+from openpilot.sunnypilot.selfdrive.controls.lib.lane_centering import LaneCenteringController, LaneCenteringStatus
 
 LaneChangeState = log.LaneChangeState
 
@@ -164,6 +164,10 @@ class DynamicLaneCentering:
   def position(self) -> LanePosition:
     return self.classifier.position
 
+  @property
+  def status(self) -> LaneCenteringStatus:
+    return self.controller.status if self.enabled else LaneCenteringStatus.OFF
+
   def get_params(self, params: Params) -> None:
     self.enabled = params.get_bool("LaneCentering")
     self.offset_mag = _get_float(params, "LaneCenterOffset", DEFAULT_OFFSET, 0.0, 0.3)
@@ -193,10 +197,11 @@ class DynamicLaneCentering:
       self.classifier.update(model_v2, v_ego)
     self.offset_target = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
     step = OFFSET_RAMP_RATE * DT_CTRL
-    self.offset += float(np.clip(self.offset_target - self.offset, -step, step))
+    self.offset += min(max(self.offset_target - self.offset, -step), step)
 
     out = self.controller.update(model_curvature, model_v2, v_ego, True, self.offset, self.e2e_authority,
-                                 lat_active, model_valid, self.pause_on_signal, turn_signal, driver_override)
+                                 lat_active, model_valid, self.pause_on_signal, turn_signal, driver_override,
+                                 model_updated)
     self.correction = out - float(model_curvature)
     self.active = abs(self.correction) > 1e-9
     return out

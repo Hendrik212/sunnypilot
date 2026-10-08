@@ -226,6 +226,7 @@ class ControlsExt(ModelStateBase):
       state.laneCentreActive = bool(lane_centre.active)
       state.laneCentrePosition = int(lane_centre.position)
       state.laneCentreOffsetTarget = float(lane_centre.offset_target)
+      state.laneCentreStatus = int(lane_centre.status)
     pm.send('lateralTuneStateSP', msg)
 
   def run_ext(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:

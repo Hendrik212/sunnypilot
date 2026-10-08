@@ -8,16 +8,23 @@ blinker and driver override; the trim is clipped and smoothed.
 Changes vs. upstream, all behaviour-preserving at the defaults:
 - gain, smoothing tau and centre-error deadband are constructor/set_tuning() arguments
   instead of module constants (live Params), defaults = StarPilot's values;
-- the UI-only get_lane_centering_visual_direction() helper is not ported.
+- the UI-only get_lane_centering_visual_direction() helper is not ported;
+- update(model_updated=False) reuses the lane geometry of the last model frame. modelV2 is
+  20 Hz but update() runs at 100 Hz, and re-deriving the geometry every 10 ms cost ~2% of
+  core 4 on the comma 3X, enough to trip selfdrivedLagging (routes 22c/22d, 2026-10-07).
+  Speed and offset are at most one model frame (50 ms) stale; smoothing stays at 100 Hz;
+- update() records why it did what it did in `status` (LaneCenteringStatus) for the UI.
 
 Frame: model y is positive to the RIGHT and positive curvature is right in this tree, so a
 positive offset moves the car right of the lane centre.
 """
+import math
+from enum import IntEnum
+
 from openpilot.cereal import log
 import numpy as np
 
 from openpilot.common.realtime import DT_CTRL
-from openpilot.selfdrive.controls.lib.drive_helpers import smooth_value
 
 
 _MIN_V_EGO = 5.0
@@ -41,11 +48,32 @@ _E2E_MIN_LANE_AUTHORITY = 0.20
 _E2E_BOUNDARY_LANE_AUTHORITY = 0.50
 _E2E_BOUNDARY_MARGIN = 0.40
 
+# below this lateral accel (|correction| * v^2) the trim counts as centred, not nudging
+_NUDGE_MIN_LAT_ACCEL = 0.01  # m/s^2
+
+
+def smooth_value(val: float, prev_val: float, tau: float, dt: float = DT_CTRL) -> float:
+  # drive_helpers.smooth_value with math.exp: numpy scalar calls dominate this 100 Hz path on the 3X
+  alpha = 1.0 - math.exp(-dt / tau) if tau > 0 else 1.0
+  return alpha * val + (1.0 - alpha) * prev_val
+
+
+class LaneCenteringStatus(IntEnum):
+  OFF = 0          # feature disabled
+  STANDBY = 1      # not engaged, too slow or model invalid
+  PAUSED = 2       # blinker, driver override or lane change
+  NO_LINES = 3     # lane lines not confident / implausible
+  CENTERED = 4     # on target (inside the deadband or negligible trim)
+  NUDGE_LEFT = 5
+  NUDGE_RIGHT = 6
+
 
 class LaneCenteringController:
   def __init__(self, gain: float = _MAX_GAIN, smooth_tau: float = _SMOOTH_TAU,
                deadband: float = _CENTER_ERROR_DEADBAND) -> None:
     self._correction = 0.0
+    self._raw: tuple[bool, float] | None = None
+    self.status = LaneCenteringStatus.OFF
     self.gain = gain
     self.smooth_tau = smooth_tau
     self.deadband = deadband
@@ -61,10 +89,12 @@ class LaneCenteringController:
 
   def reset(self) -> None:
     self._correction = 0.0
+    self._raw = None
 
   def update(self, model_curvature, model_v2, v_ego, enabled, offset, e2e_authority, lat_active, model_valid,
-             pause_on_signal=False, turn_signal_active=False, driver_override=False) -> float:
+             pause_on_signal=False, turn_signal_active=False, driver_override=False, model_updated=True) -> float:
     model_curvature = float(model_curvature)
+    self.status = LaneCenteringStatus.STANDBY
 
     try:
       v_ego = float(v_ego)
@@ -74,43 +104,56 @@ class LaneCenteringController:
       self.reset()
       return model_curvature
 
-    if not np.isfinite([v_ego, offset, e2e_authority]).all():
+    if not (math.isfinite(v_ego) and math.isfinite(offset) and math.isfinite(e2e_authority)):
       self.reset()
       return model_curvature
 
-    if not model_valid or not enabled or not lat_active or v_ego < _MIN_V_EGO:
+    if not enabled:
+      self.status = LaneCenteringStatus.OFF
       self.reset()
       return model_curvature
 
+    if not model_valid or not lat_active or v_ego < _MIN_V_EGO:
+      self.reset()
+      return model_curvature
+
+    self.status = LaneCenteringStatus.PAUSED
     if driver_override:
       self.reset()
       return model_curvature
 
     if pause_on_signal and turn_signal_active:
-      self._correction = float(smooth_value(0.0, self._correction, _SIGNAL_RELEASE_TAU, dt=DT_CTRL))
+      self._raw = None
+      self._correction = smooth_value(0.0, self._correction, _SIGNAL_RELEASE_TAU, dt=DT_CTRL)
       return model_curvature + self._correction
 
-    try:
-      if model_v2.meta.laneChangeState != log.LaneChangeState.off:
+    if model_updated or self._raw is None:
+      try:
+        lane_change = model_v2.meta.laneChangeState != log.LaneChangeState.off
+      except (AttributeError, TypeError, ValueError):
+        lane_change = True
+      if lane_change:
         self.reset()
         return model_curvature
-    except (AttributeError, TypeError, ValueError):
-      self.reset()
-      return model_curvature
-
-    valid, raw_correction = self._raw_correction(
-      model_v2,
-      v_ego,
-      float(np.clip(offset, -_MAX_OFFSET, _MAX_OFFSET)),
-      float(np.clip(e2e_authority, 0.0, 1.0)),
-      self.deadband,
-    )
+      self._raw = self._raw_correction(
+        model_v2,
+        v_ego,
+        min(max(offset, -_MAX_OFFSET), _MAX_OFFSET),
+        min(max(e2e_authority, 0.0), 1.0),
+        self.deadband,
+      )
+    valid, raw_correction = self._raw
     if not valid:
-      self._correction = float(smooth_value(0.0, self._correction, _CONFIDENCE_RELEASE_TAU, dt=DT_CTRL))
+      self.status = LaneCenteringStatus.NO_LINES
+      self._correction = smooth_value(0.0, self._correction, _CONFIDENCE_RELEASE_TAU, dt=DT_CTRL)
       return model_curvature + self._correction
 
-    target = float(np.clip(raw_correction, -_MAX_RAW_CORRECTION, _MAX_RAW_CORRECTION)) * self.gain
-    self._correction = float(smooth_value(target, self._correction, self.smooth_tau, dt=DT_CTRL))
+    target = min(max(raw_correction, -_MAX_RAW_CORRECTION), _MAX_RAW_CORRECTION) * self.gain
+    self._correction = smooth_value(target, self._correction, self.smooth_tau, dt=DT_CTRL)
+    if abs(self._correction) * v_ego ** 2 < _NUDGE_MIN_LAT_ACCEL:
+      self.status = LaneCenteringStatus.CENTERED
+    else:
+      self.status = LaneCenteringStatus.NUDGE_RIGHT if self._correction > 0.0 else LaneCenteringStatus.NUDGE_LEFT
     return model_curvature + self._correction
 
   @staticmethod

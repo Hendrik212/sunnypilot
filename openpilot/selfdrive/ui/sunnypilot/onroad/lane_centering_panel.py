@@ -16,6 +16,7 @@ import time
 import pyray as rl
 
 from openpilot.common.params import Params
+from openpilot.sunnypilot.selfdrive.controls.lib.lane_centering import LaneCenteringStatus as St
 from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -33,8 +34,8 @@ PARAM_REFRESH_S = 1.0
 
 KNOBS = (
   # param, label, step, min, max, format
-  ("LaneCenterOffset", "Offset", 0.01, 0.0, 0.30, "{:.2f} m"),
-  ("LaneCenteringGain", "Gain", 0.05, 0.0, 0.60, "{:.2f}"),
+  ("LaneCenterOffset", "Offset", 0.01, 0.0, 0.30, lambda v: f"{v * 100:.0f} cm"),
+  ("LaneCenteringGain", "Gain", 0.05, 0.0, 0.60, lambda v: f"{v:.2f}"),
 )
 
 BG = rl.Color(0, 0, 0, 180)
@@ -43,6 +44,18 @@ ON_BG = rl.Color(0x17, 0x86, 0x44, 230)
 OFF_BG = rl.Color(0x80, 0x80, 0x80, 160)
 WHITE = rl.Color(255, 255, 255, 255)
 GREY = rl.Color(200, 200, 200, 255)
+AMBER = rl.Color(0xFF, 0xB0, 0x20, 255)
+GREEN = rl.Color(0x40, 0xD0, 0x70, 255)
+
+STATUS = {
+  St.OFF: ("OFF", GREY),
+  St.STANDBY: ("STANDBY", GREY),
+  St.PAUSED: ("PAUSED", AMBER),
+  St.NO_LINES: ("NO LINES", AMBER),
+  St.CENTERED: ("CENTERED", GREEN),
+  St.NUDGE_LEFT: ("< NUDGING LEFT", GREEN),
+  St.NUDGE_RIGHT: ("NUDGING RIGHT >", GREEN),
+}
 
 
 class LaneCenteringPanel(Widget):
@@ -116,6 +129,17 @@ class LaneCenteringPanel(Widget):
     sz = measure_text_cached(self._font_bold, text, size)
     rl.draw_text_ex(self._font_bold, text, rl.Vector2(r.x + (r.width - sz.x) / 2, r.y + (r.height - sz.y) / 2), size, 0, WHITE)
 
+  @staticmethod
+  def _arrow(pill: rl.Rectangle, left: bool) -> None:
+    """Direction triangle inside the pill edge while the controller is nudging."""
+    cy, h, w = pill.y + pill.height / 2, 26, 22
+    if left:
+      tip = pill.x + 18
+      rl.draw_triangle(rl.Vector2(tip, cy), rl.Vector2(tip + w, cy + h), rl.Vector2(tip + w, cy - h), WHITE)
+    else:
+      tip = pill.x + pill.width - 18
+      rl.draw_triangle(rl.Vector2(tip, cy), rl.Vector2(tip - w, cy - h), rl.Vector2(tip - w, cy + h), WHITE)
+
   def _text(self, text: str, x: float, y: float, size: int = 44, color: rl.Color = WHITE) -> None:
     rl.draw_text_ex(self._font, text, rl.Vector2(x, y), size, 0, color)
 
@@ -123,8 +147,15 @@ class LaneCenteringPanel(Widget):
     self._hit = {}
     rl.draw_rectangle_rounded(rect, 0.12 if self._expanded else 0.4, 10, BG)
 
+    st = ui_state.sm["lateralTuneStateSP"]
+    status = St(st.laneCentreStatus) if st.laneCentreStatus in St._value2member_map_ else St.OFF
+    if not self._enabled:
+      status = St.OFF
+
     pill = rl.Rectangle(rect.x + rect.width - PILL_W, rect.y, PILL_W, PILL_H)
     self._button("pill", pill, "LC", ON_BG if self._enabled else OFF_BG, 60)
+    if status in (St.NUDGE_LEFT, St.NUDGE_RIGHT):
+      self._arrow(pill, status == St.NUDGE_LEFT)
     if not self._expanded:
       return
 
@@ -133,12 +164,22 @@ class LaneCenteringPanel(Widget):
     toggle = rl.Rectangle(x0, rect.y + PILL_H + 10, 200, BTN_H)
     self._button("toggle", toggle, "ON" if self._enabled else "OFF", ON_BG if self._enabled else OFF_BG)
 
-    st = ui_state.sm["lateralTuneStateSP"]
     pos = POSITION_NAMES.get(int(st.laneCentrePosition), "--")
     self._text(f"lane {pos}", x0 + 230, rect.y + PILL_H + 12, 42)
-    self._text(f"off {st.laneCentreOffset:+.2f} m", x0 + 230, rect.y + PILL_H + 60, 42, GREY)
-    self._text(f"corr {st.laneCentreCorrection * 1e4:+.1f}e-4 1/m{'  *' if st.laneCentreActive else ''}",
-               x0, rect.y + PILL_H + ROW_H + 30, 42, GREY)
+    self._text(f"offset {st.laneCentreOffset * 100:+.0f} cm", x0 + 230, rect.y + PILL_H + 60, 42, GREY)
+
+    name, color = STATUS[status]
+    y_status = rect.y + PILL_H + ROW_H + 30
+    self._text(name, x0, y_status, 46, color)
+    # correction as the lateral accel it adds: curvature * v^2
+    accel = abs(st.laneCentreCorrection) * ui_state.sm["carState"].vEgo ** 2
+    # the UI font has no "²" glyph: draw a raised small "2"
+    accel_txt = f"{accel:.2f} m/s"
+    sz = measure_text_cached(self._font, accel_txt, 42)
+    sup = measure_text_cached(self._font, "2", 28)
+    x_txt = rect.x + rect.width - PAD - sz.x - sup.x
+    self._text(accel_txt, x_txt, y_status + 2, 42, GREY)
+    self._text("2", x_txt + sz.x, y_status - 4, 28, GREY)
 
     y = rect.y + PILL_H + 2 * ROW_H
     for key, label, _, _, _, fmt in KNOBS:
@@ -147,7 +188,7 @@ class LaneCenteringPanel(Widget):
       plus = rl.Rectangle(rect.x + rect.width - PAD - BTN_W, y, BTN_W, BTN_H)
       self._button(key + "-", minus, "-", BTN_BG)
       self._button(key + "+", plus, "+", BTN_BG)
-      val = fmt.format(self._values[key])
+      val = fmt(self._values[key])
       sz = measure_text_cached(self._font_bold, val, 44)
       mid = minus.x + BTN_W + (plus.x - minus.x - BTN_W - sz.x) / 2
       rl.draw_text_ex(self._font_bold, val, rl.Vector2(mid, y + (BTN_H - sz.y) / 2), 44, 0, WHITE)
