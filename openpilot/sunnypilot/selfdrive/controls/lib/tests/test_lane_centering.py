@@ -211,15 +211,40 @@ def test_confident_e2e_authority_starts_before_large_offset():
   assert lane_only > e2e > 0.0
 
 
-def test_confidence_loss_drops_filtered_correction():
+def test_confidence_loss_holds_then_fades_correction():
   controller, output = _converge(_model(left=-1.5, right=2.1), authority=0.0)
   assert output > 0.0
-  fading = _update(controller, _model(left=-1.5, right=2.1, lane_prob=0.2), authority=0.0)
+  lost = _model(left=-1.5, right=2.1, lane_prob=0.2)
+  for _ in range(49):  # 0.5 s hold
+    assert _update(controller, lost, authority=0.0) == output
+  fading = _update(controller, lost, authority=0.0)
   assert 0.0 < fading < output
 
-  for _ in range(300):
-    fading = _update(controller, _model(left=-1.5, right=2.1, lane_prob=0.2), authority=0.0)
+  for _ in range(1500):
+    fading = _update(controller, lost, authority=0.0)
   assert abs(fading) < 1e-6
+
+
+def test_confidence_loss_fade_is_jerk_limited():
+  for speed in (10.0, 30.0):
+    controller = LaneCenteringController(release_hold=0.0, release_tau=0.0)
+    for _ in range(300):
+      prev = controller.update(0.0, _model(left=-1.5, right=2.1), speed, True, 0.0, 0.0, True, True)
+    assert prev > 0.0
+    lost = _model(left=-1.5, right=2.1, lane_prob=0.2)
+    for _ in range(100):
+      out = controller.update(0.0, lost, speed, True, 0.0, 0.0, True, True)
+      assert (prev - out) * speed ** 2 / 0.01 <= 0.3 + 1e-9
+      prev = out
+
+
+def test_lane_confidence_has_hysteresis():
+  # 0.55 is not enough to acquire the lines, but enough to keep them
+  assert _update(LaneCenteringController(), _model(left=-1.5, right=2.1, lane_prob=0.55), authority=0.0) == 0.0
+  controller, output = _converge(_model(left=-1.5, right=2.1), authority=0.0)
+  for _ in range(100):
+    held = _update(controller, _model(left=-1.5, right=2.1, lane_prob=0.55), authority=0.0)
+  assert held == pytest.approx(output, rel=1e-3)  # still converging, not fading
 
 
 def test_correction_is_smoothed_and_capped():

@@ -24,7 +24,8 @@ switches/h on 209; with 400 m: 2.3/h). The applied offset is rate-limited, never
 
 Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenterOffset, LaneCenteringGain,
 LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneCenteringDwell,
-LaneCenteringSwitchDist, LaneCenteringE2EAuthority. Frame: model y positive to the RIGHT.
+LaneCenteringSwitchDist, LaneCenteringE2EAuthority,
+LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk. Frame: model y positive to the RIGHT.
 """
 from enum import IntEnum
 
@@ -175,7 +176,10 @@ class DynamicLaneCentering:
     self.e2e_authority = _get_float(params, "LaneCenteringE2EAuthority", 1.0, 0.0, 1.0)
     self.controller.set_tuning(_get_float(params, "LaneCenteringGain", 0.30, 0.0, 1.0),
                                _get_float(params, "LaneCenteringSmoothTau", 0.4, 0.0, 5.0),
-                               _get_float(params, "LaneCenteringDeadband", 0.08, 0.0, 0.5))
+                               _get_float(params, "LaneCenteringDeadband", 0.08, 0.0, 0.5),
+                               _get_float(params, "LaneCenteringReleaseHold", 0.5, 0.0, 5.0),
+                               _get_float(params, "LaneCenteringReleaseTau", 1.0, 0.0, 10.0),
+                               _get_float(params, "LaneCenteringReleaseJerk", 0.3, 0.0, 5.0))
     self.classifier.dwell = _get_float(params, "LaneCenteringDwell", DEFAULT_DWELL, 0.0, 30.0)
     self.classifier.switch_dist = _get_float(params, "LaneCenteringSwitchDist", DEFAULT_SWITCH_DIST, 0.0, 5000.0)
 

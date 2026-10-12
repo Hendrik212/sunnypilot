@@ -5,7 +5,7 @@ curvature toward the centre of the two primary lane lines (plus an offset), samp
 speed-proportional lookahead. Gated on lane-line confidence, lane width, lane changes,
 blinker and driver override; the trim is clipped and smoothed.
 
-Changes vs. upstream, all behaviour-preserving at the defaults:
+Changes vs. upstream (behaviour-preserving at the defaults except the last):
 - gain, smoothing tau and centre-error deadband are constructor/set_tuning() arguments
   instead of module constants (live Params), defaults = StarPilot's values;
 - the UI-only get_lane_centering_visual_direction() helper is not ported;
@@ -13,7 +13,11 @@ Changes vs. upstream, all behaviour-preserving at the defaults:
   20 Hz but update() runs at 100 Hz, and re-deriving the geometry every 10 ms cost ~2% of
   core 4 on the comma 3X, enough to trip selfdrivedLagging (routes 22c/22d, 2026-10-07).
   Speed and offset are at most one model frame (50 ms) stale; smoothing stays at 100 Hz;
-- update() records why it did what it did in `status` (LaneCenteringStatus) for the UI.
+- update() records why it did what it did in `status` (LaneCenteringStatus) for the UI;
+- lane-line loss no longer drops the trim with a 0.2 s tau (an abrupt lateral step, Oct 2026):
+  the last trim is held for `release_hold` s, then faded with `release_tau` while the
+  rate of change of lateral accel (d(corr)/dt * v^2) stays under `release_jerk`. The
+  line-confidence gate has hysteresis: lines are acquired at prob >= 0.6, lost below 0.5.
 
 Frame: model y is positive to the RIGHT and positive curvature is right in this tree, so a
 positive offset moves the car right of the lane centre.
@@ -28,7 +32,8 @@ from openpilot.common.realtime import DT_CTRL
 
 
 _MIN_V_EGO = 5.0
-_MIN_LANE_PROB = 0.6
+_MIN_LANE_PROB = 0.6  # to (re)acquire the lines
+_KEEP_LANE_PROB = 0.5  # to keep them once acquired
 _MAX_LANE_STD = 0.3
 _MIN_LANE_WIDTH = 2.6
 _MAX_LANE_WIDTH = 4.8
@@ -38,8 +43,10 @@ _MAX_RAW_CORRECTION = 0.004
 _MAX_GAIN = 0.30
 _SMOOTH_TAU = 0.4
 _SIGNAL_RELEASE_TAU = 0.20
-_CONFIDENCE_RELEASE_TAU = 0.20
 _CENTER_ERROR_DEADBAND = 0.08
+_RELEASE_HOLD = 0.5  # s the last trim is held after the lines are lost
+_RELEASE_TAU = 1.0  # s fade time constant after the hold
+_RELEASE_JERK = 0.3  # m/s^3 cap on the fade's lateral-accel rate
 
 _E2E_MAX_PATH_STD = 0.35
 _E2E_BREAK_IN_START = 0.15
@@ -70,18 +77,28 @@ class LaneCenteringStatus(IntEnum):
 
 class LaneCenteringController:
   def __init__(self, gain: float = _MAX_GAIN, smooth_tau: float = _SMOOTH_TAU,
-               deadband: float = _CENTER_ERROR_DEADBAND) -> None:
+               deadband: float = _CENTER_ERROR_DEADBAND, release_hold: float = _RELEASE_HOLD,
+               release_tau: float = _RELEASE_TAU, release_jerk: float = _RELEASE_JERK) -> None:
     self._correction = 0.0
     self._raw: tuple[bool, float] | None = None
+    self._lines_ok = False
+    self._lost_time = 0.0
     self.status = LaneCenteringStatus.OFF
     self.gain = gain
     self.smooth_tau = smooth_tau
     self.deadband = deadband
+    self.release_hold = release_hold
+    self.release_tau = release_tau
+    self.release_jerk = release_jerk
 
-  def set_tuning(self, gain: float, smooth_tau: float, deadband: float) -> None:
+  def set_tuning(self, gain: float, smooth_tau: float, deadband: float, release_hold: float = _RELEASE_HOLD,
+                 release_tau: float = _RELEASE_TAU, release_jerk: float = _RELEASE_JERK) -> None:
     self.gain = float(np.clip(gain, 0.0, 1.0))
     self.smooth_tau = float(np.clip(smooth_tau, 0.0, 5.0))
     self.deadband = float(np.clip(deadband, 0.0, 0.5))
+    self.release_hold = float(np.clip(release_hold, 0.0, 5.0))
+    self.release_tau = float(np.clip(release_tau, 0.0, 10.0))
+    self.release_jerk = float(np.clip(release_jerk, 0.0, 5.0))
 
   @property
   def correction(self) -> float:
@@ -90,6 +107,8 @@ class LaneCenteringController:
   def reset(self) -> None:
     self._correction = 0.0
     self._raw = None
+    self._lines_ok = False
+    self._lost_time = 0.0
 
   def update(self, model_curvature, model_v2, v_ego, enabled, offset, e2e_authority, lat_active, model_valid,
              pause_on_signal=False, turn_signal_active=False, driver_override=False, model_updated=True) -> float:
@@ -141,13 +160,16 @@ class LaneCenteringController:
         min(max(offset, -_MAX_OFFSET), _MAX_OFFSET),
         min(max(e2e_authority, 0.0), 1.0),
         self.deadband,
+        _KEEP_LANE_PROB if self._lines_ok else _MIN_LANE_PROB,
       )
     valid, raw_correction = self._raw
+    self._lines_ok = valid
     if not valid:
       self.status = LaneCenteringStatus.NO_LINES
-      self._correction = smooth_value(0.0, self._correction, _CONFIDENCE_RELEASE_TAU, dt=DT_CTRL)
+      self._release(v_ego)
       return model_curvature + self._correction
 
+    self._lost_time = 0.0
     target = min(max(raw_correction, -_MAX_RAW_CORRECTION), _MAX_RAW_CORRECTION) * self.gain
     self._correction = smooth_value(target, self._correction, self.smooth_tau, dt=DT_CTRL)
     if abs(self._correction) * v_ego ** 2 < _NUDGE_MIN_LAT_ACCEL:
@@ -155,6 +177,17 @@ class LaneCenteringController:
     else:
       self.status = LaneCenteringStatus.NUDGE_RIGHT if self._correction > 0.0 else LaneCenteringStatus.NUDGE_LEFT
     return model_curvature + self._correction
+
+  def _release(self, v_ego: float) -> None:
+    """Lines lost: hold the trim, then fade it out with a lateral-jerk cap."""
+    self._lost_time += DT_CTRL
+    if self._lost_time <= self.release_hold:
+      return
+    target = smooth_value(0.0, self._correction, self.release_tau, dt=DT_CTRL)
+    if self.release_jerk > 0.0:
+      max_step = self.release_jerk * DT_CTRL / v_ego ** 2
+      target = max(target, self._correction - max_step) if self._correction > 0.0 else min(target, self._correction + max_step)
+    self._correction = target
 
   @staticmethod
   def _valid_path(x, y) -> bool:
@@ -166,7 +199,7 @@ class LaneCenteringController:
 
   @staticmethod
   def _raw_correction(model_v2, v_ego: float, offset: float, e2e_authority: float,
-                      deadband: float = _CENTER_ERROR_DEADBAND) -> tuple[bool, float]:
+                      deadband: float = _CENTER_ERROR_DEADBAND, min_lane_prob: float = _MIN_LANE_PROB) -> tuple[bool, float]:
     try:
       lane_lines = model_v2.laneLines
       probs = np.asarray(model_v2.laneLineProbs, dtype=float)
@@ -175,7 +208,7 @@ class LaneCenteringController:
         return False, 0.0
       if not np.isfinite(probs[[1, 2]]).all() or not np.isfinite(stds[[1, 2]]).all():
         return False, 0.0
-      if np.any(probs[[1, 2]] < _MIN_LANE_PROB) or np.any(probs[[1, 2]] > 1.0):
+      if np.any(probs[[1, 2]] < min_lane_prob) or np.any(probs[[1, 2]] > 1.0):
         return False, 0.0
       if np.any(stds[[1, 2]] < 0.0) or np.any(stds[[1, 2]] > _MAX_LANE_STD):
         return False, 0.0
