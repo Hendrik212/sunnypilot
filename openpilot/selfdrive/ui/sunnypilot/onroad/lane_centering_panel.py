@@ -55,7 +55,15 @@ STATUS = {
   St.CENTERED: ("CENTERED", GREEN),
   St.NUDGE_LEFT: ("< NUDGING LEFT", GREEN),
   St.NUDGE_RIGHT: ("NUDGING RIGHT >", GREEN),
+  St.SHIFT_LEFT: ("< SHIFTING LEFT", GREEN),
+  St.SHIFT_RIGHT: ("SHIFTING RIGHT >", GREEN),
+  St.HOLD_LEFT: ("HOLDING LEFT", GREEN),
+  St.HOLD_RIGHT: ("HOLDING RIGHT", GREEN),
 }
+ARROW_LEFT = (St.NUDGE_LEFT, St.SHIFT_LEFT)
+ARROW_RIGHT = (St.NUDGE_RIGHT, St.SHIFT_RIGHT)
+# camera offset mode: no curvature trim, the right-hand readout shows the offset instead
+CAMERA_MODE = (St.SHIFT_LEFT, St.SHIFT_RIGHT, St.HOLD_LEFT, St.HOLD_RIGHT)
 
 
 class LaneCenteringPanel(Widget):
@@ -154,8 +162,8 @@ class LaneCenteringPanel(Widget):
 
     pill = rl.Rectangle(rect.x + rect.width - PILL_W, rect.y, PILL_W, PILL_H)
     self._button("pill", pill, "LC", ON_BG if self._enabled else OFF_BG, 60)
-    if status in (St.NUDGE_LEFT, St.NUDGE_RIGHT):
-      self._arrow(pill, status == St.NUDGE_LEFT)
+    if status in ARROW_LEFT + ARROW_RIGHT:
+      self._arrow(pill, status in ARROW_LEFT)
     if not self._expanded:
       return
 
@@ -171,6 +179,12 @@ class LaneCenteringPanel(Widget):
     name, color = STATUS[status]
     y_status = rect.y + PILL_H + ROW_H + 30
     self._text(name, x0, y_status, 46, color)
+    if status in CAMERA_MODE:
+      off_txt = f"{abs(st.laneCentreOffset) * 100:.0f} cm"
+      sz = measure_text_cached(self._font, off_txt, 42)
+      self._text(off_txt, rect.x + rect.width - PAD - sz.x, y_status + 2, 42, GREY)
+      self._render_knobs(rect, x0)
+      return
     # correction as the lateral accel it adds: curvature * v^2
     accel = abs(st.laneCentreCorrection) * ui_state.sm["carState"].vEgo ** 2
     # the UI font has no "²" glyph: draw a raised small "2"
@@ -180,7 +194,9 @@ class LaneCenteringPanel(Widget):
     x_txt = rect.x + rect.width - PAD - sz.x - sup.x
     self._text(accel_txt, x_txt, y_status + 2, 42, GREY)
     self._text("2", x_txt + sz.x, y_status - 4, 28, GREY)
+    self._render_knobs(rect, x0)
 
+  def _render_knobs(self, rect: rl.Rectangle, x0: float) -> None:
     y = rect.y + PILL_H + 2 * ROW_H
     for key, label, _, _, _, fmt in KNOBS:
       self._text(label, x0, y + (BTN_H - 44) / 2, 44)

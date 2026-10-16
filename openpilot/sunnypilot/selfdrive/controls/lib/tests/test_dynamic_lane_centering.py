@@ -200,7 +200,9 @@ def test_camera_mode_hands_the_offset_to_modeld():
   assert out == 0.0 and d.correction == 0.0  # no curvature trim
   assert d.position == LanePosition.RIGHT and d.offset > 0.2
   assert d.camera_offset == -d.offset  # CameraOffset convention: + moves the model left
-  assert d.status == St.NUDGE_RIGHT
+  assert d.status == St.HOLD_RIGHT
+  _run(d, _model(lane_right=False, inner_prob=0.4), 0.2)
+  assert d.status == St.NO_LINES and d.camera_offset < -0.2  # offset kept without lines
   _run(d, _model(lane_right=False), 1.0, lat_active=False)
   assert d.status == St.STANDBY and d.camera_offset < 0.0  # still applied while disengaged
 
@@ -225,3 +227,17 @@ def test_trim_mode_publishes_no_camera_offset():
   d = _dyn(LaneCenterOffset=0.3, LaneCenteringDeadband=0.0)
   _run(d, _model(lane_right=False), 15.0)
   assert d.camera_offset == 0.0 and d.correction > 0.0
+
+
+def test_camera_mode_status_shifting_then_holding():
+  St = dlc.LaneCenteringStatus
+  d = _dyn(LaneCenterOffset=0.3, LaneCenteringOffsetMode=1)
+  _run(d, _model(lane_right=False), 2.0)  # lane position not adopted yet
+  assert d.status == St.CENTERED
+  _run(d, _model(lane_right=False), 2.0)  # adopted after 3 s dwell, ramping at 5 cm/s
+  assert d.status == St.SHIFT_RIGHT and 0.0 < d.offset < 0.3
+  _run(d, _model(lane_right=False), 8.0)
+  assert d.status == St.HOLD_RIGHT
+  _run(d, _model(lane_right=True, lane_left=False), 3.5)  # LEFT needs 400 m before switching
+  _run(d, _model(lane_right=True, lane_left=False), 12.0)
+  assert d.position == LanePosition.LEFT and d.status == St.SHIFT_LEFT

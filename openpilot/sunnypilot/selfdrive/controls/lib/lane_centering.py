@@ -73,6 +73,11 @@ class LaneCenteringStatus(IntEnum):
   CENTERED = 4     # on target (inside the deadband or negligible trim)
   NUDGE_LEFT = 5
   NUDGE_RIGHT = 6
+  # camera offset mode (dynamic_lane_centering.py): the model drives the offset itself
+  SHIFT_LEFT = 7   # offset still ramping toward its target
+  SHIFT_RIGHT = 8
+  HOLD_LEFT = 9    # offset settled, left / right of the lane centre
+  HOLD_RIGHT = 10
 
 
 class LaneCenteringController:

@@ -56,6 +56,10 @@ OUTER_GAP_MIN, OUTER_GAP_MAX = 2.8, 4.6
 EDGE_BEYOND_OUTER = 0.3  # road edge must sit this far beyond the outer line
 EDGE_NO_LANE = 2.8  # road edge closer than this to our line = no lane on that side
 OFFSET_RAMP_RATE = 0.05  # m/s
+# camera-mode status readout only
+CAMERA_STATUS_MIN_PROB = 0.5
+CAMERA_STATUS_SETTLED = 0.01  # m between applied and target offset
+CAMERA_STATUS_CENTRED = 0.02  # m
 
 DEFAULT_OFFSET = 0.15
 DEFAULT_DWELL = 3.0
@@ -178,6 +182,7 @@ class DynamicLaneCentering:
     self.mode = OffsetMode.CAMERA
     self.camera_offset = 0.0  # handed to modeld, m, CameraOffset convention (+ = left)
     self._camera_status = LaneCenteringStatus.OFF
+    self._lines_ok = False
 
   @property
   def position(self) -> LanePosition:
@@ -234,6 +239,11 @@ class DynamicLaneCentering:
 
     if model_updated:
       self.classifier.update(model_v2, v_ego)
+      try:
+        probs = model_v2.laneLineProbs
+        self._lines_ok = len(probs) >= 3 and min(probs[1], probs[2]) >= CAMERA_STATUS_MIN_PROB
+      except (AttributeError, TypeError):
+        self._lines_ok = False
     self.offset_target = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
     self._ramp_offset()
 
@@ -245,12 +255,17 @@ class DynamicLaneCentering:
         self.controller.reset()
       self.correction = 0.0
       self.active = abs(self.offset) > 1e-3
+      St = LaneCenteringStatus
       if not lat_active or v_ego < 5.0:
-        self._camera_status = LaneCenteringStatus.STANDBY
-      elif abs(self.offset) < 0.02:
-        self._camera_status = LaneCenteringStatus.CENTERED
+        self._camera_status = St.STANDBY
+      elif not self._lines_ok:
+        self._camera_status = St.NO_LINES  # informational: the offset is kept
+      elif abs(self.offset_target - self.offset) > CAMERA_STATUS_SETTLED:
+        self._camera_status = St.SHIFT_RIGHT if self.offset_target > self.offset else St.SHIFT_LEFT
+      elif abs(self.offset) < CAMERA_STATUS_CENTRED:
+        self._camera_status = St.CENTERED
       else:
-        self._camera_status = LaneCenteringStatus.NUDGE_RIGHT if self.offset > 0.0 else LaneCenteringStatus.NUDGE_LEFT
+        self._camera_status = St.HOLD_RIGHT if self.offset > 0.0 else St.HOLD_LEFT
       return model_curvature
 
     self.camera_offset = 0.0
