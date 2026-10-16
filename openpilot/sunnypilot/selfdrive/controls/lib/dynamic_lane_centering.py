@@ -52,6 +52,13 @@ NARROW_TAU and capped at NARROW_MAX. Splitting the two limits instead gave exact
 had wound down to KEEP_AWAY: routes 239/23a (2026-10-16), 2.4-2.6 m lanes, the guard sat in
 NARROW with offset 0 while the body was within 10 cm of the centre line 14% of the time, every
 time with 15+ cm more room on the right (the model rides ~8 cm left, ~12 cm in left bends).
+The balance moves at OFFSET_RAMP_RATE unless the side it moves away from is already inside its
+margin; NARROW_TAU 3 s. Route 23b (2026-10-17) construction zone: with 1 s and the fast guard
+rate the balance swung -0.16 -> +0.22 m within seconds as a flickering left wall (0.60 m
+margin vs 0.25 for a line) swapped in and out of the left slack.
+A near wall FREEZES the offset where it was when the wall appeared (moving away stays allowed)
+for WALL_HOLD s after it was last seen. Forcing the target to 0 instead stepped it 0.25 <-> 0
+every 1-2 s along a flickering guardrail (route 23b, 36:56-37:41).
 
 Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenteringOffsetMode, LaneCenterOffset, LaneCenteringGain,
 LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneCenteringDwell,
@@ -92,7 +99,8 @@ GUARD_HOLD = 2.0  # s
 KEEP_AWAY = 0.15  # m the guard may push past 0, away from a line
 GUARD_OPEN = 0.35  # m, a limit at or beyond this is inactive (offset max is 0.30)
 NARROW_BIAS = 0.05  # m more clearance on the left (oncoming) side than on the right in a narrow lane
-NARROW_TAU = 1.0  # s, low-pass on the narrow-lane balance point (it feeds back through modeld)
+NARROW_TAU = 3.0  # s, low-pass on the narrow-lane balance point (it feeds back through modeld)
+WALL_HOLD = 3.0  # s a near wall keeps the offset frozen after it was last seen
 NARROW_MAX = 0.30  # m; the balance watches both lines, and the plan only follows ~half a camera shift
 LINE_MIN_PROB = 0.5
 EDGE_MAX_STD = 0.5
@@ -224,6 +232,11 @@ class LimitCause(IntEnum):
   NARROW = 9
 
 
+# a cut toward a real boundary; NARROW moves are fast only when urgent, a wall freeze never moves
+_FAST_CAUSES = (LimitCause.RIGHT_LINE, LimitCause.LEFT_LINE, LimitCause.RIGHT_EDGE, LimitCause.LEFT_EDGE,
+                LimitCause.RIGHT_WALL, LimitCause.LEFT_WALL)
+
+
 @dataclass
 class Slack:
   """Per side: smallest planned body clearance minus that boundary's margin (m, None = no
@@ -299,6 +312,8 @@ class ClearanceGuard:
     self.slack = Slack()
     self._ok_t = [0.0, 0.0]
     self.balance: float | None = None
+    self._near_t = [WALL_HOLD, WALL_HOLD]  # s since a near wall was seen (right, left)
+    self._freeze = [0.0, 0.0]  # offset when it appeared
 
   def set_slack(self, slack: Slack, offset_used: float = 0.0, dt: float = DT_MDL) -> None:
     """offset_used: the offset (m, + = right) the model frame behind `slack` was run with."""
@@ -332,6 +347,19 @@ class ClearanceGuard:
   def update(self, offset: float, dt: float = DT_CTRL) -> None:
     self.lim_right = self._side(0, self.slack.right, self.lim_right, offset, 1.0, dt)
     self.lim_left = self._side(1, self.slack.left, self.lim_left, offset, -1.0, dt)
+    for i, near in enumerate((self.slack.wall_near_right, self.slack.wall_near_left)):
+      if near:
+        if self._near_t[i] >= WALL_HOLD:
+          self._freeze[i] = offset
+        self._near_t[i] = 0.0
+      else:
+        self._near_t[i] = min(self._near_t[i] + dt, WALL_HOLD)
+
+  def urgent(self, step: float) -> bool:
+    """True when moving the offset by `step` (+ = right) gets away from a side that is already
+    inside its margin -- the only case a narrow-lane move needs the fast guard rate."""
+    slack = self.slack.left if step > 0.0 else self.slack.right
+    return slack is not None and slack < 0.0
 
   def apply(self, target: float) -> tuple[float, LimitCause]:
     if self.lim_left > self.lim_right:  # too close on both sides: balance the clearances
@@ -343,11 +371,12 @@ class ClearanceGuard:
       out, cause = self.lim_right, self.slack.right_cause
     elif target < self.lim_left:
       out, cause = self.lim_left, self.slack.left_cause
-    # never shift toward a wall close to the body (shifting away stays allowed)
-    if self.slack.wall_near_right and out > 0.0:
-      out, cause = 0.0, LimitCause.WALL_NO_SHIFT_RIGHT
-    elif self.slack.wall_near_left and out < 0.0:
-      out, cause = 0.0, LimitCause.WALL_NO_SHIFT_LEFT
+    # never shift toward a wall close to the body: freeze where the offset was when it appeared
+    # (shifting away stays allowed)
+    if self._near_t[0] < WALL_HOLD and out > max(self._freeze[0], 0.0):
+      out, cause = max(self._freeze[0], 0.0), LimitCause.WALL_NO_SHIFT_RIGHT
+    elif self._near_t[1] < WALL_HOLD and out < min(self._freeze[1], 0.0):
+      out, cause = min(self._freeze[1], 0.0), LimitCause.WALL_NO_SHIFT_LEFT
     return out, cause
 
 
@@ -460,7 +489,9 @@ class DynamicLaneCentering:
       self.offset_target, cause = self.guard.apply(nominal)
       self.limited = abs(self.offset_target - nominal) > CAMERA_STATUS_SETTLED
       self.limit_cause = cause if self.limited else LimitCause.NONE
-      self._ramp_offset(GUARD_RELEASE_RATE if self.limited else OFFSET_RAMP_RATE)
+      fast = self.limited and (self.limit_cause in _FAST_CAUSES or
+                               (self.limit_cause == LimitCause.NARROW and self.guard.urgent(self.offset_target - self.offset)))
+      self._ramp_offset(GUARD_RELEASE_RATE if fast else OFFSET_RAMP_RATE)
       # modeld applies the offset; the model's lane lines and path are then in the shifted
       # frame, and the lane-position classifier only uses line-to-line distances
       self.camera_offset = -self.offset

@@ -319,7 +319,7 @@ def test_guard_narrow_lane_balances_slightly_right():
   g.lim_right, g.lim_left = -0.1, 0.1  # both pinched
   assert g.apply(0.3) == (pytest.approx(0.5 * (0.04 + 0.06 + dlc.NARROW_BIAS)), dlc.LimitCause.NARROW)
   g.set_slack(dlc.Slack(right=1.0, left=-1.0), offset_used=0.0)
-  for _ in range(200):
+  for _ in range(1000):
     g.set_slack(dlc.Slack(right=1.0, left=-1.0), offset_used=0.0)
   assert g.apply(0.3)[0] == pytest.approx(dlc.NARROW_MAX, abs=1e-3)
 
@@ -365,8 +365,8 @@ def test_narrow_lane_with_bends_balances_instead_of_centring_on_the_model(follow
   last = track[-int(16.0 / DT_CTRL):]  # two bend cycles
   left_clear, right_clear = last + 1.17 - 0.94, 1.28 - last - 0.94
   assert np.mean(left_clear - right_clear) == pytest.approx(dlc.NARROW_BIAS, abs=0.03)
-  # it follows the bends to keep the balance, so the left clearance stays up in left bends
-  assert np.min(left_clear) > 0.20
+  # it follows the bends to keep the balance (slowly, NARROW_TAU), so the left clearance stays up
+  assert np.min(left_clear) > 0.17
   assert np.ptp(d.offset_target - d.offset) < 0.1
 
 
@@ -376,16 +376,45 @@ def _cam_run_walls(d, model, seconds, walls):
 
 
 def test_no_shift_toward_a_near_wall():
-  St = dlc.LaneCenteringStatus
   d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1)
   wall = Wall(y=-2.6, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 1.66 m from the body: not near yet
   _cam_run_walls(d, _model(lane_left=False), 15.0, (wall, None))  # LEFT lane -> offset left
   assert d.offset == pytest.approx(-0.25)
   wall = Wall(y=-2.2, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 1.26 m from the body (offset applied)
   _cam_run_walls(d, _model(lane_left=False), 0.5, (wall, None))
-  assert d.status == St.LIMITED and d.limit_cause == dlc.LimitCause.WALL_NO_SHIFT_LEFT
+  # frozen where it was: no further toward the wall, but no step back to the centre either
   _cam_run_walls(d, _model(lane_left=False), 3.0, (wall, None))
+  assert d.offset == pytest.approx(-0.25, abs=1e-6)
+
+
+def test_near_wall_freezes_and_a_flicker_does_not_step_the_offset():
+  St = dlc.LaneCenteringStatus
+  d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0)
+  far = Wall(y=-2.6, slope=0.0, curvature=0.0, residual=0.02, points=12)
+  near = Wall(y=-2.2, slope=0.0, curvature=0.0, residual=0.02, points=12)
+  _cam_run_walls(d, _model(), 15.0, (far, None))  # middle lane: offset 0
+  assert d.offset == pytest.approx(0.0)
+  # a near left wall appears while the lane position asks for a left offset: frozen at 0
+  _cam_run_walls(d, _model(lane_left=False), 5.0, (near, None))
   assert d.offset == pytest.approx(0.0, abs=1e-6)
+  assert d.status == St.LIMITED and d.limit_cause == dlc.LimitCause.WALL_NO_SHIFT_LEFT
+  # route 23b: the wall flickers in and out every second -- the offset must not move
+  offs = []
+  for k in range(10):
+    _cam_run_walls(d, _model(lane_left=False), 1.0, (near if k % 2 else None, None))
+    offs.append(d.offset)
+  assert np.ptp(offs) < 1e-6
+  # gone for longer than WALL_HOLD: released at the normal ramp rate
+  _cam_run_walls(d, _model(lane_left=False), dlc.WALL_HOLD + 1.0, (None, None))
+  assert -dlc.OFFSET_RAMP_RATE * 1.1 - 1e-6 <= d.offset < -0.01
+
+
+def test_narrow_balance_moves_slowly_unless_a_side_is_inside_its_margin():
+  g = dlc.ClearanceGuard()
+  g.set_slack(dlc.Slack(right=0.05, left=0.0))
+  assert not g.urgent(0.1) and not g.urgent(-0.1)
+  g.set_slack(dlc.Slack(right=0.05, left=-0.05))
+  assert g.urgent(0.1) and not g.urgent(-0.1)
 
 
 def test_wall_margin_keeps_distance():
