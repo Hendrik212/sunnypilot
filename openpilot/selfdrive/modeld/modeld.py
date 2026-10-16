@@ -38,6 +38,7 @@ from openpilot.common.file_chunker import open_file_chunked
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.helpers import MODELS_DIR, chestnut_present, chestnut_compiled, modeld_pkl_path, load_oob
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
+from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper, LaneCentreCameraOffset, LANE_CENTRE_STALE_S
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
 
@@ -289,7 +290,8 @@ def main(demo=False):
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
-  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
+  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay",
+                  "lateralTuneStateSP"])
 
   publish_state = PublishState()
   params = Params()
@@ -304,6 +306,12 @@ def main(demo=False):
   model_transform_main = np.zeros((3, 3), dtype=np.float32)
   model_transform_extra = np.zeros((3, 3), dtype=np.float32)
   extrinsics_calibration_seen = False
+  # dynamic lane centering's lane offset as a camera offset (as in modeld_v2; the static
+  # CameraOffset param stays a modeld_v2-only feature here)
+  lane_centre_offset = LaneCentreCameraOffset()
+  lane_centre_seen_t = -1e9
+  lane_centre_applied = 0.0
+  base_transforms = None
   buf_main, buf_extra = None, None
   meta_main = FrameMeta()
   meta_extra = FrameMeta()
@@ -362,7 +370,12 @@ def main(demo=False):
     v_ego = max(sm["carState"].vEgo, 0.)
     model.lat_delay = get_lat_delay(params, sm["lateralDelay"].lateralDelay)
     lat_delay = sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
-    if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
+    if sm.updated["lateralTuneStateSP"]:
+      lane_centre_seen_t = time.monotonic()
+    lane_centre = lane_centre_offset.update(sm["lateralTuneStateSP"].laneCentreCameraOffset,
+                                            time.monotonic() - lane_centre_seen_t < LANE_CENTRE_STALE_S, DT_MDL)
+    calib_updated = sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']
+    if calib_updated:
       device_from_calib_euler = np.array(sm["extrinsicsCalibration"].rpyCalib, dtype=np.float32)
       dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['narrowRoadCameraState'].sensor))]
       main_intrinsics = dc.wide_road.intrinsics if main_wide_camera else dc.narrow_road.intrinsics
@@ -370,7 +383,17 @@ def main(demo=False):
       has_wide_camera = use_extra_client or main_wide_camera
       extra_intrinsics = dc.wide_road.intrinsics if has_wide_camera else dc.narrow_road.intrinsics
       model_transform_extra = get_warp_matrix(device_from_calib_euler, extra_intrinsics, True).astype(np.float32)
+      calib = sm["extrinsicsCalibration"]
+      height = calib.height[0] if calib.height else 1.22
+      base_transforms = [(model_transform_main, height, CameraOffsetHelper.get_v_horizon(main_intrinsics, device_from_calib_euler)),
+                         (model_transform_extra, height, CameraOffsetHelper.get_v_horizon(extra_intrinsics, device_from_calib_euler))]
       extrinsics_calibration_seen = True
+    if base_transforms is not None and (calib_updated or abs(lane_centre - lane_centre_applied) > 1e-4):
+      if lane_centre != 0.0:
+        model_transform_main, model_transform_extra = (CameraOffsetHelper.apply_camera_offset(t, h, lane_centre, vh) for t, h, vh in base_transforms)
+      else:
+        model_transform_main, model_transform_extra = (t for t, _, _ in base_transforms)
+      lane_centre_applied = lane_centre
 
     traffic_convention = np.zeros(2)
     traffic_convention[int(is_rhd)] = 1
@@ -444,6 +467,7 @@ def main(demo=False):
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid
       mdv2sp_send.modelDataV2SP.laneTurnDirection = DH.lane_turn_direction
+      mdv2sp_send.modelDataV2SP.cameraOffset = float(lane_centre_applied)
 
       fill_driving_model_data(drivingdata_send, modelv2_send)
       fill_pose_msg(posenet_send, model_output, meta_main.frame_id, vipc_dropped_frames, meta_main.timestamp_eof, extrinsics_calibration_seen)

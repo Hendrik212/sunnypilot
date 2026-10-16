@@ -30,7 +30,7 @@ Offset mode (LaneCenteringOffsetMode, live):
     the trim exceeded ~0.015 m/s^2 the highway weave went from 0% to 18-34% of 20 s windows
     (middle lane, offset 0: no extra weave).
   0 trim: StarPilot's curvature trim toward the offset line (LaneCenteringController).
-Camera mode needs modeld_v2 (a model bundle); the stock modeld ignores the offset.
+Both modelds apply it (selfdrive/modeld and sunnypilot/modeld_v2).
 
 Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenteringOffsetMode, LaneCenterOffset, LaneCenteringGain,
 LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneCenteringDwell,
