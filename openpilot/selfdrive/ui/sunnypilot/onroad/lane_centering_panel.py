@@ -59,11 +59,12 @@ STATUS = {
   St.SHIFT_RIGHT: ("SHIFTING RIGHT >", GREEN),
   St.HOLD_LEFT: ("HOLDING LEFT", GREEN),
   St.HOLD_RIGHT: ("HOLDING RIGHT", GREEN),
+  St.LIMITED: ("LIMITED", AMBER),
 }
 ARROW_LEFT = (St.NUDGE_LEFT, St.SHIFT_LEFT)
 ARROW_RIGHT = (St.NUDGE_RIGHT, St.SHIFT_RIGHT)
 # camera offset mode: no curvature trim, the right-hand readout shows the offset instead
-CAMERA_MODE = (St.SHIFT_LEFT, St.SHIFT_RIGHT, St.HOLD_LEFT, St.HOLD_RIGHT)
+CAMERA_MODE = (St.SHIFT_LEFT, St.SHIFT_RIGHT, St.HOLD_LEFT, St.HOLD_RIGHT, St.LIMITED)
 
 
 class LaneCenteringPanel(Widget):
@@ -180,7 +181,7 @@ class LaneCenteringPanel(Widget):
     y_status = rect.y + PILL_H + ROW_H + 30
     self._text(name, x0, y_status, 46, color)
     if status in CAMERA_MODE:
-      off_txt = f"{abs(st.laneCentreOffset) * 100:.0f} cm"
+      off_txt = f"{st.laneCentreOffset * 100:+.0f} cm" if status == St.LIMITED else f"{abs(st.laneCentreOffset) * 100:.0f} cm"
       sz = measure_text_cached(self._font, off_txt, 42)
       self._text(off_txt, rect.x + rect.width - PAD - sz.x, y_status + 2, 42, GREY)
       self._render_knobs(rect, x0)

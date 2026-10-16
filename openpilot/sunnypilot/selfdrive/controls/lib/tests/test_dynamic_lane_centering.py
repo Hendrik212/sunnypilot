@@ -27,6 +27,7 @@ def _model(lane_left=True, lane_right=True, shoulder_right=False, lane_change=0,
     laneLineProbs=probs,
     laneLineStds=[0.1, 0.1, 0.1, 0.1],
     roadEdges=[_path(edge_l), _path(edge_r)],
+    roadEdgeStds=[0.3, 0.3],
     position=_path(model_y),
     meta=SimpleNamespace(laneChangeState=lane_change),
   )
@@ -241,3 +242,61 @@ def test_camera_mode_status_shifting_then_holding():
   _run(d, _model(lane_right=True, lane_left=False), 3.5)  # LEFT needs 400 m before switching
   _run(d, _model(lane_right=True, lane_left=False), 12.0)
   assert d.position == LanePosition.LEFT and d.status == St.SHIFT_LEFT
+
+
+def _cam_run(d, model, seconds, lat_active=True):
+  """camera mode with an ideal modeld: the applied camera offset is what controlsd asked for"""
+  for i in range(int(round(seconds / DT_CTRL))):
+    d.update(0.0, model, i % 5 == 0, True, V, lat_active, False, False, d.camera_offset)
+
+
+def test_plan_clearance_real_frame():
+  m = _model(lane_right=False)
+  # lines at +-1.75 in the model frame, half width 0.94; camera offset -0.25 (car shifted right)
+  r, l = dlc.plan_clearance(m, V, -0.25, 0.94)
+  assert r == pytest.approx(1.75 - 0.25 - 0.94)
+  assert l == pytest.approx(1.75 + 0.25 - 0.94)
+  m.laneLineProbs = [0.0, 0.2, 0.2, 0.0]
+  m.roadEdgeStds = [2.0, 2.0]
+  assert dlc.plan_clearance(m, V, 0.0, 0.94) == (None, None)
+
+
+def test_guard_cuts_the_offset_when_the_plan_nears_the_line():
+  St = dlc.LaneCenteringStatus
+  d = _dyn(LaneCenterOffset=0.3, LaneCenteringOffsetMode=1)
+  _cam_run(d, _model(lane_right=False), 15.0)
+  assert d.offset == pytest.approx(0.3) and not d.limited
+  # the plan drifts 0.5 m right (bend): body would be 1.75 - 0.3 - 0.5 - 0.94 = 0.01 m from the line
+  _cam_run(d, _model(lane_right=False, model_y=0.5), 0.5)
+  assert d.limited and d.status == St.LIMITED and d.offset < 0.3 - 0.05
+  _cam_run(d, _model(lane_right=False, model_y=0.5), 3.0)
+  assert d.offset < 0.1  # cut fast
+  # clear again: regrow only after the hold, then at the normal ramp rate
+  _cam_run(d, _model(lane_right=False), 1.5)
+  low = d.offset
+  _cam_run(d, _model(lane_right=False), 1.0)
+  assert d.offset - low <= dlc.OFFSET_RAMP_RATE * 1.0 + 1e-6
+  _cam_run(d, _model(lane_right=False), 15.0)
+  assert d.offset == pytest.approx(0.3) and not d.limited
+
+
+def test_guard_keeps_away_from_a_line_the_model_rides():
+  d = _dyn(LaneCenterOffset=0.0, LaneCenteringOffsetMode=1)
+  _cam_run(d, _model(lane_right=False, model_y=0.7), 10.0)  # 1.75 - 0.7 - 0.94 = 0.11 < 0.25
+  assert d.offset == pytest.approx(-dlc.KEEP_AWAY) and d.camera_offset == pytest.approx(dlc.KEEP_AWAY)
+
+
+def test_guard_opens_on_lane_change():
+  d = _dyn(LaneCenterOffset=0.3, LaneCenteringOffsetMode=1)
+  _cam_run(d, _model(lane_right=False, model_y=0.6), 5.0)
+  assert d.guard.lim_right < 0.3
+  _cam_run(d, _model(lane_right=False, lane_change=2), 0.1)
+  assert d.guard.lim_right == dlc.GUARD_OPEN
+
+
+def test_guard_narrow_lane_splits_the_difference():
+  g = dlc.ClearanceGuard(margin=0.25)
+  g.set_clearance(0.1, 0.1)
+  for _ in range(500):
+    g.update(0.0)
+  assert g.apply(0.3) == pytest.approx(0.0)

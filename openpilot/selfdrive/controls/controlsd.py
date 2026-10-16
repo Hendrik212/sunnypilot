@@ -193,7 +193,8 @@ class Controls(ControlsExt):
                                                        LaneChangeState.laneChangeFinishing)
     new_desired_curvature = self.lane_centering.update(new_desired_curvature, model_v2, self.sm.updated['modelV2'],
                                                        bool(self.sm.all_checks(['modelV2'])), CS.vEgo, CC.latActive,
-                                                       bool(CS.leftBlinker or CS.rightBlinker), bool(CS.steeringPressed))
+                                                       bool(CS.leftBlinker or CS.rightBlinker), bool(CS.steeringPressed),
+                                                       self.sm['modelDataV2SP'].cameraOffset if self.sm.seen['modelDataV2SP'] else None)
     # Lane-change pace shaping (sunnypilot/.../lane_change_shaper.py): tightens the
     # curvature-rate clamp while the model is executing a lane change, releases after.
     # Inert (factor 1.0) at the default LaneChangeSmoothing = 10.

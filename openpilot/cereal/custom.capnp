@@ -500,7 +500,8 @@ struct LateralTuneStateSP @0xcb9fd56c7057593a {
   # the debounced lane position (0 unknown, 1 single, 2 right, 3 middle, 4 left),
   # laneCentreStatus what the controller is doing (LaneCenteringStatus in lane_centering.py:
   # 0 off, 1 standby, 2 paused, 3 no lines, 4 centered, 5 nudging left, 6 nudging right;
-  # camera offset mode: 7 shifting left, 8 shifting right, 9 holding left, 10 holding right).
+  # camera offset mode: 7 shifting left, 8 shifting right, 9 holding left, 10 holding right,
+  # 11 limited by the clearance guard).
   laneCentreOffset @8 :Float32;
   laneCentreCorrection @9 :Float32;
   laneCentreActive @10 :Bool;

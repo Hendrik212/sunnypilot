@@ -32,10 +32,22 @@ Offset mode (LaneCenteringOffsetMode, live):
   0 trim: StarPilot's curvature trim toward the offset line (LaneCenteringController).
 Both modelds apply it (selfdrive/modeld and sunnypilot/modeld_v2).
 
+Clearance guard (camera mode): with the camera offset applied the model's lines are in the
+shifted frame, real = model + applied camera offset (modelDataV2SP.cameraOffset); the car's
+own track is the model's planned path. On every model frame the guard takes the smallest
+body-to-line (and body-to-road-edge minus EDGE_EXTRA) distance along the plan 0.5-1.5 s
+ahead -- the plan reacts at once to a camera shift, the car's current position would lag
+and wind the limit up. Below LaneCenteringMinClearance it lowers that side's offset limit
+at GUARD_RELEASE_RATE (down to KEEP_AWAY past 0, pushing away from a line the model rides on
+its own); the limit regrows at OFFSET_RAMP_RATE after GUARD_HOLD s with GUARD_HYST of spare
+clearance. Routes 237/238 (2026-10-16): offset -0.25 on country right bends put the body
+within 10 cm of the right line in 45% of frames (12% without offset), p5 -0.08 m.
+
 Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenteringOffsetMode, LaneCenterOffset, LaneCenteringGain,
 LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneCenteringDwell,
 LaneCenteringSwitchDist, LaneCenteringE2EAuthority,
-LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk. Frame: model y positive to the RIGHT.
+LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk,
+LaneCenteringMinClearance, LaneCenteringCarWidth. Frame: model y positive to the RIGHT.
 """
 from enum import IntEnum
 
@@ -56,6 +68,18 @@ OUTER_GAP_MIN, OUTER_GAP_MAX = 2.8, 4.6
 EDGE_BEYOND_OUTER = 0.3  # road edge must sit this far beyond the outer line
 EDGE_NO_LANE = 2.8  # road edge closer than this to our line = no lane on that side
 OFFSET_RAMP_RATE = 0.05  # m/s
+# camera-mode clearance guard
+DEFAULT_MIN_CLEARANCE = 0.25  # m, car body to lane-line centre (the paint is ~0.15 m wide)
+DEFAULT_CAR_WIDTH = 1.88  # m, Ioniq 6 without mirrors
+EDGE_EXTRA = 0.15  # m, extra margin to a road edge
+GUARD_HORIZON = (0.5, 0.75, 1.0, 1.25, 1.5)  # s along the planned path
+GUARD_RELEASE_RATE = 0.2  # m/s
+GUARD_HYST = 0.10  # m
+GUARD_HOLD = 2.0  # s
+KEEP_AWAY = 0.15  # m the guard may push past 0, away from a line
+GUARD_OPEN = 0.35  # m, a limit at or beyond this is inactive (offset max is 0.30)
+LINE_MIN_PROB = 0.5
+EDGE_MAX_STD = 0.5
 # camera-mode status readout only
 CAMERA_STATUS_MIN_PROB = 0.5
 CAMERA_STATUS_SETTLED = 0.01  # m between applied and target offset
@@ -167,6 +191,82 @@ def _get_float(params: Params, key: str, default: float, lo: float, hi: float) -
   return float(np.clip(v, lo, hi)) if np.isfinite(v) else default
 
 
+def _interp(x, line) -> np.ndarray:
+  return np.interp(x, np.asarray(line.x, dtype=float), np.asarray(line.y, dtype=float))
+
+
+def plan_clearance(model_v2, v_ego: float, camera_offset: float, half_width: float) -> tuple[float | None, float | None]:
+  """Smallest (right, left) clearance of the car body along the plan, real frame, m.
+  None for a side without a confident line or edge."""
+  try:
+    pos = model_v2.position
+    px = np.asarray(pos.x, dtype=float)
+    if px.size < 2:
+      return None, None
+    x = np.clip(np.array(GUARD_HORIZON) * max(float(v_ego), 0.0), 3.0, min(40.0, float(px[-1])))
+    track = _interp(x, pos)
+    probs, edge_stds = model_v2.laneLineProbs, model_v2.roadEdgeStds
+    lines, edges = model_v2.laneLines, model_v2.roadEdges
+    right, left = [], []
+    if len(lines) >= 3 and len(probs) >= 3:
+      if probs[2] >= LINE_MIN_PROB:
+        right.append(np.min(_interp(x, lines[2]) + camera_offset - track) - half_width)
+      if probs[1] >= LINE_MIN_PROB:
+        left.append(np.min(track - _interp(x, lines[1]) - camera_offset) - half_width)
+    if len(edges) >= 2 and len(edge_stds) >= 2:
+      if edge_stds[1] <= EDGE_MAX_STD:
+        right.append(np.min(_interp(x, edges[1]) + camera_offset - track) - half_width - EDGE_EXTRA)
+      if edge_stds[0] <= EDGE_MAX_STD:
+        left.append(np.min(track - _interp(x, edges[0]) - camera_offset) - half_width - EDGE_EXTRA)
+    r = float(min(right)) if right else None
+    lft = float(min(left)) if left else None
+    return (r if r is None or np.isfinite(r) else None), (lft if lft is None or np.isfinite(lft) else None)
+  except (AttributeError, IndexError, TypeError, ValueError):
+    return None, None
+
+
+class ClearanceGuard:
+  """Per-side limits on the lane offset (m, + = right) from the planned clearance."""
+
+  def __init__(self, margin: float = DEFAULT_MIN_CLEARANCE):
+    self.margin = margin
+    self.reset()
+
+  def reset(self) -> None:
+    self.lim_right, self.lim_left = GUARD_OPEN, -GUARD_OPEN
+    self.clear_right: float | None = None
+    self.clear_left: float | None = None
+    self._ok_t = [0.0, 0.0]
+
+  def set_clearance(self, right: float | None, left: float | None) -> None:
+    self.clear_right, self.clear_left = right, left
+
+  def _side(self, i: int, clear: float | None, lim: float, offset: float, sign: float, dt: float) -> float:
+    # work in "towards this side" coordinates: s * offset, limit is an upper bound there
+    lim_s, off_s = sign * lim, sign * offset
+    if clear is None:  # no information: hold
+      self._ok_t[i] = 0.0
+    elif clear < self.margin:
+      self._ok_t[i] = 0.0
+      lim_s = max(min(lim_s, off_s) - GUARD_RELEASE_RATE * dt, -KEEP_AWAY)
+    elif clear > self.margin + GUARD_HYST:
+      self._ok_t[i] += dt
+      if self._ok_t[i] >= GUARD_HOLD:
+        lim_s = min(lim_s + OFFSET_RAMP_RATE * dt, GUARD_OPEN)
+    else:
+      self._ok_t[i] = 0.0
+    return sign * lim_s
+
+  def update(self, offset: float, dt: float = DT_CTRL) -> None:
+    self.lim_right = self._side(0, self.clear_right, self.lim_right, offset, 1.0, dt)
+    self.lim_left = self._side(1, self.clear_left, self.lim_left, offset, -1.0, dt)
+
+  def apply(self, target: float) -> float:
+    if self.lim_left > self.lim_right:  # too close on both sides: split the difference
+      return 0.5 * (self.lim_left + self.lim_right)
+    return min(max(target, self.lim_left), self.lim_right)
+
+
 class DynamicLaneCentering:
   def __init__(self):
     self.enabled = False
@@ -183,6 +283,9 @@ class DynamicLaneCentering:
     self.camera_offset = 0.0  # handed to modeld, m, CameraOffset convention (+ = left)
     self._camera_status = LaneCenteringStatus.OFF
     self._lines_ok = False
+    self.guard = ClearanceGuard()
+    self.half_width = DEFAULT_CAR_WIDTH / 2
+    self.limited = False
 
   @property
   def position(self) -> LanePosition:
@@ -211,19 +314,22 @@ class DynamicLaneCentering:
                                _get_float(params, "LaneCenteringReleaseJerk", 0.3, 0.0, 5.0))
     self.classifier.dwell = _get_float(params, "LaneCenteringDwell", DEFAULT_DWELL, 0.0, 30.0)
     self.classifier.switch_dist = _get_float(params, "LaneCenteringSwitchDist", DEFAULT_SWITCH_DIST, 0.0, 5000.0)
+    self.guard.margin = _get_float(params, "LaneCenteringMinClearance", DEFAULT_MIN_CLEARANCE, -0.5, 1.0)
+    self.half_width = _get_float(params, "LaneCenteringCarWidth", DEFAULT_CAR_WIDTH, 1.0, 3.0) / 2
 
   def reset(self) -> None:
     self.controller.reset()
     self.classifier.reset()
+    self.guard.reset()
     self.offset = self.offset_target = self.correction = self.camera_offset = 0.0
-    self.active = False
+    self.active = self.limited = False
 
-  def _ramp_offset(self) -> None:
-    step = OFFSET_RAMP_RATE * DT_CTRL
+  def _ramp_offset(self, rate: float = OFFSET_RAMP_RATE) -> None:
+    step = rate * DT_CTRL
     self.offset += min(max(self.offset_target - self.offset, -step), step)
 
   def update(self, model_curvature: float, model_v2, model_updated: bool, model_valid: bool, v_ego: float,
-             lat_active: bool, turn_signal: bool, driver_override: bool) -> float:
+             lat_active: bool, turn_signal: bool, driver_override: bool, applied_camera_offset: float | None = None) -> float:
     """Call every controlsd frame (DT_CTRL). Returns the (possibly) corrected curvature."""
     if not self.enabled:
       if self.active or self.correction != 0.0 or self.position != LanePosition.UNKNOWN:
@@ -232,6 +338,8 @@ class DynamicLaneCentering:
         self.correction = 0.0
         self.active = False
       # the camera offset is a model input: ramp it out, never step it
+      self.guard.reset()
+      self.limited = False
       self.offset_target = 0.0
       self._ramp_offset()
       self.camera_offset = -self.offset if self.mode == OffsetMode.CAMERA else 0.0
@@ -244,10 +352,23 @@ class DynamicLaneCentering:
         self._lines_ok = len(probs) >= 3 and min(probs[1], probs[2]) >= CAMERA_STATUS_MIN_PROB
       except (AttributeError, TypeError):
         self._lines_ok = False
-    self.offset_target = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
-    self._ramp_offset()
+    nominal = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
 
     if self.mode == OffsetMode.CAMERA:
+      if model_updated:
+        try:
+          lane_change = model_v2.meta.laneChangeState in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing)
+        except AttributeError:
+          lane_change = False
+        if lane_change:  # the lines are about to belong to another lane: start over there
+          self.guard.reset()
+        else:
+          cam = applied_camera_offset if applied_camera_offset is not None else self.camera_offset
+          self.guard.set_clearance(*plan_clearance(model_v2, v_ego, cam, self.half_width))
+      self.guard.update(self.offset)
+      self.offset_target = self.guard.apply(nominal)
+      self.limited = abs(self.offset_target - nominal) > CAMERA_STATUS_SETTLED
+      self._ramp_offset(GUARD_RELEASE_RATE if self.limited else OFFSET_RAMP_RATE)
       # modeld applies the offset; the model's lane lines and path are then in the shifted
       # frame, and the lane-position classifier only uses line-to-line distances
       self.camera_offset = -self.offset
@@ -258,6 +379,8 @@ class DynamicLaneCentering:
       St = LaneCenteringStatus
       if not lat_active or v_ego < 5.0:
         self._camera_status = St.STANDBY
+      elif self.limited:
+        self._camera_status = St.LIMITED
       elif not self._lines_ok:
         self._camera_status = St.NO_LINES  # informational: the offset is kept
       elif abs(self.offset_target - self.offset) > CAMERA_STATUS_SETTLED:
@@ -268,6 +391,8 @@ class DynamicLaneCentering:
         self._camera_status = St.HOLD_RIGHT if self.offset > 0.0 else St.HOLD_LEFT
       return model_curvature
 
+    self.offset_target = nominal
+    self._ramp_offset()
     self.camera_offset = 0.0
     out = self.controller.update(model_curvature, model_v2, v_ego, True, self.offset, self.e2e_authority,
                                  lat_active, model_valid, self.pause_on_signal, turn_signal, driver_override,

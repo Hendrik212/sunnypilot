@@ -78,6 +78,7 @@ class LaneCenteringStatus(IntEnum):
   SHIFT_RIGHT = 8
   HOLD_LEFT = 9    # offset settled, left / right of the lane centre
   HOLD_RIGHT = 10
+  LIMITED = 11     # offset cut back by the clearance guard (too close to a line / road edge)
 
 
 class LaneCenteringController:
