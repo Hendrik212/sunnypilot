@@ -17,7 +17,8 @@ from collections import deque
 import numpy as np
 
 from opendbc.car.lateral import get_friction
-from opendbc.sunnypilot.car.hyundai.lateral_limits import friction_for_speed, lat_accel_factor_for_speed
+from opendbc.sunnypilot.car.hyundai.lateral_limits import DEFAULT_HEADROOM_CAN, friction_for_speed, headroom_ratio, \
+  lat_accel_factor_for_speed
 from opendbc.sunnypilot.car.hyundai.values import IONIQ6_STARPILOT_TORQUE
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -134,6 +135,20 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     except (TypeError, ValueError):
       cap = -1.0
     self.lat_accel_factor_cap = cap
+    # Saturation headroom: same param card reads (lateral_limits.set_live_limits), so the
+    # PID clip here and the CAN clip there follow one schedule. <= 409 = off.
+    try:
+      self.headroom_can = float(params.get("SteerHeadroomCan", return_default=True))
+    except (TypeError, ValueError):
+      self.headroom_can = DEFAULT_HEADROOM_CAN
+
+  def _apply_headroom(self, ctl, v_ego: float) -> None:
+    # Only the clip moves (PID limits = lateral_accel_from_torque(+-steer_max)); the 409 scale,
+    # latAccelFactor and friction are untouched, so unsaturated commands are bit-identical.
+    steer_max = headroom_ratio(v_ego, self.headroom_can)
+    if abs(ctl.steer_max - steer_max) > 1e-4:
+      ctl.steer_max = steer_max
+      ctl.update_limits()
 
   def _apply_speed_scheduled_factor(self, ctl, v_ego: float) -> None:
     # StarPilot rail is flat 409, so these are the 3.66 / 0.09 constants. Kept as
@@ -186,6 +201,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
   def init_controller(self, ctl, CP, CP_SP, CI) -> None:
     # Set before the first _apply_speed_scheduled_factor call below.
     self.lat_accel_factor_cap = -1.0
+    self.headroom_can = DEFAULT_HEADROOM_CAN
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
     # written once at fingerprint time, so on a live switch from upstream it still holds the
     # UPSTREAM factor -- multiplying that by 1.22 would give a gain that is neither tune.
@@ -249,11 +265,13 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     # the steering-release integrator decay on the next active frame.
     self.prev_steering_pressed = CS.steeringPressed
     self._apply_speed_scheduled_factor(ctl, CS.vEgo)
+    self._apply_headroom(ctl, CS.vEgo)
 
   def update(self, ctl, active, CS, VM, params, steer_limited_by_safety,
              desired_curvature, measured_curvature, measurement, calibrated_pose,
              pid_log, lat_delay) -> float:
     self._apply_speed_scheduled_factor(ctl, CS.vEgo)
+    self._apply_headroom(ctl, CS.vEgo)
 
     # lat_delay already includes the stock LAT_SMOOTH_SECONDS (0.1) via controlsd, matching
     # StarPilot. The profile offset is 0.0 (see LAT_SMOOTH_SECONDS_OFFSET above); kept as a

@@ -23,6 +23,7 @@ from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.helpers import convert_carControlSP, convert_to_capnp
 
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP, is_starpilot_lat_tune, has_increased_lat_limits
+from opendbc.sunnypilot.car.hyundai.lateral_limits import set_live_limits
 from openpilot.sunnypilot.mads.helpers import set_alternative_experience, set_car_specific_params
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
 
@@ -339,7 +340,14 @@ class Car:
     cloudlog.info(f"lateral tune flag: LAT_TUNE_STARPILOT={starpilot}, LAT_TUNE_V3={v3}")
 
   def params_thread(self, evt):
+    i = 0
     while not evt.is_set():
+      # StarPilot CAN FD saturation headroom / low-speed release rate (lateral_limits.py).
+      # Once a second: card shares the saturated core 4 with controlsd and selfdrived.
+      if i % 10 == 0:
+        set_live_limits(self.params.get("SteerHeadroomCan", return_default=True),
+                        self.params.get("SteerDeltaDownLow", return_default=True))
+      i += 1
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
 

@@ -164,15 +164,18 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     tuned_creep = CarControllerParams(CP, 2.0, CP_SP=CP_SP)
     tuned_slow = CarControllerParams(CP, 10.0, CP_SP=CP_SP)
     tuned_fast = CarControllerParams(CP, 25.0, CP_SP=CP_SP)
-    assert tuned_creep.STEER_MAX == 409
-    assert tuned_slow.STEER_MAX == 409 and tuned_fast.STEER_MAX == 409
+    assert {tuned_creep.STEER_SCALE, tuned_slow.STEER_SCALE, tuned_fast.STEER_SCALE} == {409}
+    # saturation headroom only opens the clip between 18 and 55 km/h
+    assert tuned_creep.STEER_MAX == 409 and tuned_fast.STEER_MAX == 409
+    assert tuned_slow.STEER_MAX == 600
     assert tuned_slow.STEER_DRIVER_ALLOWANCE == 75 and tuned_slow.STEER_THRESHOLD == 100
-    assert (tuned_slow.STEER_DELTA_UP, tuned_slow.STEER_DELTA_DOWN) == (10, 8)
+    assert (tuned_slow.STEER_DELTA_UP, tuned_slow.STEER_DELTA_DOWN) == (10, 10)
     assert (tuned_fast.STEER_DELTA_UP, tuned_fast.STEER_DELTA_DOWN) == (2, 3)
 
-  def test_steer_max_is_flat_409_inside_panda_envelope(self):
-    """StarPilot commands a flat 409 rail. Panda must never block that request; its
-    envelope may be larger (leftover 650 from the mid-band experiment)."""
+  def test_steer_scale_is_flat_409_and_clip_inside_panda_envelope(self):
+    """StarPilot scales every command by a flat 409 (latAccelFactor/friction unchanged); the
+    saturation headroom only raises the clip, inside panda's 650 envelope, and never at creep
+    or above 55 km/h."""
     import re
     from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
 
@@ -188,9 +191,12 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     panda_max = int(m.group(1))
 
     for v in np.arange(0.0, 40.0, 0.25):
-      steer_max = CarControllerParams(CP, float(v), CP_SP=CP_SP).STEER_MAX
-      assert steer_max == 409, v
-      assert steer_max <= panda_max, f"car layer asks {steer_max} at {v} m/s, panda allows {panda_max}"
+      p = CarControllerParams(CP, float(v), CP_SP=CP_SP)
+      assert p.STEER_SCALE == 409, v
+      assert 409 <= p.STEER_MAX <= panda_max, f"car layer asks {p.STEER_MAX} at {v} m/s, panda allows {panda_max}"
+      if v <= 5.0 or v >= 15.3:
+        assert p.STEER_MAX == 409, v
+      assert p.STEER_DELTA_DOWN <= ll.PANDA_MAX_RATE_DOWN
 
     assert ll.STARPILOT_STEER_MAX == 409
     assert 409 <= panda_max
@@ -238,7 +244,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
     CP_SP.flags &= ~(HyundaiFlagsSP.LAT_TUNE_STARPILOT | HyundaiFlagsSP.LAT_TUNE_V3).value
     CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
     assert not (CP_SP.flags & HyundaiFlagsSP.LAT_TUNE_V3)
-    assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_MAX == 409
+    assert CarControllerParams(CP, 10.0, CP_SP=CP_SP).STEER_SCALE == 409
     assert CarControllerParams(CP, 0.0, CP_SP=CP_SP).STEER_MAX == 409
 
     CP_SP.flags &= ~(HyundaiFlagsSP.LAT_TUNE_STARPILOT | HyundaiFlagsSP.LAT_TUNE_V3).value
@@ -377,13 +383,15 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
         self.v = v
 
       def get(self, key, return_default=False):
-        assert key == "LatAccelFactorCap"
+        assert key in ("LatAccelFactorCap", "SteerHeadroomCan")
         return self.v
 
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import DEFAULT_HEADROOM_CAN
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
     for bad in (None, "", "abc"):
       ctl.profile.get_params(_BadParam(bad))
       assert ctl.profile.lat_accel_factor_cap <= 0.0
+      assert ctl.profile.headroom_can == DEFAULT_HEADROOM_CAN
     # well-formed but non-positive values are also "off" (only a positive cap clips)
     for v in (-5.0, 0.0):
       params = Params()
@@ -733,3 +741,59 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
 
     ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
     assert ctl.profile.uses_turn_intent_hold is True
+
+
+class TestSaturationHeadroom:
+  def setup_method(self):
+    from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
+    ll.set_live_limits(ll.DEFAULT_HEADROOM_CAN, ll.DEFAULT_DELTA_DOWN_LOW)
+
+  def test_ratio_schedule_and_off(self):
+    from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
+    assert ll.headroom_ratio(3.0) == 1.0 and ll.headroom_ratio(20.0) == 1.0
+    assert np.isclose(ll.headroom_ratio(10.0), 600 / 409)
+    assert ll.headroom_ratio(10.0, 409) == 1.0 and ll.headroom_ratio(10.0, 100) == 1.0  # off
+    assert np.isclose(ll.headroom_ratio(10.0, 9999), 650 / 409)  # panda envelope
+
+  def test_live_limits_are_clipped(self):
+    from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
+    ll.set_live_limits(9999, 99)
+    assert ll._live == {"headroom_can": 650, "delta_down_low": 10}
+    ll.set_live_limits("x", None)
+    assert ll._live == {"headroom_can": ll.DEFAULT_HEADROOM_CAN, "delta_down_low": ll.DEFAULT_DELTA_DOWN_LOW}
+
+  def test_opposing_driver_is_limited_exactly_as_before(self):
+    from types import SimpleNamespace
+    from opendbc.car.lateral import apply_driver_steer_torque_limits
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import apply_headroom_driver_limits
+    P = SimpleNamespace(STEER_SCALE=409, STEER_MAX=600, STEER_DRIVER_ALLOWANCE=75, STEER_DRIVER_MULTIPLIER=2,
+                        STEER_DRIVER_FACTOR=1, STEER_DELTA_UP=10, STEER_DELTA_DOWN=10)
+    base = SimpleNamespace(**{**vars(P), 'STEER_MAX': 409})
+    for drv in (-400, -250, -100):  # driver pushing against a positive command
+      for last in (0, 200, 400):
+        new = apply_headroom_driver_limits(600, last, drv, P)
+        assert new == apply_driver_steer_torque_limits(600, last, drv, base), (drv, last)
+    # unopposed: the clip opens to 600 (rate-limited from the last command)
+    assert apply_headroom_driver_limits(600, 595, 0, P) == 600
+    assert apply_headroom_driver_limits(600, 595, 200, P) == 600
+    assert apply_headroom_driver_limits(600, 405, 0, P) == 415  # past 409, at the slew rate
+    assert apply_driver_steer_torque_limits(600, 405, 0, base) == 409
+
+  def test_unsaturated_command_is_bit_identical_and_saturated_one_uses_headroom(self):
+    from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
+    outs = {}
+    for h in (409, 600):
+      ll.set_live_limits(h, 10)
+      ctl, VM, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+      ctl.profile.headroom_can = h
+      CS = car.CarState.new_message()
+      CS.vEgo = 10.0
+      pose = Pose.from_device_motion(generate_deviceMotion().deviceMotion)
+      res = []
+      for curv in (0.002, 0.08):  # 0.2 m/s^2 (free) and 8 m/s^2 (far past the 409 rail)
+        for _ in range(200):
+          out, _, _ = ctl.update(True, CS, VM, log.VehicleParameters.new_message(), False, curv, pose, False, 0.4585)
+        res.append(abs(out))
+      outs[h] = res
+    assert outs[409][0] == outs[600][0]
+    assert np.isclose(outs[409][1], 1.0, atol=1e-6) and np.isclose(outs[600][1], 600 / 409, atol=1e-3)
