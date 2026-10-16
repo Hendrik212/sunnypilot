@@ -117,7 +117,8 @@ class _P:
 
 def _dyn(**kw):
   d = DynamicLaneCentering()
-  d.get_params(_P(**{"LaneCentering": True, "LaneCenterOffset": 0.15, "LaneCenteringE2EAuthority": 0.0, **kw}))
+  d.get_params(_P(**{"LaneCentering": True, "LaneCenterOffset": 0.15, "LaneCenteringE2EAuthority": 0.0,
+                     "LaneCenteringOffsetMode": 0, **kw}))
   return d
 
 
@@ -190,3 +191,37 @@ def test_status():
   assert d.status == St.PAUSED
   d.update(0.0, _model(lane_right=False), True, True, V, True, False, True)  # driver override
   assert d.status == St.PAUSED
+
+
+def test_camera_mode_hands_the_offset_to_modeld():
+  St = dlc.LaneCenteringStatus
+  d = _dyn(LaneCenterOffset=0.3, LaneCenteringOffsetMode=1)
+  out = _run(d, _model(lane_right=False, model_y=0.0), 15.0)
+  assert out == 0.0 and d.correction == 0.0  # no curvature trim
+  assert d.position == LanePosition.RIGHT and d.offset > 0.2
+  assert d.camera_offset == -d.offset  # CameraOffset convention: + moves the model left
+  assert d.status == St.NUDGE_RIGHT
+  _run(d, _model(lane_right=False), 1.0, lat_active=False)
+  assert d.status == St.STANDBY and d.camera_offset < 0.0  # still applied while disengaged
+
+
+def test_camera_mode_default_and_disable_ramps_out():
+  d = DynamicLaneCentering()
+  d.get_params(_P(LaneCentering=True, LaneCenterOffset=0.3))
+  assert d.mode == dlc.OffsetMode.CAMERA
+  _run(d, _model(lane_right=False), 15.0)
+  start = d.camera_offset
+  assert start < -0.2
+  d.get_params(_P(LaneCentering=False, LaneCenterOffset=0.3))
+  prev = start
+  for _ in range(100):
+    assert d.update(0.001, _model(lane_right=False), True, True, V, True, False, False) == 0.001
+    assert 0.0 <= d.camera_offset - prev <= dlc.OFFSET_RAMP_RATE * DT_CTRL + 1e-12
+    prev = d.camera_offset
+  assert d.status == dlc.LaneCenteringStatus.OFF
+
+
+def test_trim_mode_publishes_no_camera_offset():
+  d = _dyn(LaneCenterOffset=0.3, LaneCenteringDeadband=0.0)
+  _run(d, _model(lane_right=False), 15.0)
+  assert d.camera_offset == 0.0 and d.correction > 0.0

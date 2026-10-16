@@ -22,7 +22,17 @@ Dwell: a class is adopted after `dwell` s of consistent frames when the position
 right for ~250-350 m and must not pull the car to the centre (3 s-only dwell: 36 spurious
 switches/h on 209; with 400 m: 2.3/h). The applied offset is rate-limited, never a step.
 
-Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenterOffset, LaneCenteringGain,
+Offset mode (LaneCenteringOffsetMode, live):
+  1 camera (default): the offset is handed to modeld as a camera offset
+    (lateralTuneStateSP.laneCentreCameraOffset), so the model itself drives the offset line;
+    no curvature trim. Routes 232-235 (2026-10-13/15): with the trim the model fought back
+    like a spring (0.2-0.5 m/s^2 per m), reached only half of a 0.30 m offset, and as soon as
+    the trim exceeded ~0.015 m/s^2 the highway weave went from 0% to 18-34% of 20 s windows
+    (middle lane, offset 0: no extra weave).
+  0 trim: StarPilot's curvature trim toward the offset line (LaneCenteringController).
+Camera mode needs modeld_v2 (a model bundle); the stock modeld ignores the offset.
+
+Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenteringOffsetMode, LaneCenterOffset, LaneCenteringGain,
 LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneCenteringDwell,
 LaneCenteringSwitchDist, LaneCenteringE2EAuthority,
 LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk. Frame: model y positive to the RIGHT.
@@ -50,6 +60,11 @@ OFFSET_RAMP_RATE = 0.05  # m/s
 DEFAULT_OFFSET = 0.15
 DEFAULT_DWELL = 3.0
 DEFAULT_SWITCH_DIST = 400.0
+
+
+class OffsetMode(IntEnum):
+  TRIM = 0
+  CAMERA = 1
 
 
 class LanePosition(IntEnum):
@@ -160,6 +175,9 @@ class DynamicLaneCentering:
     self.offset_target = 0.0
     self.correction = 0.0  # curvature added to the model command, 1/m
     self.active = False
+    self.mode = OffsetMode.CAMERA
+    self.camera_offset = 0.0  # handed to modeld, m, CameraOffset convention (+ = left)
+    self._camera_status = LaneCenteringStatus.OFF
 
   @property
   def position(self) -> LanePosition:
@@ -167,10 +185,16 @@ class DynamicLaneCentering:
 
   @property
   def status(self) -> LaneCenteringStatus:
-    return self.controller.status if self.enabled else LaneCenteringStatus.OFF
+    if not self.enabled:
+      return LaneCenteringStatus.OFF
+    return self._camera_status if self.mode == OffsetMode.CAMERA else self.controller.status
 
   def get_params(self, params: Params) -> None:
     self.enabled = params.get_bool("LaneCentering")
+    try:
+      self.mode = OffsetMode(int(params.get("LaneCenteringOffsetMode", return_default=True)))
+    except (TypeError, ValueError):
+      self.mode = OffsetMode.CAMERA
     self.offset_mag = _get_float(params, "LaneCenterOffset", DEFAULT_OFFSET, 0.0, 0.3)
     self.pause_on_signal = params.get_bool("LaneCenteringPauseOnSignal")
     self.e2e_authority = _get_float(params, "LaneCenteringE2EAuthority", 1.0, 0.0, 1.0)
@@ -186,23 +210,50 @@ class DynamicLaneCentering:
   def reset(self) -> None:
     self.controller.reset()
     self.classifier.reset()
-    self.offset = self.offset_target = self.correction = 0.0
+    self.offset = self.offset_target = self.correction = self.camera_offset = 0.0
     self.active = False
+
+  def _ramp_offset(self) -> None:
+    step = OFFSET_RAMP_RATE * DT_CTRL
+    self.offset += min(max(self.offset_target - self.offset, -step), step)
 
   def update(self, model_curvature: float, model_v2, model_updated: bool, model_valid: bool, v_ego: float,
              lat_active: bool, turn_signal: bool, driver_override: bool) -> float:
     """Call every controlsd frame (DT_CTRL). Returns the (possibly) corrected curvature."""
     if not self.enabled:
-      if self.active or self.correction != 0.0:
-        self.reset()
+      if self.active or self.correction != 0.0 or self.position != LanePosition.UNKNOWN:
+        self.controller.reset()
+        self.classifier.reset()
+        self.correction = 0.0
+        self.active = False
+      # the camera offset is a model input: ramp it out, never step it
+      self.offset_target = 0.0
+      self._ramp_offset()
+      self.camera_offset = -self.offset if self.mode == OffsetMode.CAMERA else 0.0
       return model_curvature
 
     if model_updated:
       self.classifier.update(model_v2, v_ego)
     self.offset_target = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
-    step = OFFSET_RAMP_RATE * DT_CTRL
-    self.offset += min(max(self.offset_target - self.offset, -step), step)
+    self._ramp_offset()
 
+    if self.mode == OffsetMode.CAMERA:
+      # modeld applies the offset; the model's lane lines and path are then in the shifted
+      # frame, and the lane-position classifier only uses line-to-line distances
+      self.camera_offset = -self.offset
+      if self.controller.correction != 0.0 or self.correction != 0.0:
+        self.controller.reset()
+      self.correction = 0.0
+      self.active = abs(self.offset) > 1e-3
+      if not lat_active or v_ego < 5.0:
+        self._camera_status = LaneCenteringStatus.STANDBY
+      elif abs(self.offset) < 0.02:
+        self._camera_status = LaneCenteringStatus.CENTERED
+      else:
+        self._camera_status = LaneCenteringStatus.NUDGE_RIGHT if self.offset > 0.0 else LaneCenteringStatus.NUDGE_LEFT
+      return model_curvature
+
+    self.camera_offset = 0.0
     out = self.controller.update(model_curvature, model_v2, v_ego, True, self.offset, self.e2e_authority,
                                  lat_active, model_valid, self.pause_on_signal, turn_signal, driver_override,
                                  model_updated)

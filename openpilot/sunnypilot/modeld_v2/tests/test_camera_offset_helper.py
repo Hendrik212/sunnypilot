@@ -9,7 +9,7 @@ import numpy as np
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.common.transformations.orientation import rot_from_euler
-from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
+from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper, LaneCentreCameraOffset, LANE_CENTRE_MAX_RATE
 from openpilot.common.test import OpenpilotTestCase
 
 
@@ -113,3 +113,37 @@ class TestCameraOffset(OpenpilotTestCase):
     expected_v_horizon = intrinsics_main[1, 2] - intrinsics_main[1, 1] * np.tan(pitch)
     np.testing.assert_almost_equal(shear[0, 1], self.camera_offset.actual_camera_offset / height, decimal=4)
     np.testing.assert_almost_equal(shear[0, 2], -self.camera_offset.actual_camera_offset / height * expected_v_horizon, decimal=4)
+
+  def _sm_and_transforms(self):
+    sm = MockStruct(
+      deviceState=MockStruct(deviceType='mici'),
+      narrowRoadCameraState=MockStruct(sensor='os04c10'),
+      extrinsicsCalibration=MockStruct(rpyCalib=[0.0, 0.0, 0.0], height=[1.22])
+    )
+    euler = np.zeros(3, dtype=np.float32)
+    return (sm, get_warp_matrix(euler, self.dc.narrow_road.intrinsics, False).astype(np.float32),
+            get_warp_matrix(euler, self.dc.wide_road.intrinsics, True).astype(np.float32))
+
+  def test_lane_centre_offset_is_added_unfiltered(self):
+    sm, main_transform, extra_transform = self._sm_and_transforms()
+    self.camera_offset.set_offset(0.1)
+    for _ in range(100):
+      self.camera_offset.update(main_transform, extra_transform, sm, False)
+    static = self.camera_offset.actual_camera_offset
+    main_out, _ = self.camera_offset.update(main_transform, extra_transform, sm, False, extra_offset=-0.25, advance=False)
+    assert self.camera_offset.actual_camera_offset == static  # advance=False: smoothing not stepped
+    np.testing.assert_almost_equal(self.camera_offset.applied_offset, static - 0.25)
+    shear = main_out @ np.linalg.inv(main_transform)
+    np.testing.assert_almost_equal(shear[0, 1], (static - 0.25) / 1.22, decimal=4)
+
+  def test_lane_centre_follower_is_rate_limited_and_falls_back_when_stale(self):
+    f = LaneCentreCameraOffset()
+    assert f.update(-0.3, True, 0.05) == -LANE_CENTRE_MAX_RATE * 0.05
+    for _ in range(200):
+      f.update(-0.3, True, 0.05)
+    np.testing.assert_almost_equal(f.offset, -0.3)
+    f.update(5.0, True, 100.0)
+    np.testing.assert_almost_equal(f.offset, 0.35)  # clipped
+    prev = f.offset
+    np.testing.assert_almost_equal(f.update(-0.3, False, 0.05), prev - LANE_CENTRE_MAX_RATE * 0.05)  # stale -> towards 0
+    np.testing.assert_almost_equal(f.update(float('nan'), True, 100.0), 0.0)

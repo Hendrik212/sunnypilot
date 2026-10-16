@@ -107,6 +107,10 @@ class ModelRenderer(Widget, ModelRendererSP):
     if self._counter % 180 == 0:  # This runs at 60fps, so we query every 3 seconds
       self._camera_offset = ui_state.params.get("CameraOffset", return_default=True) if ui_state.active_bundle else 0.0
     self._counter += 1
+    # modeld_v2 reports the offset it applied, including dynamic lane centering's (which moves
+    # every frame while it ramps); the param read above stays as the fallback
+    if ui_state.active_bundle and sm.alive['modelDataV2SP']:
+      self._camera_offset = sm['modelDataV2SP'].cameraOffset
 
     self._torque_filter.update(-ui_state.sm['carOutput'].actuatorsOutput.torque)
 

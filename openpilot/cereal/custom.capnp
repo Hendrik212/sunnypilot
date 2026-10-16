@@ -462,6 +462,9 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   laneTurnDirection @0 :TurnDirection;
   leftLaneChangeEdgeBlock @1 :Bool;
   rightLaneChangeEdgeBlock @2 :Bool;
+  # camera offset modeld actually applied (m, positive = model centre LEFT): the static
+  # CameraOffset param plus lateralTuneStateSP.laneCentreCameraOffset
+  cameraOffset @3 :Float32;
 
   enum TurnDirection {
     none @0;
@@ -503,6 +506,9 @@ struct LateralTuneStateSP @0xcb9fd56c7057593a {
   laneCentrePosition @11 :UInt8;
   laneCentreOffsetTarget @12 :Float32;
   laneCentreStatus @13 :UInt8;
+  # Camera offset modeld should add for the lane offset (m, CameraOffset convention: positive
+  # moves the model's centre LEFT, so it is -laneCentreOffset in camera mode, 0 in trim mode).
+  laneCentreCameraOffset @14 :Float32;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {
