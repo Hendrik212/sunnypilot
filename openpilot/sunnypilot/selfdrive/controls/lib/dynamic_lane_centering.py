@@ -46,6 +46,12 @@ Radar walls (radar_walls.py, radarWallsSP) are a third boundary with their own m
 (LaneCenteringWallClearance), and the offset never moves toward a wall within WALL_NEAR of
 the body: route 238 seg 15 shifted 0.25 m toward a construction wall the model's road edge
 put 0.3-0.6 m too far out, leaving the body 0.55-0.65 m from the concrete.
+Narrow lanes (both limits pinched): the offset goes to the balance point -- equal planned
+slack both sides plus NARROW_BIAS more room on the left (oncoming) side -- low-passed over
+NARROW_TAU and capped at NARROW_MAX. Splitting the two limits instead gave exactly 0 once both
+had wound down to KEEP_AWAY: routes 239/23a (2026-10-16), 2.4-2.6 m lanes, the guard sat in
+NARROW with offset 0 while the body was within 10 cm of the centre line 14% of the time, every
+time with 15+ cm more room on the right (the model rides ~8 cm left, ~12 cm in left bends).
 
 Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenteringOffsetMode, LaneCenterOffset, LaneCenteringGain,
 LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneCenteringDwell,
@@ -85,6 +91,9 @@ GUARD_HYST = 0.10  # m
 GUARD_HOLD = 2.0  # s
 KEEP_AWAY = 0.15  # m the guard may push past 0, away from a line
 GUARD_OPEN = 0.35  # m, a limit at or beyond this is inactive (offset max is 0.30)
+NARROW_BIAS = 0.05  # m more clearance on the left (oncoming) side than on the right in a narrow lane
+NARROW_TAU = 1.0  # s, low-pass on the narrow-lane balance point (it feeds back through modeld)
+NARROW_MAX = 0.30  # m; the balance watches both lines, and the plan only follows ~half a camera shift
 LINE_MIN_PROB = 0.5
 EDGE_MAX_STD = 0.5
 # camera-mode status readout only
@@ -289,9 +298,20 @@ class ClearanceGuard:
     self.lim_right, self.lim_left = GUARD_OPEN, -GUARD_OPEN
     self.slack = Slack()
     self._ok_t = [0.0, 0.0]
+    self.balance: float | None = None
 
-  def set_slack(self, slack: Slack) -> None:
+  def set_slack(self, slack: Slack, offset_used: float = 0.0, dt: float = DT_MDL) -> None:
+    """offset_used: the offset (m, + = right) the model frame behind `slack` was run with."""
     self.slack = slack
+    if slack.right is None or slack.left is None:
+      self.balance = None
+      return
+    # shifting right by d takes d off the right slack and adds it to the left
+    b = float(np.clip(offset_used + 0.5 * (slack.right - slack.left + NARROW_BIAS), -NARROW_MAX, NARROW_MAX))
+    if self.balance is None:
+      self.balance = b
+    else:
+      self.balance += (1.0 - np.exp(-dt / NARROW_TAU)) * (b - self.balance)
 
   def _side(self, i: int, slack: float | None, lim: float, offset: float, sign: float, dt: float) -> float:
     # in "towards this side" coordinates the limit is an upper bound
@@ -314,7 +334,9 @@ class ClearanceGuard:
     self.lim_left = self._side(1, self.slack.left, self.lim_left, offset, -1.0, dt)
 
   def apply(self, target: float) -> tuple[float, LimitCause]:
-    if self.lim_left > self.lim_right:  # too close on both sides: split the difference
+    if self.lim_left > self.lim_right:  # too close on both sides: balance the clearances
+      if self.balance is not None:
+        return self.balance, LimitCause.NARROW
       return 0.5 * (self.lim_left + self.lim_right), LimitCause.NARROW
     out, cause = target, LimitCause.NONE
     if target > self.lim_right:
@@ -433,7 +455,7 @@ class DynamicLaneCentering:
           self.guard.reset()
         else:
           cam = applied_camera_offset if applied_camera_offset is not None else self.camera_offset
-          self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin))
+          self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin), -cam)
       self.guard.update(self.offset)
       self.offset_target, cause = self.guard.apply(nominal)
       self.limited = abs(self.offset_target - nominal) > CAMERA_STATUS_SETTLED

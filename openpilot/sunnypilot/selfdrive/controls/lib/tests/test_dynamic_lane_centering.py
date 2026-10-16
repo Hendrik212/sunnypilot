@@ -305,12 +305,69 @@ def test_guard_opens_on_lane_change():
   assert d.guard.lim_right == dlc.GUARD_OPEN
 
 
-def test_guard_narrow_lane_splits_the_difference():
+def test_guard_narrow_lane_balances_slightly_right():
   g = dlc.ClearanceGuard()
   g.set_slack(dlc.Slack(right=-0.15, left=-0.15))
   for _ in range(500):
     g.update(0.0)
+  assert g.apply(0.3) == (pytest.approx(dlc.NARROW_BIAS / 2), dlc.LimitCause.NARROW)
+  # hugging the left line with room on the right: move right, capped at NARROW_MAX
+  g.reset()
+  g.set_slack(dlc.Slack(right=0.04, left=-0.06), offset_used=0.0)
+  for _ in range(500):
+    g.update(0.0)
+  g.lim_right, g.lim_left = -0.1, 0.1  # both pinched
+  assert g.apply(0.3) == (pytest.approx(0.5 * (0.04 + 0.06 + dlc.NARROW_BIAS)), dlc.LimitCause.NARROW)
+  g.set_slack(dlc.Slack(right=1.0, left=-1.0), offset_used=0.0)
+  for _ in range(200):
+    g.set_slack(dlc.Slack(right=1.0, left=-1.0), offset_used=0.0)
+  assert g.apply(0.3)[0] == pytest.approx(dlc.NARROW_MAX, abs=1e-3)
+
+
+def test_guard_narrow_lane_without_both_sides_splits_the_limits():
+  g = dlc.ClearanceGuard()
+  g.set_slack(dlc.Slack(right=-0.15, left=None))
+  assert g.balance is None
+  g.lim_right, g.lim_left = -0.1, 0.1
   assert g.apply(0.3) == (pytest.approx(0.0), dlc.LimitCause.NARROW)
+
+
+def _narrow_model(cam, follow, wiggle=0.0, left=-1.17, right=1.28):
+  """2.45 m lane, the model rides 5.5 cm left of its centre (real y 0 at camera offset 0), plus
+  `wiggle` m of bend-to-bend drift. modeld shifts the lines by -cam; the plan follows `follow`
+  of the shift (the model resists)."""
+  m = _model(lane_left=False, lane_right=False)
+  m.laneLines = [_path(-5.0 - cam), _path(left - cam), _path(right - cam), _path(5.0 - cam)]
+  m.roadEdges = [_path(-4.0 - cam), _path(4.0 - cam)]
+  m.position = _path(wiggle - follow * cam)
+  return m
+
+
+def _narrow_run(follow, seconds=40.0, guard=None):
+  d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1, LaneCenteringDwell=0.0)
+  cam, track = 0.0, []
+  for i in range(int(round(seconds / DT_CTRL))):
+    upd = i % 5 == 0
+    if upd:
+      cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)  # modeld rate limit
+    wiggle = 0.12 * np.sin(2 * np.pi * i * DT_CTRL / 8.0)  # left and right bends, 8 s apart
+    d.update(0.0, _narrow_model(cam, follow, wiggle), upd, True, V, True, False, False, cam)
+    track.append(wiggle - follow * cam)
+  return d, np.array(track)
+
+
+@pytest.mark.parametrize("follow", [1.0, 0.5])
+def test_narrow_lane_with_bends_balances_instead_of_centring_on_the_model(follow):
+  # bends drive both slacks below 0 in turn: both limits wind down to KEEP_AWAY and, with
+  # 0.07 m of total spare slack, can never regrow -- splitting them returned exactly 0
+  d, track = _narrow_run(follow)
+  assert d.limit_cause == dlc.LimitCause.NARROW
+  last = track[-int(16.0 / DT_CTRL):]  # two bend cycles
+  left_clear, right_clear = last + 1.17 - 0.94, 1.28 - last - 0.94
+  assert np.mean(left_clear - right_clear) == pytest.approx(dlc.NARROW_BIAS, abs=0.03)
+  # it follows the bends to keep the balance, so the left clearance stays up in left bends
+  assert np.min(left_clear) > 0.20
+  assert np.ptp(d.offset_target - d.offset) < 0.1
 
 
 def _cam_run_walls(d, model, seconds, walls):

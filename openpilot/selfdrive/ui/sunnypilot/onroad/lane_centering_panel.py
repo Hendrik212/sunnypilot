@@ -101,7 +101,7 @@ def describe(status: St, cause: int, offset: float) -> tuple[str, rl.Color]:
   if cause == Lc.WALL_NO_SHIFT_LEFT:
     return "RADAR WALL LEFT: NO SHIFT", AMBER
   if cause == Lc.NARROW:
-    return "NARROW LANE: CENTERED", AMBER
+    return "NARROW LANE: BALANCED", AMBER
   return "LIMITED", AMBER
 
 
