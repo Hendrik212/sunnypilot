@@ -16,6 +16,7 @@ from openpilot.common.simple_kalman import KF1D
 from opendbc.car import structs
 from opendbc.car.hyundai.values import HyundaiFlags
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
+from openpilot.sunnypilot.selfdrive.controls.lib.radar_walls import WallTracker, fill_wall, path_curvature
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -207,6 +208,9 @@ class RadarD:
 
     self.radar_state: capnp._DynamicStructBuilder | None = None
     self.radar_state_valid = False
+    # side walls from the stationary points, for dynamic lane centering's clearance guard
+    self.wall_tracker = WallTracker()
+    self.walls = (None, None)
 
     self.ready = False
 
@@ -219,6 +223,8 @@ class RadarD:
       self.last_v_ego_frame = sm.recv_frame['carState']
 
     ar_pts = {pt.trackId: [pt.dRel, pt.yRel, pt.vRel] for pt in rr.points}
+    self.walls = self.wall_tracker.update(ar_pts.values(), self.v_ego, path_curvature(sm['modelV2']),
+                                          sm.logMonoTime['modelV2'] * 1e-9)
 
     # *** remove missing points from meta data ***
     for ids in list(self.tracks.keys()):
@@ -270,6 +276,12 @@ class RadarD:
     radar_msg.radarState = self.radar_state
     pm.send("radarState", radar_msg)
 
+    walls_msg = messaging.new_message("radarWallsSP")
+    walls_msg.valid = self.radar_state_valid
+    fill_wall(walls_msg.radarWallsSP.left, self.walls[0])
+    fill_wall(walls_msg.radarWallsSP.right, self.walls[1])
+    pm.send("radarWallsSP", walls_msg)
+
 
 # fuses camera and radar data for best lead detection
 def main() -> None:
@@ -286,7 +298,7 @@ def main() -> None:
 
   # *** setup messaging
   sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'], poll='modelV2')
-  pm = messaging.PubMaster(['radarState'])
+  pm = messaging.PubMaster(['radarState', 'radarWallsSP'])
 
   RD = RadarD(CP, CP_SP, CP.radarDelay)
 

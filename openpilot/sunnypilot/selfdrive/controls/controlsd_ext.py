@@ -17,6 +17,7 @@ from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
 from openpilot.sunnypilot.selfdrive.controls.lib.dynamic_lane_centering import DynamicLaneCentering
+from openpilot.sunnypilot.selfdrive.controls.lib.radar_walls import read_wall
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_shaper import LaneChangeShaper
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 import LatControlTorque as LatControlTorqueV2
@@ -44,6 +45,7 @@ class ControlsExt(ModelStateBase):
     self.lane_change_shaper = LaneChangeShaper()
     self.lane_change_shaper.get_params(params)
     self.lane_centering = DynamicLaneCentering()
+    self._walls = (None, None)
     self.lane_centering.get_params(params)
     self.city_delay_boost = 0.30
     self.lagd_toggle = True
@@ -54,7 +56,7 @@ class ControlsExt(ModelStateBase):
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
     cloudlog.info("controlsd_ext got CarParamsSP")
 
-    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'modelDataV2SP']
+    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'modelDataV2SP', 'radarWallsSP']
     self.pm_services_ext = ['carControlSP', 'lateralTuneStateSP']
 
   def initialize_lateral_control(self, lac, CI, dt):
@@ -132,6 +134,17 @@ class ControlsExt(ModelStateBase):
           profile.get_params(self.params)
 
       self._param_update_time = time.monotonic()
+
+  def lane_centre_walls(self):
+    """(left, right) radar walls for the clearance guard; parsed only when radard sends, so the
+    100 Hz loop on the saturated core 4 only pays for 20 Hz of a few floats."""
+    sm = self.sm
+    if sm.updated['radarWallsSP']:
+      w = sm['radarWallsSP']
+      self._walls = (read_wall(w.left), read_wall(w.right))
+    elif sm.frame - sm.recv_frame['radarWallsSP'] > 100:  # 1 s stale (radard down)
+      self._walls = (None, None)
+    return self._walls
 
   def get_lat_active(self, sm: messaging.SubMaster) -> bool:
     if self.blinker_pause_lateral.update(sm['carState']):
@@ -228,6 +241,12 @@ class ControlsExt(ModelStateBase):
       state.laneCentreOffsetTarget = float(lane_centre.offset_target)
       state.laneCentreStatus = int(lane_centre.status)
       state.laneCentreCameraOffset = float(lane_centre.camera_offset)
+      slack = lane_centre.guard.slack
+      state.laneCentreLimitCause = int(lane_centre.limit_cause)
+      state.laneCentreSlackRight = float('nan') if slack.right is None else float(slack.right)
+      state.laneCentreSlackLeft = float('nan') if slack.left is None else float(slack.left)
+      state.laneCentreWallRight = slack.wall_right
+      state.laneCentreWallLeft = slack.wall_left
     pm.send('lateralTuneStateSP', msg)
 
   def run_ext(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:

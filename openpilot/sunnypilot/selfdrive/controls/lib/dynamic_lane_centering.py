@@ -42,13 +42,18 @@ at GUARD_RELEASE_RATE (down to KEEP_AWAY past 0, pushing away from a line the mo
 its own); the limit regrows at OFFSET_RAMP_RATE after GUARD_HOLD s with GUARD_HYST of spare
 clearance. Routes 237/238 (2026-10-16): offset -0.25 on country right bends put the body
 within 10 cm of the right line in 45% of frames (12% without offset), p5 -0.08 m.
+Radar walls (radar_walls.py, radarWallsSP) are a third boundary with their own margin
+(LaneCenteringWallClearance), and the offset never moves toward a wall within WALL_NEAR of
+the body: route 238 seg 15 shifted 0.25 m toward a construction wall the model's road edge
+put 0.3-0.6 m too far out, leaving the body 0.55-0.65 m from the concrete.
 
 Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenteringOffsetMode, LaneCenterOffset, LaneCenteringGain,
 LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneCenteringDwell,
 LaneCenteringSwitchDist, LaneCenteringE2EAuthority,
 LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk,
-LaneCenteringMinClearance, LaneCenteringCarWidth. Frame: model y positive to the RIGHT.
+LaneCenteringMinClearance, LaneCenteringCarWidth, LaneCenteringWallClearance. Frame: model y positive to the RIGHT.
 """
+from dataclasses import dataclass
 from enum import IntEnum
 
 import numpy as np
@@ -72,6 +77,8 @@ OFFSET_RAMP_RATE = 0.05  # m/s
 DEFAULT_MIN_CLEARANCE = 0.25  # m, car body to lane-line centre (the paint is ~0.15 m wide)
 DEFAULT_CAR_WIDTH = 1.88  # m, Ioniq 6 without mirrors
 EDGE_EXTRA = 0.15  # m, extra margin to a road edge
+DEFAULT_WALL_CLEARANCE = 0.60  # m, car body to a radar wall (radar_walls.py)
+WALL_NEAR = 1.5  # m, body to a radar wall: no offset toward it
 GUARD_HORIZON = (0.5, 0.75, 1.0, 1.25, 1.5)  # s along the planned path
 GUARD_RELEASE_RATE = 0.2  # m/s
 GUARD_HYST = 0.10  # m
@@ -195,61 +202,106 @@ def _interp(x, line) -> np.ndarray:
   return np.interp(x, np.asarray(line.x, dtype=float), np.asarray(line.y, dtype=float))
 
 
-def plan_clearance(model_v2, v_ego: float, camera_offset: float, half_width: float) -> tuple[float | None, float | None]:
-  """Smallest (right, left) clearance of the car body along the plan, real frame, m.
-  None for a side without a confident line or edge."""
+class LimitCause(IntEnum):
+  NONE = 0
+  RIGHT_LINE = 1
+  LEFT_LINE = 2
+  RIGHT_EDGE = 3
+  LEFT_EDGE = 4
+  RIGHT_WALL = 5
+  LEFT_WALL = 6
+  WALL_NO_SHIFT_RIGHT = 7
+  WALL_NO_SHIFT_LEFT = 8
+  NARROW = 9
+
+
+@dataclass
+class Slack:
+  """Per side: smallest planned body clearance minus that boundary's margin (m, None = no
+  boundary seen), which boundary it is, and whether a radar wall is within WALL_NEAR."""
+  right: float | None = None
+  left: float | None = None
+  right_cause: LimitCause = LimitCause.NONE
+  left_cause: LimitCause = LimitCause.NONE
+  wall_right: bool = False
+  wall_left: bool = False
+  wall_near_right: bool = False
+  wall_near_left: bool = False
+
+
+def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, margin: float,
+               walls=(None, None), wall_margin: float = DEFAULT_WALL_CLEARANCE) -> Slack:
+  out = Slack()
   try:
     pos = model_v2.position
     px = np.asarray(pos.x, dtype=float)
     if px.size < 2:
-      return None, None
+      return out
     x = np.clip(np.array(GUARD_HORIZON) * max(float(v_ego), 0.0), 3.0, min(40.0, float(px[-1])))
     track = _interp(x, pos)
     probs, edge_stds = model_v2.laneLineProbs, model_v2.roadEdgeStds
     lines, edges = model_v2.laneLines, model_v2.roadEdges
-    right, left = [], []
+    right: list[tuple[float, LimitCause]] = []
+    left: list[tuple[float, LimitCause]] = []
+    # model boundaries are in the shifted frame: real = model + camera offset
     if len(lines) >= 3 and len(probs) >= 3:
       if probs[2] >= LINE_MIN_PROB:
-        right.append(np.min(_interp(x, lines[2]) + camera_offset - track) - half_width)
+        right.append((np.min(_interp(x, lines[2]) + camera_offset - track) - half_width - margin, LimitCause.RIGHT_LINE))
       if probs[1] >= LINE_MIN_PROB:
-        left.append(np.min(track - _interp(x, lines[1]) - camera_offset) - half_width)
+        left.append((np.min(track - _interp(x, lines[1]) - camera_offset) - half_width - margin, LimitCause.LEFT_LINE))
     if len(edges) >= 2 and len(edge_stds) >= 2:
       if edge_stds[1] <= EDGE_MAX_STD:
-        right.append(np.min(_interp(x, edges[1]) + camera_offset - track) - half_width - EDGE_EXTRA)
+        right.append((np.min(_interp(x, edges[1]) + camera_offset - track) - half_width - margin - EDGE_EXTRA, LimitCause.RIGHT_EDGE))
       if edge_stds[0] <= EDGE_MAX_STD:
-        left.append(np.min(track - _interp(x, edges[0]) - camera_offset) - half_width - EDGE_EXTRA)
-    r = float(min(right)) if right else None
-    lft = float(min(left)) if left else None
-    return (r if r is None or np.isfinite(r) else None), (lft if lft is None or np.isfinite(lft) else None)
+        left.append((np.min(track - _interp(x, edges[0]) - camera_offset) - half_width - margin - EDGE_EXTRA, LimitCause.LEFT_EDGE))
+    # radar walls are in the real frame already
+    wl, wr = walls
+    if wr is not None:
+      out.wall_right = True
+      gap = wr.at(x) - track - half_width
+      right.append((float(np.min(gap)) - wall_margin, LimitCause.RIGHT_WALL))
+      out.wall_near_right = bool(np.min(gap) < WALL_NEAR)
+    if wl is not None:
+      out.wall_left = True
+      gap = track - wl.at(x) - half_width
+      left.append((float(np.min(gap)) - wall_margin, LimitCause.LEFT_WALL))
+      out.wall_near_left = bool(np.min(gap) < WALL_NEAR)
+    right = [r for r in right if np.isfinite(r[0])]
+    left = [lf for lf in left if np.isfinite(lf[0])]
+    if right:
+      out.right, out.right_cause = min(right, key=lambda r: r[0])
+      out.right = float(out.right)
+    if left:
+      out.left, out.left_cause = min(left, key=lambda r: r[0])
+      out.left = float(out.left)
   except (AttributeError, IndexError, TypeError, ValueError):
-    return None, None
+    pass
+  return out
 
 
 class ClearanceGuard:
-  """Per-side limits on the lane offset (m, + = right) from the planned clearance."""
+  """Per-side limits on the lane offset (m, + = right) from the planned slack."""
 
-  def __init__(self, margin: float = DEFAULT_MIN_CLEARANCE):
-    self.margin = margin
+  def __init__(self):
     self.reset()
 
   def reset(self) -> None:
     self.lim_right, self.lim_left = GUARD_OPEN, -GUARD_OPEN
-    self.clear_right: float | None = None
-    self.clear_left: float | None = None
+    self.slack = Slack()
     self._ok_t = [0.0, 0.0]
 
-  def set_clearance(self, right: float | None, left: float | None) -> None:
-    self.clear_right, self.clear_left = right, left
+  def set_slack(self, slack: Slack) -> None:
+    self.slack = slack
 
-  def _side(self, i: int, clear: float | None, lim: float, offset: float, sign: float, dt: float) -> float:
-    # work in "towards this side" coordinates: s * offset, limit is an upper bound there
+  def _side(self, i: int, slack: float | None, lim: float, offset: float, sign: float, dt: float) -> float:
+    # in "towards this side" coordinates the limit is an upper bound
     lim_s, off_s = sign * lim, sign * offset
-    if clear is None:  # no information: hold
+    if slack is None:  # no boundary seen: hold
       self._ok_t[i] = 0.0
-    elif clear < self.margin:
+    elif slack < 0.0:
       self._ok_t[i] = 0.0
       lim_s = max(min(lim_s, off_s) - GUARD_RELEASE_RATE * dt, -KEEP_AWAY)
-    elif clear > self.margin + GUARD_HYST:
+    elif slack > GUARD_HYST:
       self._ok_t[i] += dt
       if self._ok_t[i] >= GUARD_HOLD:
         lim_s = min(lim_s + OFFSET_RAMP_RATE * dt, GUARD_OPEN)
@@ -258,13 +310,23 @@ class ClearanceGuard:
     return sign * lim_s
 
   def update(self, offset: float, dt: float = DT_CTRL) -> None:
-    self.lim_right = self._side(0, self.clear_right, self.lim_right, offset, 1.0, dt)
-    self.lim_left = self._side(1, self.clear_left, self.lim_left, offset, -1.0, dt)
+    self.lim_right = self._side(0, self.slack.right, self.lim_right, offset, 1.0, dt)
+    self.lim_left = self._side(1, self.slack.left, self.lim_left, offset, -1.0, dt)
 
-  def apply(self, target: float) -> float:
+  def apply(self, target: float) -> tuple[float, LimitCause]:
     if self.lim_left > self.lim_right:  # too close on both sides: split the difference
-      return 0.5 * (self.lim_left + self.lim_right)
-    return min(max(target, self.lim_left), self.lim_right)
+      return 0.5 * (self.lim_left + self.lim_right), LimitCause.NARROW
+    out, cause = target, LimitCause.NONE
+    if target > self.lim_right:
+      out, cause = self.lim_right, self.slack.right_cause
+    elif target < self.lim_left:
+      out, cause = self.lim_left, self.slack.left_cause
+    # never shift toward a wall close to the body (shifting away stays allowed)
+    if self.slack.wall_near_right and out > 0.0:
+      out, cause = 0.0, LimitCause.WALL_NO_SHIFT_RIGHT
+    elif self.slack.wall_near_left and out < 0.0:
+      out, cause = 0.0, LimitCause.WALL_NO_SHIFT_LEFT
+    return out, cause
 
 
 class DynamicLaneCentering:
@@ -284,8 +346,11 @@ class DynamicLaneCentering:
     self._camera_status = LaneCenteringStatus.OFF
     self._lines_ok = False
     self.guard = ClearanceGuard()
+    self.margin = DEFAULT_MIN_CLEARANCE
+    self.wall_margin = DEFAULT_WALL_CLEARANCE
     self.half_width = DEFAULT_CAR_WIDTH / 2
     self.limited = False
+    self.limit_cause = LimitCause.NONE
 
   @property
   def position(self) -> LanePosition:
@@ -314,7 +379,8 @@ class DynamicLaneCentering:
                                _get_float(params, "LaneCenteringReleaseJerk", 0.3, 0.0, 5.0))
     self.classifier.dwell = _get_float(params, "LaneCenteringDwell", DEFAULT_DWELL, 0.0, 30.0)
     self.classifier.switch_dist = _get_float(params, "LaneCenteringSwitchDist", DEFAULT_SWITCH_DIST, 0.0, 5000.0)
-    self.guard.margin = _get_float(params, "LaneCenteringMinClearance", DEFAULT_MIN_CLEARANCE, -0.5, 1.0)
+    self.margin = _get_float(params, "LaneCenteringMinClearance", DEFAULT_MIN_CLEARANCE, -0.5, 1.0)
+    self.wall_margin = _get_float(params, "LaneCenteringWallClearance", DEFAULT_WALL_CLEARANCE, 0.0, 2.0)
     self.half_width = _get_float(params, "LaneCenteringCarWidth", DEFAULT_CAR_WIDTH, 1.0, 3.0) / 2
 
   def reset(self) -> None:
@@ -323,13 +389,15 @@ class DynamicLaneCentering:
     self.guard.reset()
     self.offset = self.offset_target = self.correction = self.camera_offset = 0.0
     self.active = self.limited = False
+    self.limit_cause = LimitCause.NONE
 
   def _ramp_offset(self, rate: float = OFFSET_RAMP_RATE) -> None:
     step = rate * DT_CTRL
     self.offset += min(max(self.offset_target - self.offset, -step), step)
 
   def update(self, model_curvature: float, model_v2, model_updated: bool, model_valid: bool, v_ego: float,
-             lat_active: bool, turn_signal: bool, driver_override: bool, applied_camera_offset: float | None = None) -> float:
+             lat_active: bool, turn_signal: bool, driver_override: bool, applied_camera_offset: float | None = None,
+             walls=(None, None)) -> float:
     """Call every controlsd frame (DT_CTRL). Returns the (possibly) corrected curvature."""
     if not self.enabled:
       if self.active or self.correction != 0.0 or self.position != LanePosition.UNKNOWN:
@@ -340,6 +408,7 @@ class DynamicLaneCentering:
       # the camera offset is a model input: ramp it out, never step it
       self.guard.reset()
       self.limited = False
+      self.limit_cause = LimitCause.NONE
       self.offset_target = 0.0
       self._ramp_offset()
       self.camera_offset = -self.offset if self.mode == OffsetMode.CAMERA else 0.0
@@ -364,10 +433,11 @@ class DynamicLaneCentering:
           self.guard.reset()
         else:
           cam = applied_camera_offset if applied_camera_offset is not None else self.camera_offset
-          self.guard.set_clearance(*plan_clearance(model_v2, v_ego, cam, self.half_width))
+          self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin))
       self.guard.update(self.offset)
-      self.offset_target = self.guard.apply(nominal)
+      self.offset_target, cause = self.guard.apply(nominal)
       self.limited = abs(self.offset_target - nominal) > CAMERA_STATUS_SETTLED
+      self.limit_cause = cause if self.limited else LimitCause.NONE
       self._ramp_offset(GUARD_RELEASE_RATE if self.limited else OFFSET_RAMP_RATE)
       # modeld applies the offset; the model's lane lines and path are then in the shifted
       # frame, and the lane-position classifier only uses line-to-line distances

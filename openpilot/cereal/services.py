@@ -96,6 +96,7 @@ _services: dict[str, tuple] = {
   # run_ext rate; MUST stay registered -- SubMaster.__init__ hard-KeyErrors on an unregistered
   # service, which crashed the UI to a static logo at boot (2026-08-25).
   "lateralTuneStateSP": (True, 100., 10),
+  "radarWallsSP": (True, 20., 10),
   "liveMapDataSP": (True, 1., 1),
   "modelDataV2SP": (True, 20., None, QueueSize.BIG),
   "liveLocationKalman": (True, 20.),

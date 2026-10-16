@@ -5,6 +5,7 @@ import pytest
 
 from openpilot.common.realtime import DT_CTRL, DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib import dynamic_lane_centering as dlc
+from openpilot.sunnypilot.selfdrive.controls.lib.radar_walls import Wall
 from openpilot.sunnypilot.selfdrive.controls.lib.dynamic_lane_centering import (
   DynamicLaneCentering, LanePosition, LanePositionClassifier, frame_lane_position)
 
@@ -250,15 +251,25 @@ def _cam_run(d, model, seconds, lat_active=True):
     d.update(0.0, model, i % 5 == 0, True, V, lat_active, False, False, d.camera_offset)
 
 
-def test_plan_clearance_real_frame():
+def test_plan_slack_real_frame():
   m = _model(lane_right=False)
-  # lines at +-1.75 in the model frame, half width 0.94; camera offset -0.25 (car shifted right)
-  r, l = dlc.plan_clearance(m, V, -0.25, 0.94)
-  assert r == pytest.approx(1.75 - 0.25 - 0.94)
-  assert l == pytest.approx(1.75 + 0.25 - 0.94)
+  # lines at +-1.75 in the model frame, half width 0.94, margin 0.25; camera offset -0.25 (car right)
+  sl = dlc.plan_slack(m, V, -0.25, 0.94, 0.25)
+  assert sl.right == pytest.approx(1.75 - 0.25 - 0.94 - 0.25) and sl.right_cause == dlc.LimitCause.RIGHT_LINE
+  assert sl.left == pytest.approx(1.75 + 0.25 - 0.94 - 0.25) and sl.left_cause == dlc.LimitCause.LEFT_LINE
   m.laneLineProbs = [0.0, 0.2, 0.2, 0.0]
   m.roadEdgeStds = [2.0, 2.0]
-  assert dlc.plan_clearance(m, V, 0.0, 0.94) == (None, None)
+  sl = dlc.plan_slack(m, V, 0.0, 0.94, 0.25)
+  assert sl.right is None and sl.left is None
+
+
+def test_plan_slack_radar_wall_is_real_frame_and_flags_near():
+  m = _model(lane_left=False)
+  wall = Wall(y=-1.7, slope=0.0, curvature=0.0, residual=0.02, points=12)
+  # camera +0.25: car shifted left, left line now 1.5 m away (slack 0.31) -- the wall is tighter
+  sl = dlc.plan_slack(m, V, 0.25, 0.94, 0.25, (wall, None), 0.6)
+  assert sl.left == pytest.approx(1.7 - 0.94 - 0.6) and sl.left_cause == dlc.LimitCause.LEFT_WALL
+  assert sl.wall_left and sl.wall_near_left and not sl.wall_right
 
 
 def test_guard_cuts_the_offset_when_the_plan_nears_the_line():
@@ -295,8 +306,34 @@ def test_guard_opens_on_lane_change():
 
 
 def test_guard_narrow_lane_splits_the_difference():
-  g = dlc.ClearanceGuard(margin=0.25)
-  g.set_clearance(0.1, 0.1)
+  g = dlc.ClearanceGuard()
+  g.set_slack(dlc.Slack(right=-0.15, left=-0.15))
   for _ in range(500):
     g.update(0.0)
-  assert g.apply(0.3) == pytest.approx(0.0)
+  assert g.apply(0.3) == (pytest.approx(0.0), dlc.LimitCause.NARROW)
+
+
+def _cam_run_walls(d, model, seconds, walls):
+  for i in range(int(round(seconds / DT_CTRL))):
+    d.update(0.0, model, i % 5 == 0, True, V, True, False, False, d.camera_offset, walls)
+
+
+def test_no_shift_toward_a_near_wall():
+  St = dlc.LaneCenteringStatus
+  d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1)
+  wall = Wall(y=-2.6, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 1.66 m from the body: not near yet
+  _cam_run_walls(d, _model(lane_left=False), 15.0, (wall, None))  # LEFT lane -> offset left
+  assert d.offset == pytest.approx(-0.25)
+  wall = Wall(y=-2.2, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 1.26 m from the body (offset applied)
+  _cam_run_walls(d, _model(lane_left=False), 0.5, (wall, None))
+  assert d.status == St.LIMITED and d.limit_cause == dlc.LimitCause.WALL_NO_SHIFT_LEFT
+  _cam_run_walls(d, _model(lane_left=False), 3.0, (wall, None))
+  assert d.offset == pytest.approx(0.0, abs=1e-6)
+
+
+def test_wall_margin_keeps_distance():
+  d = _dyn(LaneCenterOffset=0.0, LaneCenteringOffsetMode=1)
+  wall = Wall(y=-1.3, slope=0.0, curvature=0.0, residual=0.02, points=12)  # body 0.36 m off, margin 0.6
+  _cam_run_walls(d, _model(lane_left=False), 5.0, (wall, None))
+  assert d.offset == pytest.approx(dlc.KEEP_AWAY)  # pushed right, away from the wall
+  assert d.limit_cause == dlc.LimitCause.LEFT_WALL

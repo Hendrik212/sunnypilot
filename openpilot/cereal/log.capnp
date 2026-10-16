@@ -2665,7 +2665,7 @@ struct Event {
     mqttPubQueue @154 :MqttPubQueue;
     mqttRecvQueue @155 :MqttRecvQueue;
     lateralTuneStateSP @136 :Custom.LateralTuneStateSP;
-    customReserved11 @137 :Custom.CustomReserved11;
+    radarWallsSP @137 :Custom.RadarWallsSP;
     customReserved12 @138 :Custom.CustomReserved12;
     customReserved13 @139 :Custom.CustomReserved13;
     customReserved14 @140 :Custom.CustomReserved14;

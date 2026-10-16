@@ -511,9 +511,34 @@ struct LateralTuneStateSP @0xcb9fd56c7057593a {
   # Camera offset modeld should add for the lane offset (m, CameraOffset convention: positive
   # moves the model's centre LEFT, so it is -laneCentreOffset in camera mode, 0 in trim mode).
   laneCentreCameraOffset @14 :Float32;
+  # Clearance guard (camera mode): what limits the offset right now (0 none, 1 right line,
+  # 2 left line, 3 right road edge, 4 left road edge, 5 right wall, 6 left wall, 7 wall on
+  # the right: no shift right, 8 wall on the left: no shift left, 9 narrow lane); the
+  # smallest planned body clearance per side minus that boundary's margin (m, NaN = no
+  # boundary seen), and whether a radar wall is tracked on each side.
+  laneCentreLimitCause @15 :UInt8;
+  laneCentreSlackRight @16 :Float32;
+  laneCentreSlackLeft @17 :Float32;
+  laneCentreWallRight @18 :Bool;
+  laneCentreWallLeft @19 :Bool;
 }
 
-struct CustomReserved11 @0xc2243c65e0340384 {
+# Ground-stationary radar points fitted to a line per side (walls, guardrails, stopped
+# cars), sunnypilot/selfdrive/controls/lib/radar_walls.py; published by radard. Model frame:
+# x forward from the camera, y positive RIGHT; y(x) = y + slope*x + curvature*x^2/2. A wall
+# is held for HOLD_S after its last fit, so valid can outlive the points by up to 1 s.
+struct RadarWallsSP @0xc2243c65e0340384 {
+  left @0 :Wall;
+  right @1 :Wall;
+
+  struct Wall {
+    valid @0 :Bool;
+    y @1 :Float32;
+    slope @2 :Float32;
+    curvature @3 :Float32;
+    residual @4 :Float32;
+    points @5 :UInt8;
+  }
 }
 
 struct CustomReserved12 @0x9ccdc8676701b412 {
