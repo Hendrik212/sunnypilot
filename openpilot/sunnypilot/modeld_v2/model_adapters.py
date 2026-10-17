@@ -18,13 +18,23 @@ from openpilot.sunnypilot.modeld_v2.helpers import load_model
 from openpilot.sunnypilot.modeld_v2.compile_modeld import (POLICY_INPUTS, derive_frame_skip,
                                                            make_split_input_queues, make_supercombo_input_queues)
 from openpilot.sunnypilot.modeld_v2.frame_resize import FrameResize, SOURCE_SIZE, TARGET_SIZE
-from openpilot.sunnypilot.modeld_v2.stock_dependencies import (MODELD_INPUTS, make_input_queues as stock_make_input_queues,
+from openpilot.sunnypilot.modeld_v2.stock_dependencies import (make_input_queues as stock_make_input_queues,
                                                                nv12_copy_size)
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from tinygrad.device import Buffer
 from tinygrad.dtype import DType
 from tinygrad.tensor import Tensor
 from tinygrad.uop.ops import UOp
+
+
+def model_camera_size(cam_w: int, cam_h: int, chestnut: bool) -> tuple[int, int]:
+  """Frame size the model is fed. Fork-local (port of sunnypilot PR #2035 to the native path):
+  a comma 3X (tizi) talks to Chestnut over Gen1 USB, where two raw 1928x1208 frames (7.47 MB)
+  cost ~23 ms per run and push the big model past its 50 ms budget. Point-sample them down to
+  1344x760 (the comma four size, 3.24 MB) on the host and run the 1344x760 warp instead."""
+  if COMMA_HARDWARE and chestnut and (cam_w, cam_h) == SOURCE_SIZE and HARDWARE.get_device_type() == 'tizi':
+    return TARGET_SIZE
+  return cam_w, cam_h
 
 
 def input_view(buffer: Buffer, shape: tuple[int, ...], dtype: DType, offset: int) -> Tensor:
@@ -164,7 +174,11 @@ class NativeTinygradAdapter(BaseModelAdapter):
     self.input_shapes = {name: (shape, np.dtype(dtype)) for name, (shape, dtype, _) in self.input_specs.items()}
     self.state_pairs = {name: f'next_{name}' for name in self.input_shapes if f'next_{name}' in self.jits['metadata']['output_shapes']}
 
-    stride, y_height, uv_height, _ = get_nv12_info(self.cam_w, self.cam_h)
+    model_size = model_camera_size(self.cam_w, self.cam_h, self.chestnut)
+    self.frame_resize = FrameResize() if model_size != (self.cam_w, self.cam_h) else None
+    if self.frame_resize is not None:
+      cloudlog.warning(f"Comma 3X Chestnut frame resize: {self.cam_w}x{self.cam_h} -> {model_size[0]}x{model_size[1]}")
+    stride, y_height, uv_height, _ = get_nv12_info(*model_size)
     self.frame_copy_size = stride * (y_height + uv_height)
 
     self._vision_input_names = ['img', 'big_img']
@@ -193,7 +207,10 @@ class NativeTinygradAdapter(BaseModelAdapter):
     for i, key in enumerate(self._vision_input_names):
       if key in bufs:
         data = bufs[key].data if hasattr(bufs[key], 'data') else bufs[key]
-        np.copyto(self.frames[i], np.frombuffer(data, dtype=np.uint8, count=self.warp_frame_size))
+        if self.frame_resize is not None:
+          self.frame_resize.resize(data, self.frames[i])
+        else:
+          np.copyto(self.frames[i], np.frombuffer(data, dtype=np.uint8, count=self.warp_frame_size))
 
   def reset_warmup_buffers(self) -> None:
     self.packed_input[:] = 0
@@ -201,80 +218,19 @@ class NativeTinygradAdapter(BaseModelAdapter):
       self.input_queues[key].assign(0).realize()
 
   def run(self):
+    if self.frame_resize is not None:
+      # modeld rewrites tfm every run. Center-anchored point sampling maps source pixel s to
+      # resized pixel d = (s + 0.5) * TARGET / SOURCE - 0.5, so the warp samples the resized
+      # frame with new_row = scale * row + (0.5 * scale - 0.5) * w_row, per camera.
+      tfm = self.numpy_inputs['tfm']
+      for axis in (0, 1):
+        scale = TARGET_SIZE[axis] / SOURCE_SIZE[axis]
+        tfm[:, axis] = scale * tfm[:, axis] + (0.5 * scale - 0.5) * tfm[:, 2]
     self.run_model(host=self.host, **self.input_queues, output_buffers=self.outputs)
     return self.outputs['outputs']
 
 
-class RunModelAdapter(BaseModelAdapter):
-  """comma's unified precompiled pkl ('run_model': warp + policy in one JIT on the model device).
-
-  Fork-local (port of sunnypilot PR #2035): a comma 3X (tizi) on Chestnut point-samples its
-  1928x1208 frames down to 1344x760 (the comma four frame size) before they go over USB, and
-  the warp transform is corrected for the resize, so comma's precompiled big model runs
-  unmodified. Gate: COMMA_HARDWARE + model device AMD + 1928x1208 + tizi.
-  """
-  def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
-    metadata = self.jits['metadata']
-    model_metadata = metadata.get('model', metadata)
-    self.input_shapes = model_metadata['input_shapes']
-    self.vision_output_slices = model_metadata['output_slices']
-    self._vision_input_names = [key for key in self.input_shapes if 'img' in key]
-    self.frame_skip = derive_frame_skip({}, self.input_shapes)
-
-    self.source_frame_copy_size = nv12_copy_size(*self.nv12_info[:3])
-    self.warp_frame_size = self.source_frame_copy_size  # dummy frames in get_dummy_inputs()
-    self.frame_copy_size = self.source_frame_copy_size
-    self.frame_resize: FrameResize | None = None
-    model_camera_size = (self.cam_w, self.cam_h)
-    if (COMMA_HARDWARE and self.DEV == 'AMD' and model_camera_size == SOURCE_SIZE
-        and HARDWARE.get_device_type() == 'tizi'):
-      if TARGET_SIZE not in self.jits['run_model']:
-        raise RuntimeError("Comma 3X unified AMD model requires a compiled 1344x760 run_model entry")
-      self.frame_resize = FrameResize()
-      model_camera_size = TARGET_SIZE
-      self.frame_copy_size = nv12_copy_size(*get_nv12_info(*model_camera_size)[:3])
-      cloudlog.warning(f"Comma 3X unified AMD frame resize: {self.cam_w}x{self.cam_h} -> {model_camera_size[0]}x{model_camera_size[1]}")
-    self.run_model = self.jits['run_model'][model_camera_size]
-
-    self.input_queues, self.numpy_inputs, self.frame_buffers = stock_make_input_queues(
-      self.input_shapes, self.frame_skip, device=self.DEV, frame_copy_size=self.frame_copy_size)
-    self._init_common()
-
-  def copy_frames(self, bufs):
-    for key, buf in bufs.items():
-      data = buf.data if hasattr(buf, 'data') else buf
-      if self.frame_resize is not None:
-        self.frame_resize.resize(data, self.frame_buffers[key])
-      else:
-        np.copyto(self.frame_buffers[key], np.frombuffer(data, dtype=np.uint8, count=self.frame_copy_size))
-
-  def reset_warmup_buffers(self):
-    # zero in place: modeld holds references to numpy_inputs and the JIT to the queue buffers
-    for v in self.numpy_inputs.values():
-      v[:] = 0
-    for v in self.frame_buffers.values():
-      v[:] = 0
-    for key in ('img_q', 'big_img_q', 'feat_q', 'desire_q'):
-      self.input_queues[key].assign(0).realize()
-
-  def run(self):
-    if self.frame_resize is not None:
-      # Center-anchored point sampling maps source pixel s to resized pixel
-      # d = (s + 0.5) * TARGET / SOURCE - 0.5, so correct the warp transform to
-      # sample the resized frame: new_row = scale * row + (0.5 * scale - 0.5) * w_row.
-      for key in ('tfm', 'big_tfm'):
-        tfm = self.numpy_inputs[key]
-        for axis in (0, 1):
-          scale = TARGET_SIZE[axis] / SOURCE_SIZE[axis]
-          tfm[axis] = scale * tfm[axis] + (0.5 * scale - 0.5) * tfm[2]
-    outs, = self.run_model(**{k: self.input_queues[k] for k in MODELD_INPUTS})
-    return outs
-
-
 def get_model_adapter(jits, cam_w, cam_h, model_device, queue_device, warp_device, chestnut=False):
-  if 'run_model' in jits:
-    return RunModelAdapter(jits, cam_w, cam_h, model_device, queue_device, warp_device, chestnut=chestnut)
   if 'input_specs' in jits:
     return NativeTinygradAdapter(jits, cam_w, cam_h, model_device, queue_device, warp_device, chestnut=chestnut)
   else:
