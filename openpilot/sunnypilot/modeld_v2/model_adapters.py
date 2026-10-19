@@ -212,6 +212,12 @@ class NativeTinygradAdapter(BaseModelAdapter):
         else:
           np.copyto(self.frames[i], np.frombuffer(data, dtype=np.uint8, count=self.warp_frame_size))
 
+  def get_dummy_inputs(self):
+    dummy_frames, transforms, dummy_inputs = super().get_dummy_inputs()
+    if self.frame_resize is not None:  # warmup frames go through copy_frames, so they must be camera-sized
+      dummy_frames = {k: np.zeros(self.frame_resize.source_copy_size, dtype=np.uint8) for k in dummy_frames}
+    return dummy_frames, transforms, dummy_inputs
+
   def reset_warmup_buffers(self) -> None:
     self.packed_input[:] = 0
     for key in self.state_pairs:

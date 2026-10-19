@@ -71,6 +71,13 @@ class TestNativeFrameResize(unittest.TestCase):
       np.testing.assert_allclose(adapter.numpy_inputs['tfm'][1], scale @ wide, rtol=1e-6, atol=1e-5)
     self.assertEqual(adapter.run_model.call_count, 3)
 
+  @parameterized.expand([((1928, 1208), SOURCE_COPY_SIZE), ((1344, 760), TARGET_COPY_SIZE)])
+  def test_warmup_frames_fit_copy_frames(self, cam_size, frame_size):
+    adapter = make_adapter(cam_size=cam_size)
+    dummy_frames, _, _ = adapter.get_dummy_inputs()
+    self.assertEqual({len(f) for f in dummy_frames.values()}, {frame_size})
+    adapter.copy_frames(dummy_frames)
+
   def test_short_source_raises_before_the_model_runs(self):
     adapter = make_adapter()
     with self.assertRaises(ValueError):
