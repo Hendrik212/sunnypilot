@@ -42,10 +42,19 @@ of the right line in 45% of frames (12% without offset), p5 -0.08 m.
 Radar walls (radar_walls.py, radarWallsSP) are a third boundary with their own margin
 (LaneCenteringWallClearance), and the offset never moves toward a wall within WALL_NEAR of
 the body: route 238 seg 15 shifted 0.25 m toward a construction wall the model's road edge
-put 0.3-0.6 m too far out, leaving the body 0.55-0.65 m from the concrete.
+put 0.3-0.6 m too far out, leaving the body 0.55-0.65 m from the concrete. A wall more than
+WALL_BEYOND_LINE outside a confident lane line on its side is not "near" (it keeps its margin as
+a boundary): route 24e (2026-10-24) froze the offset 22% of the country-road time on guardrails
+and verges a median 0.78 m beyond the right line.
 
 Each side's slack becomes a bound on the offset (hi = offset_used + right slack, lo =
-offset_used - left slack). A bound tightens at once and relaxes over BOUND_RELAX_TAU; a side
+offset_used - left slack). A bound tightens at once, holds BOUND_RELAX_HOLD, then relaxes over
+BOUND_RELAX_TAU (a slight bend cuts the offset once instead of in and out every few seconds:
+routes 24c/24e with an immediate 1.5 s relax and a fast cut on any line contact moved the offset
+3.2-3.8 m/km, 35-45 reversals/km; replayed on 24a-24e this gives 17 instead of 31 reversals/km at
+the same mean offset -- longer holds cut reversals further but eat the offset); the offset only
+moves at GUARD_RELEASE_RATE when the plan is more than FAST_SLACK inside a margin, otherwise at
+OFFSET_RAMP_RATE; a side
 that stops showing a boundary keeps its bound for BOUND_HOLD (WALL_HOLD for a wall). The
 offset is the nominal one clipped into [lo, hi]. When the window is empty (narrow lane) one
 side gets its margin first: a near radar wall, else on a single-lane road the left (oncoming)
@@ -97,9 +106,12 @@ DEFAULT_CAR_WIDTH = 1.88  # m, Ioniq 6 without mirrors
 EDGE_EXTRA = 0.15  # m, extra margin to a road edge
 DEFAULT_WALL_CLEARANCE = 0.60  # m, car body to a radar wall (radar_walls.py)
 WALL_NEAR = 1.5  # m, body to a radar wall: no offset toward it
+WALL_BEYOND_LINE = 0.4  # m; a wall further than this outside a confident lane line is not near
 GUARD_HORIZON = (0.5, 0.75, 1.0, 1.25, 1.5)  # s along the planned path
 GUARD_RELEASE_RATE = 0.2  # m/s
-BOUND_RELAX_TAU = 1.5  # s, a bound relaxes over this (it tightens at once)
+BOUND_RELAX_HOLD = 1.0  # s a tightened bound holds before it relaxes
+BOUND_RELAX_TAU = 3.0  # s, then it relaxes over this (it tightens at once)
+FAST_SLACK = 0.05  # m inside a margin before the offset moves at GUARD_RELEASE_RATE
 BOUND_HOLD = 2.0  # s a side keeps its bound after its boundary was last seen
 WALL_HOLD = 3.0  # s a near wall keeps its bound and the offset frozen after it was last seen
 OFFSET_CAP = 0.30  # m
@@ -237,10 +249,6 @@ class LimitCause(IntEnum):
   NARROW = 9
 
 
-# a cut away from a real boundary is fast (moving back toward it, as the bound relaxes, is not);
-# NARROW moves are fast only when urgent, a wall freeze never moves
-_RIGHT_CAUSES = (LimitCause.RIGHT_LINE, LimitCause.RIGHT_EDGE, LimitCause.RIGHT_WALL)
-_LEFT_CAUSES = (LimitCause.LEFT_LINE, LimitCause.LEFT_EDGE, LimitCause.LEFT_WALL)
 
 
 @dataclass
@@ -259,6 +267,12 @@ class Slack:
   wall_slack_left: float | None = None
 
 
+def _wall_near(gap: float, line_gap: float | None) -> bool:
+  """A wall within WALL_NEAR of the body that is the boundary -- not a guardrail or verge well
+  beyond a confident lane line, which the line already keeps the car away from."""
+  return gap < WALL_NEAR and (line_gap is None or gap < line_gap + WALL_BEYOND_LINE)
+
+
 def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, margin: float,
                walls=(None, None), wall_margin: float = DEFAULT_WALL_CLEARANCE) -> Slack:
   out = Slack()
@@ -273,12 +287,15 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
     lines, edges = model_v2.laneLines, model_v2.roadEdges
     right: list[tuple[float, LimitCause]] = []
     left: list[tuple[float, LimitCause]] = []
+    line_gap = [None, None]  # body to a confident lane line (right, left)
     # model boundaries are in the shifted frame: real = model + camera offset
     if len(lines) >= 3 and len(probs) >= 3:
       if probs[2] >= LINE_MIN_PROB:
-        right.append((np.min(_interp(x, lines[2]) + camera_offset - track) - half_width - margin, LimitCause.RIGHT_LINE))
+        line_gap[0] = float(np.min(_interp(x, lines[2]) + camera_offset - track) - half_width)
+        right.append((line_gap[0] - margin, LimitCause.RIGHT_LINE))
       if probs[1] >= LINE_MIN_PROB:
-        left.append((np.min(track - _interp(x, lines[1]) - camera_offset) - half_width - margin, LimitCause.LEFT_LINE))
+        line_gap[1] = float(np.min(track - _interp(x, lines[1]) - camera_offset) - half_width)
+        left.append((line_gap[1] - margin, LimitCause.LEFT_LINE))
     if len(edges) >= 2 and len(edge_stds) >= 2:
       if edge_stds[1] <= EDGE_MAX_STD:
         right.append((np.min(_interp(x, edges[1]) + camera_offset - track) - half_width - margin - EDGE_EXTRA, LimitCause.RIGHT_EDGE))
@@ -291,13 +308,13 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
       gap = wr.at(x) - track - half_width
       out.wall_slack_right = float(np.min(gap)) - wall_margin
       right.append((out.wall_slack_right, LimitCause.RIGHT_WALL))
-      out.wall_near_right = bool(np.min(gap) < WALL_NEAR)
+      out.wall_near_right = _wall_near(float(np.min(gap)), line_gap[0])
     if wl is not None:
       out.wall_left = True
       gap = track - wl.at(x) - half_width
       out.wall_slack_left = float(np.min(gap)) - wall_margin
       left.append((out.wall_slack_left, LimitCause.LEFT_WALL))
-      out.wall_near_left = bool(np.min(gap) < WALL_NEAR)
+      out.wall_near_left = _wall_near(float(np.min(gap)), line_gap[1])
     right = [r for r in right if np.isfinite(r[0])]
     left = [lf for lf in left if np.isfinite(lf[0])]
     if right:
@@ -313,7 +330,7 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
 
 class _Bound:
   """One side's bound on the offset in "towards this side" coordinates (an upper bound):
-  tightens at once, relaxes over BOUND_RELAX_TAU, held for `hold` s once the side stops
+  tightens at once, holds BOUND_RELAX_HOLD, then relaxes over BOUND_RELAX_TAU; held for `hold` s once the side stops
   showing a boundary, then open (None)."""
 
   def __init__(self, hold: float):
@@ -323,6 +340,7 @@ class _Bound:
   def reset(self) -> None:
     self.value: float | None = None
     self._age = 0.0
+    self._since_tight = 0.0
 
   def update(self, raw: float | None, dt: float) -> None:
     if raw is None:
@@ -333,7 +351,10 @@ class _Bound:
     self._age = 0.0
     if self.value is None or raw < self.value:
       self.value = raw
-    else:
+      self._since_tight = 0.0
+      return
+    self._since_tight += dt
+    if self._since_tight >= BOUND_RELAX_HOLD:
       self.value += (1.0 - np.exp(-dt / BOUND_RELAX_TAU)) * (raw - self.value)
 
 
@@ -386,9 +407,9 @@ class ClearanceGuard:
 
   def urgent(self, step: float) -> bool:
     """True when moving the offset by `step` (+ = right) gets away from a side that is already
-    inside its margin -- the only case a narrow-lane move needs the fast guard rate."""
+    more than FAST_SLACK inside its margin -- the only case a move needs the fast guard rate."""
     slack = self.slack.left if step > 0.0 else self.slack.right
-    return slack is not None and slack < 0.0
+    return slack is not None and slack < -FAST_SLACK
 
   def _give(self, i: int, wall_prio: bool) -> float:
     """How far side i may be crossed into its margin when the other side has priority."""
@@ -543,8 +564,7 @@ class DynamicLaneCentering:
       self.limited = abs(self.offset_target - nominal) > CAMERA_STATUS_SETTLED
       self.limit_cause = cause if self.limited else LimitCause.NONE
       step = self.offset_target - self.offset
-      fast = self.limited and ((self.limit_cause in _RIGHT_CAUSES and step < 0.0) or (self.limit_cause in _LEFT_CAUSES and step > 0.0) or
-                               (self.limit_cause == LimitCause.NARROW and self.guard.urgent(step)))
+      fast = self.limited and self.guard.urgent(step)
       self._ramp_offset(GUARD_RELEASE_RATE if fast else OFFSET_RAMP_RATE)
       # modeld applies the offset; the model's lane lines and path are then in the shifted
       # frame, and the lane-position classifier only uses line-to-line distances

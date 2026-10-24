@@ -350,7 +350,10 @@ def test_bounds_tighten_at_once_and_relax_slowly():
   g.set_slack(dlc.Slack(right=0.5, left=0.5))
   g.set_slack(dlc.Slack(right=-0.1, left=0.5))
   assert g.hi == pytest.approx(-0.1)
-  for _ in range(int(dlc.BOUND_RELAX_TAU / DT_MDL)):
+  for _ in range(int(dlc.BOUND_RELAX_HOLD / DT_MDL) - 1):
+    g.set_slack(dlc.Slack(right=0.5, left=0.5))
+  assert g.hi == pytest.approx(-0.1)  # held after the pinch
+  for _ in range(int(dlc.BOUND_RELAX_TAU / DT_MDL) + 1):
     g.set_slack(dlc.Slack(right=0.5, left=0.5))
   assert g.hi == pytest.approx(0.5 - 0.6 / np.e, abs=0.02)
   # a side that stops showing a boundary keeps its bound for BOUND_HOLD, then opens
@@ -409,7 +412,7 @@ def test_no_shift_toward_a_near_wall():
   wall = Wall(y=-2.6, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 1.66 m from the body: not near yet
   _cam_run_walls(d, _model(lane_left=False), 15.0, (wall, None))  # LEFT lane -> offset left
   assert d.offset == pytest.approx(-0.25)
-  wall = Wall(y=-2.2, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 1.26 m from the body (offset applied)
+  wall = Wall(y=-1.85, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 0.91 m from the body, 0.35 m beyond the line
   _cam_run_walls(d, _model(lane_left=False), 0.5, (wall, None))
   # frozen where it was: no further toward the wall, but no step back to the centre either
   _cam_run_walls(d, _model(lane_left=False), 3.0, (wall, None))
@@ -420,7 +423,7 @@ def test_near_wall_freezes_and_a_flicker_does_not_step_the_offset():
   St = dlc.LaneCenteringStatus
   d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0)
   far = Wall(y=-2.6, slope=0.0, curvature=0.0, residual=0.02, points=12)
-  near = Wall(y=-2.2, slope=0.0, curvature=0.0, residual=0.02, points=12)
+  near = Wall(y=-2.0, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 0.25 m beyond the left line
   _cam_run_walls(d, _model(), 15.0, (far, None))  # middle lane: offset 0
   assert d.offset == pytest.approx(0.0)
   # a near left wall appears while the lane position asks for a left offset: frozen at 0
@@ -440,10 +443,24 @@ def test_near_wall_freezes_and_a_flicker_does_not_step_the_offset():
 
 def test_narrow_moves_fast_only_when_a_side_is_inside_its_margin():
   g = dlc.ClearanceGuard()
-  g.set_slack(dlc.Slack(right=0.05, left=0.0))
-  assert not g.urgent(0.1) and not g.urgent(-0.1)
-  g.set_slack(dlc.Slack(right=0.05, left=-0.05))
+  g.set_slack(dlc.Slack(right=0.05, left=-0.04))
+  assert not g.urgent(0.1) and not g.urgent(-0.1)  # slightly inside: normal rate, no hunting
+  g.set_slack(dlc.Slack(right=0.05, left=-0.1))
   assert g.urgent(0.1) and not g.urgent(-0.1)
+
+
+def test_a_guardrail_beyond_the_lane_line_is_not_near():
+  m = _model(lane_left=False)
+  # body 0.81 m from the left line; a wall 1.2 m from the body sits 0.39 m beyond it: near
+  near = Wall(y=-2.14, slope=0.0, curvature=0.0, residual=0.02, points=12)
+  assert dlc.plan_slack(m, V, 0.0, 0.94, 0.25, (near, None), 0.6).wall_near_left
+  # 0.6 m beyond the line (a guardrail behind the verge): only a boundary with its margin
+  rail = Wall(y=-2.35, slope=0.0, curvature=0.0, residual=0.02, points=12)
+  sl = dlc.plan_slack(m, V, 0.0, 0.94, 0.25, (rail, None), 0.6)
+  assert sl.wall_left and not sl.wall_near_left
+  # no confident line on that side: the wall is the boundary
+  m.laneLineProbs = [0.01, 0.2, 0.95, 0.85]
+  assert dlc.plan_slack(m, V, 0.0, 0.94, 0.25, (rail, None), 0.6).wall_near_left
 
 
 @pytest.mark.parametrize("follow", [1.0, 0.5])
