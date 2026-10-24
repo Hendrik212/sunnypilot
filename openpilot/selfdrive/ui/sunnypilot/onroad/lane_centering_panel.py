@@ -1,10 +1,13 @@
 """
 Onroad tuning panel for dynamic lane centering (comma 3X / tizi layout).
 
-Shown only while LaneCenteringOnroadPanel is on. Collapsed it is an "LC" pill under the
-experimental-mode button with a one-line status strip beside it, so what lane centering is
-doing (and why, when the clearance guard limits it) is always visible; an amber bar on the
-pill's side marks a tracked radar wall. Tapping opens a panel with an on/off button, a live
+Shown only while LaneCenteringOnroadPanel is on. Collapsed it is an "LC" pill in the
+bottom-right corner with a one-line status strip beside it, so what lane centering is doing
+(and why, when the clearance guard limits it) is always visible; amber "WALL L/R" marks a
+tracked radar wall. Everything sits as low as it can (the rear-view mirror hides the top of
+the screen): above the bottom developer bar, lifted above a small/mid alert while one shows.
+Tapping opens a panel that grows upward with the pill in its bottom row (so it closes where it
+opened) and, from the bottom up, the status line, an on/off button with a live
 readout from lateralTuneStateSP (lane position, applied offset, spare clearance per side,
 walls) and -/+ rows for LaneCenterOffset and LaneCenteringGain (trim mode) or
 LaneCenteringMinClearance (camera mode). The buttons only write Params -- controlsd picks
@@ -21,7 +24,9 @@ import pyray as rl
 from openpilot.common.params import Params
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_centering import LaneCenteringStatus as St
 from openpilot.sunnypilot.selfdrive.controls.lib.dynamic_lane_centering import LimitCause as Lc
+from openpilot.selfdrive.ui.onroad.alert_renderer import ALERT_HEIGHTS, ALERT_MARGIN
 from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
+from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import get_bottom_dev_ui_offset
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -37,7 +42,7 @@ PAD = 24
 PARAM_REFRESH_S = 1.0
 STRIP_GAP = 16
 STRIP_FONT = 40
-WALL_BAR_W = 12
+ALERT_GAP = 20  # px kept clear above an alert
 
 # param, label, step, min, max, format
 OFFSET_KNOB = ("LaneCenterOffset", "Offset", 0.01, 0.0, 0.30, lambda v: f"{v * 100:.0f} cm")
@@ -101,7 +106,7 @@ def describe(status: St, cause: int, offset: float) -> tuple[str, rl.Color]:
   if cause == Lc.WALL_NO_SHIFT_LEFT:
     return "RADAR WALL LEFT: NO SHIFT", AMBER
   if cause == Lc.NARROW:
-    return "NARROW LANE: BALANCED", AMBER
+    return "NARROW LANE", AMBER
   return "LIMITED", AMBER
 
 
@@ -154,16 +159,36 @@ class LaneCenteringPanel(Widget):
     text, color = describe(status, st.laneCentreLimitCause, st.laneCentreOffset)
     return status, text, color
 
+  @staticmethod
+  def _bottom(hud_rect: rl.Rectangle) -> float:
+    """Lowest y the panel may reach: above the bottom developer bar, and above a small or mid
+    alert while one shows (alerts are drawn over the HUD)."""
+    screen_bottom = hud_rect.y + hud_rect.height
+    bottom = screen_bottom - UI_CONFIG.border_size - get_bottom_dev_ui_offset()
+    sm = ui_state.sm
+    size = sm['selfdriveState'].alertSize.raw
+    if size in ALERT_HEIGHTS and sm.recv_frame['selfdriveState'] >= ui_state.started_frame:
+      v_adj = 40 if ui_state.developer_ui in (2, 3) else 0  # alert_renderer.py: right dev column
+      bottom = min(bottom, screen_bottom - ALERT_HEIGHTS[size] + ALERT_MARGIN - v_adj - ALERT_GAP)
+    return bottom
+
+  def _wall_tag(self) -> str:
+    st = ui_state.sm["lateralTuneStateSP"]
+    return "  ".join(t for t, on in (("WALL L", st.laneCentreWallLeft), ("WALL R", st.laneCentreWallRight)) if on)
+
   def layout_rect(self, hud_rect: rl.Rectangle) -> rl.Rectangle:
     right = hud_rect.x + hud_rect.width - UI_CONFIG.border_size
-    top = hud_rect.y + UI_CONFIG.border_size + UI_CONFIG.button_size + 30
+    bottom = self._bottom(hud_rect)
     if not self._expanded:
       _, text, _ = self._status()
       strip_w = measure_text_cached(self._font_bold, text, STRIP_FONT).x + 2 * PAD
+      tag = self._wall_tag()
+      if tag:
+        strip_w += measure_text_cached(self._font_bold, tag, STRIP_FONT).x + PAD
       w = PILL_W + STRIP_GAP + strip_w
-      return rl.Rectangle(right - w, top, w, PILL_H)
-    height = PILL_H + 3 * ROW_H + N_KNOBS * ROW_H + PAD
-    return rl.Rectangle(right - PANEL_W, top, PANEL_W, height)
+      return rl.Rectangle(right - w, bottom - PILL_H, w, PILL_H)
+    height = PAD + (N_KNOBS + 3) * ROW_H + PILL_H
+    return rl.Rectangle(right - PANEL_W, bottom - height, PANEL_W, height)
 
   def _handle_mouse_release(self, pos) -> None:
     for name, r in self._hit.items():
@@ -210,54 +235,51 @@ class LaneCenteringPanel(Widget):
   def _text(self, text: str, x: float, y: float, size: int = 44, color: rl.Color = WHITE) -> None:
     rl.draw_text_ex(self._font, text, rl.Vector2(x, y), size, 0, color)
 
-  def _wall_bars(self, pill: rl.Rectangle, st) -> None:
-    if st.laneCentreWallLeft:
-      rl.draw_rectangle_rec(rl.Rectangle(pill.x - WALL_BAR_W - 4, pill.y + 8, WALL_BAR_W, pill.height - 16), AMBER)
-    if st.laneCentreWallRight:
-      rl.draw_rectangle_rec(rl.Rectangle(pill.x + pill.width - WALL_BAR_W, pill.y + 8, WALL_BAR_W, pill.height - 16), AMBER)
-
   def _render(self, rect: rl.Rectangle) -> None:
     self._hit = {}
     st = ui_state.sm["lateralTuneStateSP"]
     status, text, color = self._status()
-    pill = rl.Rectangle(rect.x + rect.width - PILL_W, rect.y, PILL_W, PILL_H)
+    pill = rl.Rectangle(rect.x + rect.width - PILL_W, rect.y + rect.height - PILL_H, PILL_W, PILL_H)
 
     if not self._expanded:
       strip = rl.Rectangle(rect.x, rect.y, rect.width - PILL_W - STRIP_GAP, PILL_H)
-      self._hit["pill"] = rect  # the strip opens the panel too
       rl.draw_rectangle_rounded(strip, 0.4, 10, BG)
       sz = measure_text_cached(self._font_bold, text, STRIP_FONT)
-      rl.draw_text_ex(self._font_bold, text, rl.Vector2(strip.x + PAD, strip.y + (PILL_H - sz.y) / 2), STRIP_FONT, 0, color)
+      ty = strip.y + (PILL_H - sz.y) / 2
+      rl.draw_text_ex(self._font_bold, text, rl.Vector2(strip.x + PAD, ty), STRIP_FONT, 0, color)
+      tag = self._wall_tag()
+      if tag:
+        rl.draw_text_ex(self._font_bold, tag, rl.Vector2(strip.x + 2 * PAD + sz.x, ty), STRIP_FONT, 0, AMBER)
       self._button("pill", pill, "LC", ON_BG if self._enabled else OFF_BG, 60)
-      self._hit["pill"] = rect
+      self._hit["pill"] = rect  # the strip opens the panel too
       if status in ARROW_LEFT + ARROW_RIGHT:
         self._arrow(pill, status in ARROW_LEFT)
-      self._wall_bars(pill, st)
       return
 
+    # bottom up: header row with the pill, status, on/off + lane, clearance info, knobs
     rl.draw_rectangle_rounded(rect, 0.12, 10, BG)
     self._button("pill", pill, "LC", ON_BG if self._enabled else OFF_BG, 60)
     if status in ARROW_LEFT + ARROW_RIGHT:
       self._arrow(pill, status in ARROW_LEFT)
-    self._wall_bars(pill, st)
 
     x0 = rect.x + PAD
-    self._text("LANE CENTER", x0, rect.y + (PILL_H - 50) / 2, 50)
-    toggle = rl.Rectangle(x0, rect.y + PILL_H + 10, 200, BTN_H)
-    self._button("toggle", toggle, "ON" if self._enabled else "OFF", ON_BG if self._enabled else OFF_BG)
-
-    pos = POSITION_NAMES.get(int(st.laneCentrePosition), "--")
-    self._text(f"lane {pos}", x0 + 230, rect.y + PILL_H + 12, 42)
-    self._text(f"offset {st.laneCentreOffset * 100:+.0f} cm", x0 + 230, rect.y + PILL_H + 60, 42, GREY)
+    self._text("LANE CENTER", x0, pill.y + (PILL_H - 50) / 2, 50)
 
     # status: shrink to fit the long guard reasons
-    y_status = rect.y + PILL_H + ROW_H + 30
+    y_status = pill.y - ROW_H + 30
     size = 46
     while size > 30 and measure_text_cached(self._font, text, size).x > rect.width - 2 * PAD:
       size -= 2
     self._text(text, x0, y_status, size, color)
 
-    y_info = rect.y + PILL_H + 2 * ROW_H + 20
+    y_toggle = pill.y - 2 * ROW_H + 10
+    toggle = rl.Rectangle(x0, y_toggle, 200, BTN_H)
+    self._button("toggle", toggle, "ON" if self._enabled else "OFF", ON_BG if self._enabled else OFF_BG)
+    pos = POSITION_NAMES.get(int(st.laneCentrePosition), "--")
+    self._text(f"lane {pos}", x0 + 230, y_toggle + 2, 42)
+    self._text(f"offset {st.laneCentreOffset * 100:+.0f} cm", x0 + 230, y_toggle + 50, 42, GREY)
+
+    y_info = pill.y - 3 * ROW_H + 20
     if self._camera_mode:
       # spare clearance beyond the margin per side (cm), amber when the guard is cutting in
       x = x0
@@ -267,10 +289,17 @@ class LaneCenteringPanel(Widget):
       for txt, col in parts:
         self._text(txt, x, y_info, 40, col)
         x += measure_text_cached(self._font, txt, 40).x + 24
-      walls = " ".join(t for t, on in (("WALL L", st.laneCentreWallLeft), ("WALL R", st.laneCentreWallRight)) if on)
+      walls = self._wall_tag()
       if walls:
-        sz = measure_text_cached(self._font_bold, walls, 40)
-        rl.draw_text_ex(self._font_bold, walls, rl.Vector2(rect.x + rect.width - PAD - sz.x, y_info), 40, 0, AMBER)
+        # right-aligned after the spare readout: shrink, then abbreviate, so it never overlaps
+        room = rect.x + rect.width - PAD - x
+        size = 40
+        while size > 28 and measure_text_cached(self._font_bold, walls, size).x > room:
+          size -= 2
+        if measure_text_cached(self._font_bold, walls, size).x > room:
+          walls = "WALLS"
+        sz = measure_text_cached(self._font_bold, walls, size)
+        rl.draw_text_ex(self._font_bold, walls, rl.Vector2(rect.x + rect.width - PAD - sz.x, y_info + (40 - size) / 2), size, 0, AMBER)
     else:
       # correction as the lateral accel it adds: curvature * v^2
       accel = abs(st.laneCentreCorrection) * ui_state.sm["carState"].vEgo ** 2
@@ -280,7 +309,7 @@ class LaneCenteringPanel(Widget):
     self._render_knobs(rect, x0)
 
   def _render_knobs(self, rect: rl.Rectangle, x0: float) -> None:
-    y = rect.y + PILL_H + 3 * ROW_H
+    y = rect.y + PAD
     for key, label, _, _, _, fmt in self._knobs:
       self._text(label, x0, y + (BTN_H - 44) / 2, 44)
       minus = rl.Rectangle(rect.x + rect.width - PAD - 2 * BTN_W - 170, y, BTN_W, BTN_H)
