@@ -36,26 +36,31 @@ Clearance guard (camera mode): with the camera offset applied the model's lines 
 shifted frame, real = model + applied camera offset (modelDataV2SP.cameraOffset); the car's
 own track is the model's planned path. On every model frame the guard takes the smallest
 body-to-line (and body-to-road-edge minus EDGE_EXTRA) distance along the plan 0.5-1.5 s
-ahead -- the plan reacts at once to a camera shift, the car's current position would lag
-and wind the limit up. Below LaneCenteringMinClearance it lowers that side's offset limit
-at GUARD_RELEASE_RATE (down to KEEP_AWAY past 0, pushing away from a line the model rides on
-its own); the limit regrows at OFFSET_RAMP_RATE after GUARD_HOLD s with GUARD_HYST of spare
-clearance. Routes 237/238 (2026-10-16): offset -0.25 on country right bends put the body
-within 10 cm of the right line in 45% of frames (12% without offset), p5 -0.08 m.
+ahead -- the plan reacts at once to a camera shift, the car's current position would lag.
+Routes 237/238 (2026-10-16): offset -0.25 on country right bends put the body within 10 cm
+of the right line in 45% of frames (12% without offset), p5 -0.08 m.
 Radar walls (radar_walls.py, radarWallsSP) are a third boundary with their own margin
 (LaneCenteringWallClearance), and the offset never moves toward a wall within WALL_NEAR of
 the body: route 238 seg 15 shifted 0.25 m toward a construction wall the model's road edge
 put 0.3-0.6 m too far out, leaving the body 0.55-0.65 m from the concrete.
-Narrow lanes (both limits pinched): the offset goes to the balance point -- equal planned
-slack both sides plus NARROW_BIAS more room on the left (oncoming) side -- low-passed over
-NARROW_TAU and capped at NARROW_MAX. Splitting the two limits instead gave exactly 0 once both
-had wound down to KEEP_AWAY: routes 239/23a (2026-10-16), 2.4-2.6 m lanes, the guard sat in
-NARROW with offset 0 while the body was within 10 cm of the centre line 14% of the time, every
-time with 15+ cm more room on the right (the model rides ~8 cm left, ~12 cm in left bends).
-The balance moves at OFFSET_RAMP_RATE unless the side it moves away from is already inside its
-margin; NARROW_TAU 3 s. Route 23b (2026-10-17) construction zone: with 1 s and the fast guard
-rate the balance swung -0.16 -> +0.22 m within seconds as a flickering left wall (0.60 m
-margin vs 0.25 for a line) swapped in and out of the left slack.
+
+Each side's slack becomes a bound on the offset (hi = offset_used + right slack, lo =
+offset_used - left slack). A bound tightens at once and relaxes over BOUND_RELAX_TAU; a side
+that stops showing a boundary keeps its bound for BOUND_HOLD (WALL_HOLD for a wall). The
+offset is the nominal one clipped into [lo, hi]. When the window is empty (narrow lane) one
+side gets its margin first: a near radar wall, else on a single-lane road the left (oncoming)
+side; the other side's line or edge yields up to LINE_GIVE (WALL_GIVE against a wall, 0 when
+the blind-spot monitor sees a car there), and what is still missing is split. Without a
+priority (between two lanes of traffic) the deficit is split, NARROW_BIAS more room left.
+Routes 248-24b (2026-10-20/22) with the previous latched limits + equal-slack balance:
+- country roads sat in NARROW 23-39% of the time, in half of it with room on both sides (the
+  latched limits regrew only after 2 s at 0.05 m/s), and the balance centred the car: body to
+  the centre line 0.40 m in NARROW vs 0.67 m otherwise, offset ~0 instead of +0.06..+0.21;
+- A560 construction zone: the model took the old white line as the right boundary (yellow
+  lines further right), so both sides looked short; the balance hit its 0.30 m cap and the
+  body was 0.35 m (p10) from the left wall while the driver steered right.
+The offset is capped at OFFSET_CAP, WALL_CAP with a near wall (the plan follows ~half of a
+camera shift).
 A near wall FREEZES the offset where it was when the wall appeared (moving away stays allowed)
 for WALL_HOLD s after it was last seen. Forcing the target to 0 instead stepped it 0.25 <-> 0
 every 1-2 s along a flickering guardrail (route 23b, 36:56-37:41).
@@ -94,14 +99,14 @@ DEFAULT_WALL_CLEARANCE = 0.60  # m, car body to a radar wall (radar_walls.py)
 WALL_NEAR = 1.5  # m, body to a radar wall: no offset toward it
 GUARD_HORIZON = (0.5, 0.75, 1.0, 1.25, 1.5)  # s along the planned path
 GUARD_RELEASE_RATE = 0.2  # m/s
-GUARD_HYST = 0.10  # m
-GUARD_HOLD = 2.0  # s
-KEEP_AWAY = 0.15  # m the guard may push past 0, away from a line
-GUARD_OPEN = 0.35  # m, a limit at or beyond this is inactive (offset max is 0.30)
-NARROW_BIAS = 0.05  # m more clearance on the left (oncoming) side than on the right in a narrow lane
-NARROW_TAU = 3.0  # s, low-pass on the narrow-lane balance point (it feeds back through modeld)
-WALL_HOLD = 3.0  # s a near wall keeps the offset frozen after it was last seen
-NARROW_MAX = 0.30  # m; the balance watches both lines, and the plan only follows ~half a camera shift
+BOUND_RELAX_TAU = 1.5  # s, a bound relaxes over this (it tightens at once)
+BOUND_HOLD = 2.0  # s a side keeps its bound after its boundary was last seen
+WALL_HOLD = 3.0  # s a near wall keeps its bound and the offset frozen after it was last seen
+OFFSET_CAP = 0.30  # m
+WALL_CAP = 0.50  # m with a near wall: the plan only follows ~half a camera shift
+NARROW_BIAS = 0.05  # m more clearance on the left than on the right when the deficit is split
+LINE_GIVE = 0.25  # m a line or edge yields in a narrow lane (body ~at the paint at margin 0.25)
+WALL_GIVE = 0.45  # m it yields against a near wall (construction lines are often the old ones)
 LINE_MIN_PROB = 0.5
 EDGE_MAX_STD = 0.5
 # camera-mode status readout only
@@ -232,9 +237,10 @@ class LimitCause(IntEnum):
   NARROW = 9
 
 
-# a cut toward a real boundary; NARROW moves are fast only when urgent, a wall freeze never moves
-_FAST_CAUSES = (LimitCause.RIGHT_LINE, LimitCause.LEFT_LINE, LimitCause.RIGHT_EDGE, LimitCause.LEFT_EDGE,
-                LimitCause.RIGHT_WALL, LimitCause.LEFT_WALL)
+# a cut away from a real boundary is fast (moving back toward it, as the bound relaxes, is not);
+# NARROW moves are fast only when urgent, a wall freeze never moves
+_RIGHT_CAUSES = (LimitCause.RIGHT_LINE, LimitCause.RIGHT_EDGE, LimitCause.RIGHT_WALL)
+_LEFT_CAUSES = (LimitCause.LEFT_LINE, LimitCause.LEFT_EDGE, LimitCause.LEFT_WALL)
 
 
 @dataclass
@@ -249,6 +255,8 @@ class Slack:
   wall_left: bool = False
   wall_near_right: bool = False
   wall_near_left: bool = False
+  wall_slack_right: float | None = None  # the wall term alone
+  wall_slack_left: float | None = None
 
 
 def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, margin: float,
@@ -281,12 +289,14 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
     if wr is not None:
       out.wall_right = True
       gap = wr.at(x) - track - half_width
-      right.append((float(np.min(gap)) - wall_margin, LimitCause.RIGHT_WALL))
+      out.wall_slack_right = float(np.min(gap)) - wall_margin
+      right.append((out.wall_slack_right, LimitCause.RIGHT_WALL))
       out.wall_near_right = bool(np.min(gap) < WALL_NEAR)
     if wl is not None:
       out.wall_left = True
       gap = track - wl.at(x) - half_width
-      left.append((float(np.min(gap)) - wall_margin, LimitCause.LEFT_WALL))
+      out.wall_slack_left = float(np.min(gap)) - wall_margin
+      left.append((out.wall_slack_left, LimitCause.LEFT_WALL))
       out.wall_near_left = bool(np.min(gap) < WALL_NEAR)
     right = [r for r in right if np.isfinite(r[0])]
     left = [lf for lf in left if np.isfinite(lf[0])]
@@ -301,52 +311,71 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
   return out
 
 
-class ClearanceGuard:
-  """Per-side limits on the lane offset (m, + = right) from the planned slack."""
+class _Bound:
+  """One side's bound on the offset in "towards this side" coordinates (an upper bound):
+  tightens at once, relaxes over BOUND_RELAX_TAU, held for `hold` s once the side stops
+  showing a boundary, then open (None)."""
 
-  def __init__(self):
+  def __init__(self, hold: float):
+    self.hold = hold
     self.reset()
 
   def reset(self) -> None:
-    self.lim_right, self.lim_left = GUARD_OPEN, -GUARD_OPEN
+    self.value: float | None = None
+    self._age = 0.0
+
+  def update(self, raw: float | None, dt: float) -> None:
+    if raw is None:
+      self._age += dt
+      if self._age >= self.hold:
+        self.value = None
+      return
+    self._age = 0.0
+    if self.value is None or raw < self.value:
+      self.value = raw
+    else:
+      self.value += (1.0 - np.exp(-dt / BOUND_RELAX_TAU)) * (raw - self.value)
+
+
+class ClearanceGuard:
+  """Feasible window [lo, hi] for the lane offset (m, + = right) from the planned slack."""
+
+  def __init__(self):
+    self._b = [_Bound(BOUND_HOLD), _Bound(BOUND_HOLD)]  # any boundary (right, left)
+    self._w = [_Bound(WALL_HOLD), _Bound(WALL_HOLD)]  # radar walls only
+    self.reset()
+
+  def reset(self) -> None:
+    for b in self._b + self._w:
+      b.reset()
     self.slack = Slack()
-    self._ok_t = [0.0, 0.0]
-    self.balance: float | None = None
+    self._causes = [LimitCause.NONE, LimitCause.NONE]
     self._near_t = [WALL_HOLD, WALL_HOLD]  # s since a near wall was seen (right, left)
     self._freeze = [0.0, 0.0]  # offset when it appeared
+    self.single = False  # single-lane road: the left side is oncoming traffic
+    self.blindspot = (False, False)  # (right, left) car seen by the blind-spot monitor
+
+  @property
+  def hi(self) -> float | None:
+    return self._b[0].value
+
+  @property
+  def lo(self) -> float | None:
+    v = self._b[1].value
+    return None if v is None else -v
 
   def set_slack(self, slack: Slack, offset_used: float = 0.0, dt: float = DT_MDL) -> None:
     """offset_used: the offset (m, + = right) the model frame behind `slack` was run with."""
     self.slack = slack
-    if slack.right is None or slack.left is None:
-      self.balance = None
-      return
-    # shifting right by d takes d off the right slack and adds it to the left
-    b = float(np.clip(offset_used + 0.5 * (slack.right - slack.left + NARROW_BIAS), -NARROW_MAX, NARROW_MAX))
-    if self.balance is None:
-      self.balance = b
-    else:
-      self.balance += (1.0 - np.exp(-dt / NARROW_TAU)) * (b - self.balance)
-
-  def _side(self, i: int, slack: float | None, lim: float, offset: float, sign: float, dt: float) -> float:
-    # in "towards this side" coordinates the limit is an upper bound
-    lim_s, off_s = sign * lim, sign * offset
-    if slack is None:  # no boundary seen: hold
-      self._ok_t[i] = 0.0
-    elif slack < 0.0:
-      self._ok_t[i] = 0.0
-      lim_s = max(min(lim_s, off_s) - GUARD_RELEASE_RATE * dt, -KEEP_AWAY)
-    elif slack > GUARD_HYST:
-      self._ok_t[i] += dt
-      if self._ok_t[i] >= GUARD_HOLD:
-        lim_s = min(lim_s + OFFSET_RAMP_RATE * dt, GUARD_OPEN)
-    else:
-      self._ok_t[i] = 0.0
-    return sign * lim_s
+    # shifting right by d takes d off the right slack: bound = offset_used + slack, per side
+    for i, sign, sl, wsl, cause in ((0, 1.0, slack.right, slack.wall_slack_right, slack.right_cause),
+                                    (1, -1.0, slack.left, slack.wall_slack_left, slack.left_cause)):
+      self._b[i].update(None if sl is None else sign * offset_used + sl, dt)
+      self._w[i].update(None if wsl is None else sign * offset_used + wsl, dt)
+      if sl is not None:
+        self._causes[i] = cause
 
   def update(self, offset: float, dt: float = DT_CTRL) -> None:
-    self.lim_right = self._side(0, self.slack.right, self.lim_right, offset, 1.0, dt)
-    self.lim_left = self._side(1, self.slack.left, self.lim_left, offset, -1.0, dt)
     for i, near in enumerate((self.slack.wall_near_right, self.slack.wall_near_left)):
       if near:
         if self._near_t[i] >= WALL_HOLD:
@@ -361,21 +390,43 @@ class ClearanceGuard:
     slack = self.slack.left if step > 0.0 else self.slack.right
     return slack is not None and slack < 0.0
 
+  def _give(self, i: int, wall_prio: bool) -> float:
+    """How far side i may be crossed into its margin when the other side has priority."""
+    if self.blindspot[i] or self._w[i].value is not None:
+      return 0.0
+    return WALL_GIVE if wall_prio else LINE_GIVE
+
   def apply(self, target: float) -> tuple[float, LimitCause]:
-    if self.lim_left > self.lim_right:  # too close on both sides: balance the clearances
-      if self.balance is not None:
-        return self.balance, LimitCause.NARROW
-      return 0.5 * (self.lim_left + self.lim_right), LimitCause.NARROW
+    near = [t < WALL_HOLD for t in self._near_t]
+    cap = WALL_CAP if any(near) else OFFSET_CAP
+    hi, lo = self.hi, self.lo
     out, cause = target, LimitCause.NONE
-    if target > self.lim_right:
-      out, cause = self.lim_right, self.slack.right_cause
-    elif target < self.lim_left:
-      out, cause = self.lim_left, self.slack.left_cause
+    if hi is not None and lo is not None and lo > hi:  # too close on both sides
+      cause = LimitCause.NARROW
+      if near[1] and not near[0]:
+        prio = 1
+      elif near[0] and not near[1]:
+        prio = 0
+      else:
+        prio = 1 if self.single else None
+      if prio == 1:  # left first: the right side yields
+        hi_g = hi + self._give(0, near[1])
+        out = hi_g + 0.5 * max(lo - hi_g, 0.0) if lo > hi_g else lo
+      elif prio == 0:
+        lo_g = lo - self._give(1, near[0])
+        out = lo_g - 0.5 * max(lo_g - hi, 0.0) if lo_g > hi else hi
+      else:
+        out = 0.5 * (lo + hi + NARROW_BIAS)
+    elif hi is not None and target > hi:
+      out, cause = hi, self._causes[0]
+    elif lo is not None and target < lo:
+      out, cause = lo, self._causes[1]
+    out = float(np.clip(out, -cap, cap))
     # never shift toward a wall close to the body: freeze where the offset was when it appeared
     # (shifting away stays allowed)
-    if self._near_t[0] < WALL_HOLD and out > max(self._freeze[0], 0.0):
+    if near[0] and out > max(self._freeze[0], 0.0):
       out, cause = max(self._freeze[0], 0.0), LimitCause.WALL_NO_SHIFT_RIGHT
-    elif self._near_t[1] < WALL_HOLD and out < min(self._freeze[1], 0.0):
+    elif near[1] and out < min(self._freeze[1], 0.0):
       out, cause = min(self._freeze[1], 0.0), LimitCause.WALL_NO_SHIFT_LEFT
     return out, cause
 
@@ -448,7 +499,7 @@ class DynamicLaneCentering:
 
   def update(self, model_curvature: float, model_v2, model_updated: bool, model_valid: bool, v_ego: float,
              lat_active: bool, turn_signal: bool, driver_override: bool, applied_camera_offset: float | None = None,
-             walls=(None, None)) -> float:
+             walls=(None, None), blindspot=(False, False)) -> float:
     """Call every controlsd frame (DT_CTRL). Returns the (possibly) corrected curvature."""
     if not self.enabled:
       if self.active or self.correction != 0.0 or self.position != LanePosition.UNKNOWN:
@@ -485,12 +536,15 @@ class DynamicLaneCentering:
         else:
           cam = applied_camera_offset if applied_camera_offset is not None else self.camera_offset
           self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin), -cam)
+      self.guard.single = self.classifier.position == LanePosition.SINGLE
+      self.guard.blindspot = (bool(blindspot[1]), bool(blindspot[0]))
       self.guard.update(self.offset)
       self.offset_target, cause = self.guard.apply(nominal)
       self.limited = abs(self.offset_target - nominal) > CAMERA_STATUS_SETTLED
       self.limit_cause = cause if self.limited else LimitCause.NONE
-      fast = self.limited and (self.limit_cause in _FAST_CAUSES or
-                               (self.limit_cause == LimitCause.NARROW and self.guard.urgent(self.offset_target - self.offset)))
+      step = self.offset_target - self.offset
+      fast = self.limited and ((self.limit_cause in _RIGHT_CAUSES and step < 0.0) or (self.limit_cause in _LEFT_CAUSES and step > 0.0) or
+                               (self.limit_cause == LimitCause.NARROW and self.guard.urgent(step)))
       self._ramp_offset(GUARD_RELEASE_RATE if fast else OFFSET_RAMP_RATE)
       # modeld applies the offset; the model's lane lines and path are then in the shifted
       # frame, and the lane-position classifier only uses line-to-line distances

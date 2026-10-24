@@ -294,42 +294,71 @@ def test_guard_cuts_the_offset_when_the_plan_nears_the_line():
 def test_guard_keeps_away_from_a_line_the_model_rides():
   d = _dyn(LaneCenterOffset=0.0, LaneCenteringOffsetMode=1)
   _cam_run(d, _model(lane_right=False, model_y=0.7), 10.0)  # 1.75 - 0.7 - 0.94 = 0.11 < 0.25
-  assert d.offset == pytest.approx(-dlc.KEEP_AWAY) and d.camera_offset == pytest.approx(dlc.KEEP_AWAY)
+  assert d.offset == pytest.approx(-0.14, abs=0.01) and d.camera_offset == pytest.approx(0.14, abs=0.01)
 
 
 def test_guard_opens_on_lane_change():
   d = _dyn(LaneCenterOffset=0.3, LaneCenteringOffsetMode=1)
   _cam_run(d, _model(lane_right=False, model_y=0.6), 5.0)
-  assert d.guard.lim_right < 0.3
+  assert d.guard.hi < 0.3
   _cam_run(d, _model(lane_right=False, lane_change=2), 0.1)
-  assert d.guard.lim_right == dlc.GUARD_OPEN
+  assert d.guard.hi is None
 
 
-def test_guard_narrow_lane_balances_slightly_right():
-  g = dlc.ClearanceGuard()
-  g.set_slack(dlc.Slack(right=-0.15, left=-0.15))
-  for _ in range(500):
+def _pinched(g, right, left, single=False, blindspot=(False, False), n=50, **kw):
+  g.single, g.blindspot = single, blindspot
+  for _ in range(n):
+    g.set_slack(dlc.Slack(right=right, left=left, right_cause=dlc.LimitCause.RIGHT_LINE, left_cause=dlc.LimitCause.LEFT_LINE, **kw))
     g.update(0.0)
-  assert g.apply(0.3) == (pytest.approx(dlc.NARROW_BIAS / 2), dlc.LimitCause.NARROW)
-  # hugging the left line with room on the right: move right, capped at NARROW_MAX
-  g.reset()
-  g.set_slack(dlc.Slack(right=0.04, left=-0.06), offset_used=0.0)
-  for _ in range(500):
-    g.update(0.0)
-  g.lim_right, g.lim_left = -0.1, 0.1  # both pinched
-  assert g.apply(0.3) == (pytest.approx(0.5 * (0.04 + 0.06 + dlc.NARROW_BIAS)), dlc.LimitCause.NARROW)
-  g.set_slack(dlc.Slack(right=1.0, left=-1.0), offset_used=0.0)
-  for _ in range(1000):
-    g.set_slack(dlc.Slack(right=1.0, left=-1.0), offset_used=0.0)
-  assert g.apply(0.3)[0] == pytest.approx(dlc.NARROW_MAX, abs=1e-3)
+  return g.apply(0.3)
 
 
-def test_guard_narrow_lane_without_both_sides_splits_the_limits():
+def test_guard_window_clips_the_nominal_offset():
   g = dlc.ClearanceGuard()
-  g.set_slack(dlc.Slack(right=-0.15, left=None))
-  assert g.balance is None
-  g.lim_right, g.lim_left = -0.1, 0.1
-  assert g.apply(0.3) == (pytest.approx(0.0), dlc.LimitCause.NARROW)
+  assert _pinched(g, 0.12, 0.5) == (pytest.approx(0.12), dlc.LimitCause.RIGHT_LINE)
+  assert _pinched(dlc.ClearanceGuard(), 0.5, 0.5) == (pytest.approx(0.3), dlc.LimitCause.NONE)
+
+
+def test_narrow_single_lane_keeps_the_centre_line_clear():
+  # 10 cm short on both sides of a country road: the left (oncoming) side gets its margin, the
+  # right line yields; the old balance put the deficit on both sides
+  assert _pinched(dlc.ClearanceGuard(), -0.1, -0.1, single=True) == (pytest.approx(0.1), dlc.LimitCause.NARROW)
+  # more short than the right line may give: the rest is split
+  out, cause = _pinched(dlc.ClearanceGuard(), -0.3, -0.2, single=True)
+  assert cause == dlc.LimitCause.NARROW and out == pytest.approx(-0.05 + 0.5 * (0.2 + 0.05))
+
+
+def test_narrow_between_lanes_splits_with_a_slight_left_margin():
+  assert _pinched(dlc.ClearanceGuard(), -0.15, -0.15) == (pytest.approx(dlc.NARROW_BIAS / 2), dlc.LimitCause.NARROW)
+
+
+def test_narrow_with_a_near_wall_yields_the_far_line_unless_a_car_is_there():
+  kw = {'wall_left': True, 'wall_near_left': True, 'wall_slack_left': -0.2}
+  out, _ = _pinched(dlc.ClearanceGuard(), -0.2, -0.2, **kw)
+  assert out == pytest.approx(0.2)  # wall margin kept, the right line gives 0.2 of its 0.45
+  out, _ = _pinched(dlc.ClearanceGuard(), -0.2, -0.2, blindspot=(True, False), **kw)
+  assert out == pytest.approx(0.0)  # car alongside on the right: split, no give
+  # 0.5 m short both sides: the right line gives its 0.45, the rest is split
+  out, _ = _pinched(dlc.ClearanceGuard(), -0.5, -0.5, **kw)
+  assert out == pytest.approx(-0.05 + 0.5 * 0.55)
+  out, _ = _pinched(dlc.ClearanceGuard(), 0.4, -1.0, **kw)
+  assert out == pytest.approx(dlc.WALL_CAP)  # capped
+
+
+def test_bounds_tighten_at_once_and_relax_slowly():
+  g = dlc.ClearanceGuard()
+  g.set_slack(dlc.Slack(right=0.5, left=0.5))
+  g.set_slack(dlc.Slack(right=-0.1, left=0.5))
+  assert g.hi == pytest.approx(-0.1)
+  for _ in range(int(dlc.BOUND_RELAX_TAU / DT_MDL)):
+    g.set_slack(dlc.Slack(right=0.5, left=0.5))
+  assert g.hi == pytest.approx(0.5 - 0.6 / np.e, abs=0.02)
+  # a side that stops showing a boundary keeps its bound for BOUND_HOLD, then opens
+  for _ in range(int(dlc.BOUND_HOLD / DT_MDL) - 1):
+    g.set_slack(dlc.Slack(right=None, left=0.5))
+  assert g.hi is not None
+  g.set_slack(dlc.Slack(right=None, left=0.5))
+  assert g.hi is None
 
 
 def _narrow_model(cam, follow, wiggle=0.0, left=-1.17, right=1.28):
@@ -357,17 +386,17 @@ def _narrow_run(follow, seconds=40.0, guard=None):
 
 
 @pytest.mark.parametrize("follow", [1.0, 0.5])
-def test_narrow_lane_with_bends_balances_instead_of_centring_on_the_model(follow):
-  # bends drive both slacks below 0 in turn: both limits wind down to KEEP_AWAY and, with
-  # 0.07 m of total spare slack, can never regrow -- splitting them returned exactly 0
+def test_narrow_lane_with_bends_keeps_the_centre_line_side_clear(follow):
+  # 2.45 m lane, bends: the old latched limits wound down and stuck in NARROW, and the balance
+  # centred the car. Now it rides as far right as the right margin (0.25) allows, the rest
+  # of the lane goes to the left (oncoming) side
   d, track = _narrow_run(follow)
-  assert d.limit_cause == dlc.LimitCause.NARROW
   last = track[-int(16.0 / DT_CTRL):]  # two bend cycles
   left_clear, right_clear = last + 1.17 - 0.94, 1.28 - last - 0.94
-  assert np.mean(left_clear - right_clear) == pytest.approx(dlc.NARROW_BIAS, abs=0.03)
-  # it follows the bends to keep the balance (slowly, NARROW_TAU), so the left clearance stays up
+  assert np.mean(right_clear) == pytest.approx(0.25, abs=0.03)
+  assert np.mean(left_clear) > np.mean(right_clear)
   assert np.min(left_clear) > 0.17
-  assert np.ptp(d.offset_target - d.offset) < 0.1
+  assert np.ptp(d.offset_target - d.offset) < 0.15
 
 
 def _cam_run_walls(d, model, seconds, walls):
@@ -409,7 +438,7 @@ def test_near_wall_freezes_and_a_flicker_does_not_step_the_offset():
   assert -dlc.OFFSET_RAMP_RATE * 1.1 - 1e-6 <= d.offset < -0.01
 
 
-def test_narrow_balance_moves_slowly_unless_a_side_is_inside_its_margin():
+def test_narrow_moves_fast_only_when_a_side_is_inside_its_margin():
   g = dlc.ClearanceGuard()
   g.set_slack(dlc.Slack(right=0.05, left=0.0))
   assert not g.urgent(0.1) and not g.urgent(-0.1)
@@ -417,9 +446,16 @@ def test_narrow_balance_moves_slowly_unless_a_side_is_inside_its_margin():
   assert g.urgent(0.1) and not g.urgent(-0.1)
 
 
-def test_wall_margin_keeps_distance():
-  d = _dyn(LaneCenterOffset=0.0, LaneCenteringOffsetMode=1)
+@pytest.mark.parametrize("follow", [1.0, 0.5])
+def test_wall_margin_keeps_distance(follow):
+  d = _dyn(LaneCenterOffset=0.0, LaneCenteringOffsetMode=1, LaneCenteringDwell=0.0)
   wall = Wall(y=-1.3, slope=0.0, curvature=0.0, residual=0.02, points=12)  # body 0.36 m off, margin 0.6
-  _cam_run_walls(d, _model(lane_left=False), 5.0, (wall, None))
-  assert d.offset == pytest.approx(dlc.KEEP_AWAY)  # pushed right, away from the wall
+  cam = 0.0
+  for i in range(int(round(15.0 / DT_CTRL))):
+    upd = i % 5 == 0
+    if upd:
+      cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)
+    d.update(0.0, _narrow_model(cam, follow, left=-1.75, right=1.75), upd, True, V, True, False, False, cam, (wall, None))
+  track = -follow * cam
+  assert track + 1.3 - 0.94 == pytest.approx(0.6, abs=0.03)  # pushed right until the wall margin holds
   assert d.limit_cause == dlc.LimitCause.LEFT_WALL

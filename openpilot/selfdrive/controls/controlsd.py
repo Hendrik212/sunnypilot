@@ -195,7 +195,7 @@ class Controls(ControlsExt):
                                                        bool(self.sm.all_checks(['modelV2'])), CS.vEgo, CC.latActive,
                                                        bool(CS.leftBlinker or CS.rightBlinker), bool(CS.steeringPressed),
                                                        self.sm['modelDataV2SP'].cameraOffset if self.sm.seen['modelDataV2SP'] else None,
-                                                       self.lane_centre_walls())
+                                                       self.lane_centre_walls(), (CS.leftBlindspot, CS.rightBlindspot))
     # Lane-change pace shaping (sunnypilot/.../lane_change_shaper.py): tightens the
     # curvature-rate clamp while the model is executing a lane change, releases after.
     # Inert (factor 1.0) at the default LaneChangeSmoothing = 10.
