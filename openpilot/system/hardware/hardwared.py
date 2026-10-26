@@ -18,6 +18,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_HW
 from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
 from openpilot.common.hardware import HARDWARE, COMMA_HARDWARE
+from openpilot.common.hardware.hw import Paths
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.git import get_short_branch
 from openpilot.common.hardware.usb import CHESTNUT_FW_VERSION, CHESTNUT_USB_PRODUCT, get_usb_state, get_usb_topology, is_chestnut_usb_id, set_usb_state
@@ -29,6 +30,7 @@ from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.chestnut.monitoring import chestnut_state_thread
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
+from openpilot.system.hardware.watchdog import HardwareWatchdog
 from openpilot.common.version import terms_version, training_version, get_build_metadata, terms_version_sp
 
 ThermalStatus = log.DeviceState.ThermalStatus
@@ -194,7 +196,7 @@ def hw_state_thread(end_event, hw_queue):
     time.sleep(DT_HW)
 
 
-def hardware_thread(end_event, hw_queue) -> None:
+def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
   system_stats = LinuxSystemStats() if sys.platform == "linux" else None
   pm = messaging.PubMaster(['deviceState'])
   sm = messaging.SubMaster(["peripheralState", "gpsLocationExternal", "selfdriveState", "pandaStates", "chestnutState"], poll="pandaStates")
@@ -248,13 +250,16 @@ def hardware_thread(end_event, hw_queue) -> None:
   chestnut_status = ChestnutStatus()
   branch = get_short_branch()
 
+  watchdog.arm()
   while not end_event.is_set():
+    watchdog.stage('panda_receive')
     sm.update(PANDA_STATES_TIMEOUT)
 
     pandaStates = sm['pandaStates']
     peripheralState = sm['peripheralState']
 
     # handle requests to cycle system started state
+    watchdog.stage('onroad_cycle_params')
     if params.get_bool("OnroadCycleRequested"):
       params.put_bool("OnroadCycleRequested", False, block=True)
       offroad_cycle_count = sm.frame
@@ -280,6 +285,7 @@ def hardware_thread(end_event, hw_queue) -> None:
       continue
 
     msg = messaging.new_message('deviceState', valid=True)
+    watchdog.stage('thermal_read')
     msg.deviceState = thermal_config.get_msg()
     msg.deviceState.deviceType = HARDWARE.get_device_type()
 
@@ -288,11 +294,14 @@ def hardware_thread(end_event, hw_queue) -> None:
     except queue.Empty:
       pass
 
+    watchdog.stage('system_stats')
     memory_usage = system_stats.memory_usage_percent() if system_stats is not None else 0.
     cpu_usage = system_stats.cpu_usage_percent() if system_stats is not None else []
 
+    watchdog.stage('disk_free')
     msg.deviceState.freeSpacePercent = get_available_percent(default=100.0)
     msg.deviceState.memoryUsagePercent = int(round(memory_usage))
+    watchdog.stage('gpu_usage')
     msg.deviceState.gpuUsagePercent = int(round(HARDWARE.get_gpu_usage_percent()))
     online_cpu_usage = [int(round(n)) for n in cpu_usage]
     offline_cpu_usage = [0., ] * (len(msg.deviceState.cpuTempC) - len(online_cpu_usage))
@@ -307,16 +316,20 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     msg.deviceState.modemTempC = last_hw_state.modem_temps
 
+    watchdog.stage('screen_brightness')
     msg.deviceState.screenBrightnessPercent = HARDWARE.get_screen_brightness()
 
+    watchdog.stage('usb_and_chestnut_flash')
     set_usb_state(msg.deviceState, last_hw_state.usb_state)
     chestnut.update(started_ts is None, last_hw_state.usb_state)
     chestnut_state = sm["chestnutState"]
     chestnut_valid = sm.alive["chestnutState"] and sm.valid["chestnutState"]
+    watchdog.stage('chestnut_status')
     chestnut_status.update(started_ts is None, branch, last_hw_state.usb_state, chestnut.failed,
                            params.get_bool("ChestnutLoading"), params.get("ChestnutActive"),
                            chestnut_state if chestnut_valid else None, set_offroad_alert_if_changed)
     # this subset is only used for offroad
+    watchdog.stage('thermal_control')
     temp_sources = [
       msg.deviceState.memoryTempC,
       max(msg.deviceState.cpuTempC, default=0.),
@@ -346,6 +359,7 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     # **** starting logic ****
 
+    watchdog.stage('startup_params')
     startup_conditions["up_to_date"] = params.get("Offroad_ConnectivityNeeded") is None or params.get_bool("DisableUpdates") or params.get_bool("SnoozeUpdate")
     startup_conditions["no_excessive_actuation"] = params.get("Offroad_ExcessiveActuation") is None
     startup_conditions["not_uninstalling"] = not params.get_bool("DoUninstall")
@@ -361,9 +375,11 @@ def hardware_thread(end_event, hw_queue) -> None:
     startup_conditions["device_temp_engageable"] = thermal_status < ThermalStatus.overheated
 
     # ensure device is fully booted
+    watchdog.stage('hardware_booted')
     startup_conditions["device_booted"] = startup_conditions.get("device_booted", False) or HARDWARE.booted()
 
     # user-forced status
+    watchdog.stage('offroad_mode_params')
     offroad_mode = params.get_bool("OffroadMode")
     startup_conditions["not_always_offroad"] = not offroad_mode
     onroad_conditions["not_always_offroad"] = not offroad_mode
@@ -372,16 +388,19 @@ def hardware_thread(end_event, hw_queue) -> None:
     # only allow going onroad when:
     # - TIZI, or
     # - TICI and channel_type is "tici"
+    watchdog.stage('build_metadata')
     build_metadata = get_build_metadata()
     is_unsupported_combo = COMMA_HARDWARE and HARDWARE.get_device_type() == "tici" and build_metadata.channel_type != "tici"
     startup_conditions["not_tici"] = not is_unsupported_combo
     onroad_conditions["not_tici"] = not is_unsupported_combo
+    watchdog.stage('tici_support_alert')
     set_offroad_alert("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
 
     # if the temperature enters the danger zone, go offroad to cool down
     onroad_conditions["device_temp_good"] = thermal_status < ThermalStatus.critical
     extra_text = f"{offroad_comp_temp:.1f}C"
     show_alert = (not onroad_conditions["device_temp_good"] or not startup_conditions["device_temp_engageable"]) and onroad_conditions["ignition"]
+    watchdog.stage('temperature_alert')
     set_offroad_alert_if_changed("Offroad_TemperatureTooHigh", show_alert, extra_text=extra_text)
 
     if show_alert:
@@ -392,6 +411,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     if started_ts is None:
       should_start = should_start and all(startup_conditions.values())
 
+    watchdog.stage('engagement_params')
     if should_start != should_start_prev or (count == 0):
       params.put_bool("IsEngaged", False, block=True)
       engaged_prev = False
@@ -402,17 +422,20 @@ def hardware_thread(end_event, hw_queue) -> None:
         params.put_bool("IsEngaged", engaged, block=True)
         engaged_prev = engaged
 
+      watchdog.stage('engagement_kmsg')
       try:
         with open('/dev/kmsg', 'w') as kmsg:
           kmsg.write(f"<3>[hardware] engaged: {engaged}\n")
       except Exception:
         pass
 
+    watchdog.stage('power_save')
     should_pwrsave = not onroad_conditions["ignition"] and msg.deviceState.screenBrightnessPercent < 1e-3
     if should_pwrsave != pwrsave or (count == 0):
       HARDWARE.set_power_save(should_pwrsave)
     pwrsave = should_pwrsave
 
+    watchdog.stage('startup_transition')
     if should_start:
       off_ts = None
       if started_ts is None:
@@ -438,20 +461,25 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     # GitHub runner auto off: 9V is used as the threshold because most desktop runners
     # will rarely exceed 5V so 9V is set as our buffer between desk use and car use.
+    watchdog.stage('runner_voltage_param')
     params.put_bool("GithubRunnerSufficientVoltage", ((voltage or 0) and voltage > 9000))
 
+    watchdog.stage('power_monitor_calculate')
     power_monitor.calculate(voltage, onroad_conditions["ignition"])
     msg.deviceState.offroadPowerUsageUwh = power_monitor.get_power_used()
     msg.deviceState.carBatteryCapacityUwh = max(0, power_monitor.get_car_battery_capacity())
+    watchdog.stage('current_power_read')
     current_power_draw = HARDWARE.get_current_power_draw()
     statlog.sample("power_draw", current_power_draw)
     msg.deviceState.powerDrawW = current_power_draw
 
+    watchdog.stage('som_power_read')
     som_power_draw = HARDWARE.get_som_power_draw()
     statlog.sample("som_power_draw", som_power_draw)
     msg.deviceState.somPowerDrawW = som_power_draw
 
     # Check if we need to shut down
+    watchdog.stage('shutdown_check')
     if power_monitor.should_shutdown(onroad_conditions["ignition"], in_car, off_ts, started_seen):
       cloudlog.warning(f"shutting device down, offroad since {off_ts}")
       params.put_bool("DoShutdown", True, block=True)
@@ -459,13 +487,17 @@ def hardware_thread(end_event, hw_queue) -> None:
     msg.deviceState.started = started_ts is not None and not offroad_mode
     msg.deviceState.startedMonoTime = int(1e9*(started_ts or 0))
 
+    watchdog.stage('last_athena_ping_param')
     last_ping = params.get("LastAthenaPingTime")
     if last_ping is not None:
       msg.deviceState.lastAthenaPingTime = last_ping
 
     msg.deviceState.thermalStatus = thermal_status
+    watchdog.stage('publish_device_state')
     pm.send("deviceState", msg)
+    watchdog.published()
 
+    watchdog.stage('statlog')
     statlog.gauge("free_space_percent", msg.deviceState.freeSpacePercent)
     statlog.gauge("gpu_usage_percent", msg.deviceState.gpuUsagePercent)
     statlog.gauge("memory_usage_percent", msg.deviceState.memoryUsagePercent)
@@ -484,6 +516,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     statlog.gauge("screen_brightness_percent", msg.deviceState.screenBrightnessPercent)
 
     # report to server once every 10 minutes, or every 1s when thermally blocked
+    watchdog.stage('status_packet')
     rising_edge_started = should_start and not should_start_prev
     status_packet_interval = 1. if show_alert else 600.
     if rising_edge_started or (count % int(status_packet_interval / DT_HW)) == 0:
@@ -498,13 +531,16 @@ def hardware_thread(end_event, hw_queue) -> None:
 
       # save last one before going onroad
       if rising_edge_started:
+        watchdog.stage('last_offroad_status_param')
         try:
           params.put("LastOffroadStatusPacket", dat, block=True)
         except Exception:
           cloudlog.exception("failed to save offroad status")
 
+    watchdog.stage('network_metered_param')
     params.put_bool("NetworkMetered", msg.deviceState.networkMetered)
 
+    watchdog.stage('uptime_accounting')
     now_ts = time.monotonic()
     if off_ts:
       uptime_offroad += now_ts - max(last_uptime_ts, off_ts)
@@ -513,7 +549,9 @@ def hardware_thread(end_event, hw_queue) -> None:
     last_uptime_ts = now_ts
 
     if (count % int(60. / DT_HW)) == 0:
+      watchdog.stage('uptime_offroad_persist')
       params.put("UptimeOffroad", uptime_offroad, block=True)
+      watchdog.stage('uptime_onroad_persist')
       params.put("UptimeOnroad", uptime_onroad, block=True)
 
     count += 1
@@ -523,16 +561,19 @@ def hardware_thread(end_event, hw_queue) -> None:
 def main():
   hw_queue = queue.Queue(maxsize=1)
   end_event = threading.Event()
+  watchdog = HardwareWatchdog(os.path.join(os.path.dirname(Paths.crash_log_root()), 'hardwared-watchdog.log'))
+  diagnostic_thread = threading.Thread(target=watchdog.run, args=(end_event,), name='hardwared_watchdog', daemon=True)
 
   threads = [
     threading.Thread(target=hw_state_thread, args=(end_event, hw_queue)),
-    threading.Thread(target=hardware_thread, args=(end_event, hw_queue)),
+    threading.Thread(target=hardware_thread, args=(end_event, hw_queue, watchdog)),
   ]
 
   if COMMA_HARDWARE:
     threads.append(threading.Thread(target=touch_thread, args=(end_event,)))
     threads.append(threading.Thread(target=chestnut_state_thread, args=(end_event,)))
 
+  diagnostic_thread.start()
   for t in threads:
     t.start()
 
@@ -546,6 +587,7 @@ def main():
 
   for t in threads:
     t.join()
+  diagnostic_thread.join(timeout=1.)
 
 
 if __name__ == "__main__":
