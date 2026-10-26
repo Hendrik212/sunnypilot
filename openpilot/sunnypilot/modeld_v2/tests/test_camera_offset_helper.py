@@ -9,7 +9,9 @@ import numpy as np
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.common.transformations.orientation import rot_from_euler
-from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper, LaneCentreCameraOffset, LANE_CENTRE_MAX_RATE
+from openpilot.sunnypilot.modeld_v2.camera_offset_helper import (
+  CameraOffsetHelper, LaneCentreCameraOffset, LANE_CENTRE_MAX_RATE, LANE_CENTRE_MAX_OFFSET)
+from openpilot.sunnypilot.selfdrive.controls.lib.dynamic_lane_centering import WALL_CAP
 from openpilot.common.test import OpenpilotTestCase
 
 
@@ -143,7 +145,24 @@ class TestCameraOffset(OpenpilotTestCase):
       f.update(-0.3, True, 0.05)
     np.testing.assert_almost_equal(f.offset, -0.3)
     f.update(5.0, True, 100.0)
-    np.testing.assert_almost_equal(f.offset, 0.35)  # clipped
+    np.testing.assert_almost_equal(f.offset, LANE_CENTRE_MAX_OFFSET)  # clipped
     prev = f.offset
     np.testing.assert_almost_equal(f.update(-0.3, False, 0.05), prev - LANE_CENTRE_MAX_RATE * 0.05)  # stale -> towards 0
     np.testing.assert_almost_equal(f.update(float('nan'), True, 100.0), 0.0)
+
+  def test_wall_guard_request_reaches_model_camera_transform(self):
+    # 24f requested 0.50 m away from the wall, but the follower silently capped it at 0.35 m.
+    sm, main_transform, extra_transform = self._sm_and_transforms()
+    for requested in (-WALL_CAP, WALL_CAP):
+      follower = LaneCentreCameraOffset()
+      for _ in range(200):
+        previous = follower.offset
+        applied = follower.update(requested, True, 0.05)
+        assert abs(applied - previous) <= LANE_CENTRE_MAX_RATE * 0.05 + 1e-12
+      np.testing.assert_almost_equal(applied, requested)
+      main_out, extra_out = self.camera_offset.update(
+        main_transform, extra_transform, sm, False, extra_offset=applied, advance=False)
+      np.testing.assert_almost_equal(self.camera_offset.applied_offset, requested)
+      for result, original in ((main_out, main_transform), (extra_out, extra_transform)):
+        shear = result @ np.linalg.inv(original)
+        np.testing.assert_almost_equal(shear[0, 1], requested / 1.22, decimal=4)
