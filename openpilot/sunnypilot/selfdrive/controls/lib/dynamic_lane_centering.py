@@ -3,7 +3,7 @@ Dynamic lane centering: StarPilot's LaneCenteringController (lane_centering.py) 
 lane offset chosen by which lane the car is in.
 
   RIGHT / SINGLE lane -> +offset (right of the lane centre)
-  MIDDLE lane         ->  0      (dead centre)
+  MIDDLE lane         -> -LaneCenteringMiddleBias (left of the centre, cancels the model's right bias)
   LEFT lane           -> -offset (left of the lane centre)
   UNKNOWN             ->  0
 
@@ -15,6 +15,10 @@ NOT show up as a lane (outer prob ~0, edge 2-4 m out), a real neighbour lane doe
 >0.5, gap ~3.5 m, edge 5-8 m out). SINGLE (no lane either side: unmarked country road,
 centre line not seen, ramp) gets the RIGHT offset, so country-road RIGHT<->SINGLE flicker
 does not move the car.
+Middle lane bias: route 25b (2026-10-31, segs 18-21, Autobahn ~96 km/h, small CD210 model) with
+offset 0 in the MIDDLE lane put the car 0.08 m right of the lane centre and the plan 0.07 m right
+of it at 20 m, no guard limit. The camera offset moves the car ~75% of the shift there (0.20 m
+right offset in a RIGHT-lane stretch of the same drive: 0.08 -> 0.23 m), so 0.10 m left cancels it.
 
 Dwell: a class is adopted after `dwell` s of consistent frames when the position is unknown
 (start, after every lane change), but a change between two known classes ALSO needs
@@ -78,7 +82,8 @@ Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenteringOffsetMode,
 LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneCenteringDwell,
 LaneCenteringSwitchDist, LaneCenteringE2EAuthority,
 LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk,
-LaneCenteringMinClearance, LaneCenteringCarWidth, LaneCenteringWallClearance. Frame: model y positive to the RIGHT.
+LaneCenteringMinClearance, LaneCenteringCarWidth, LaneCenteringWallClearance,
+LaneCenteringMiddleBias. Frame: model y positive to the RIGHT.
 """
 from dataclasses import dataclass
 from enum import IntEnum
@@ -105,6 +110,7 @@ DEFAULT_MIN_CLEARANCE = 0.25  # m, car body to lane-line centre (the paint is ~0
 DEFAULT_CAR_WIDTH = 1.88  # m, Ioniq 6 without mirrors
 EDGE_EXTRA = 0.15  # m, extra margin to a road edge
 DEFAULT_WALL_CLEARANCE = 0.60  # m, car body to a radar wall (radar_walls.py)
+DEFAULT_MIDDLE_BIAS = 0.10  # m left of the lane centre in the MIDDLE lane (+ = left)
 WALL_NEAR = 1.5  # m, body to a radar wall: no offset toward it
 WALL_BEYOND_LINE = 0.4  # m; a wall further than this outside a confident lane line is not near
 GUARD_HORIZON = (0.5, 0.75, 1.0, 1.25, 1.5)  # s along the planned path
@@ -456,6 +462,7 @@ class DynamicLaneCentering:
   def __init__(self):
     self.enabled = False
     self.offset_mag = DEFAULT_OFFSET
+    self.middle_bias = DEFAULT_MIDDLE_BIAS
     self.pause_on_signal = True
     self.e2e_authority = 1.0
     self.controller = LaneCenteringController()
@@ -492,6 +499,7 @@ class DynamicLaneCentering:
     except (TypeError, ValueError):
       self.mode = OffsetMode.CAMERA
     self.offset_mag = _get_float(params, "LaneCenterOffset", DEFAULT_OFFSET, 0.0, 0.3)
+    self.middle_bias = _get_float(params, "LaneCenteringMiddleBias", DEFAULT_MIDDLE_BIAS, -0.2, 0.2)
     self.pause_on_signal = params.get_bool("LaneCenteringPauseOnSignal")
     self.e2e_authority = _get_float(params, "LaneCenteringE2EAuthority", 1.0, 0.0, 1.0)
     self.controller.set_tuning(_get_float(params, "LaneCenteringGain", 0.30, 0.0, 1.0),
@@ -544,7 +552,10 @@ class DynamicLaneCentering:
         self._lines_ok = len(probs) >= 3 and min(probs[1], probs[2]) >= CAMERA_STATUS_MIN_PROB
       except (AttributeError, TypeError):
         self._lines_ok = False
-    nominal = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
+    if self.classifier.position == LanePosition.MIDDLE:
+      nominal = -self.middle_bias
+    else:
+      nominal = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
 
     if self.mode == OffsetMode.CAMERA:
       if model_updated:

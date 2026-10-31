@@ -269,6 +269,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LaneCenteringMinClearance", {PERSISTENT | BACKUP, FLOAT, "0.25"}},
     {"LaneCenteringCarWidth", {PERSISTENT | BACKUP, FLOAT, "1.88"}},
     {"LaneCenteringWallClearance", {PERSISTENT | BACKUP, FLOAT, "0.60"}},
+    {"LaneCenteringMiddleBias", {PERSISTENT | BACKUP, FLOAT, "0.10"}},
     {"SteerHeadroomCan", {PERSISTENT | BACKUP, FLOAT, "600"}},
     {"SteerDeltaDownLow", {PERSISTENT | BACKUP, INT, "10"}},
     {"LagdCityDelayBoost", {PERSISTENT | BACKUP, FLOAT, "0.30"}},

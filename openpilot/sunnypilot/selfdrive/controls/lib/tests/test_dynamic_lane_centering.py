@@ -131,12 +131,21 @@ def _run(d, model, seconds, lat_active=True):
   return out
 
 
-@pytest.mark.parametrize("left,right,sign", [(True, False, 1.0), (False, False, 1.0), (True, True, 0.0), (False, True, -1.0)])
-def test_offset_target_by_lane(left, right, sign):
+@pytest.mark.parametrize("left,right,expected", [(True, False, 0.15), (False, False, 0.15), (True, True, -dlc.DEFAULT_MIDDLE_BIAS),
+                                                  (False, True, -0.15)])
+def test_offset_target_by_lane(left, right, expected):
   d = _dyn()
   _run(d, _model(lane_left=left, lane_right=right), 10.0)
-  assert d.offset_target == pytest.approx(sign * 0.15)
-  assert d.offset == pytest.approx(sign * 0.15)
+  assert d.offset_target == pytest.approx(expected)
+  assert d.offset == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("bias,expected", [(0.0, 0.0), (0.06, -0.06), (-0.05, 0.05), (1.0, -0.2)])
+def test_middle_lane_bias_is_left_of_the_centre(bias, expected):
+  # route 25b: the model alone sits ~0.08 m right of the centre in the middle lane
+  d = _dyn(LaneCenteringMiddleBias=bias)
+  _run(d, _model(lane_left=True, lane_right=True), 10.0)
+  assert d.offset_target == pytest.approx(expected)
 
 
 def test_offset_is_rate_limited():
@@ -421,7 +430,7 @@ def test_no_shift_toward_a_near_wall():
 
 def test_near_wall_freezes_and_a_flicker_does_not_step_the_offset():
   St = dlc.LaneCenteringStatus
-  d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0)
+  d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0, LaneCenteringMiddleBias=0.0)
   far = Wall(y=-2.6, slope=0.0, curvature=0.0, residual=0.02, points=12)
   near = Wall(y=-2.0, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 0.25 m beyond the left line
   _cam_run_walls(d, _model(), 15.0, (far, None))  # middle lane: offset 0
