@@ -12,6 +12,50 @@ from datetime import datetime, UTC
 from typing import NamedTuple
 
 
+def _read(path: str, limit: int = 512) -> str | None:
+  try:
+    with open(path) as f:
+      return f.read(limit).strip()
+  except OSError:
+    return None
+
+
+def system_state(native_id: int | None, max_tasks: int = 24) -> dict:
+  """What the kernel was doing during a stall: pressure, the publisher's wait channel, and
+  tasks in uninterruptible sleep (D). /proc reads only, bounded."""
+  state: dict = {'loadavg': _read('/proc/loadavg')}
+  for res in ('io', 'cpu', 'memory'):
+    state[f'pressure_{res}'] = _read(f'/proc/pressure/{res}')
+  meminfo = _read('/proc/meminfo', 4096) or ''
+  state['meminfo'] = {k: v.strip() for k, _, v in (line.partition(':') for line in meminfo.splitlines())
+                      if k in ('MemAvailable', 'Dirty', 'Writeback', 'SwapFree')}
+  if native_id is not None:
+    stat = _read(f'/proc/self/task/{native_id}/stat') or ''
+    state['publisher_task'] = {'state': (stat.rpartition(')')[2].split() or [None])[0], 'wchan': _read(f'/proc/self/task/{native_id}/wchan')}
+  blocked = []
+  try:
+    pids = [p for p in os.listdir('/proc') if p.isdigit()]
+  except OSError:
+    pids = []
+  for pid in pids:
+    try:
+      tids = os.listdir(f'/proc/{pid}/task')
+    except OSError:
+      continue
+    for tid in tids:
+      stat = _read(f'/proc/{pid}/task/{tid}/stat')
+      if not stat:
+        continue
+      comm, _, rest = stat.partition('(')[2].rpartition(')')
+      if rest.split()[:1] == ['D']:
+        blocked.append({'pid': int(pid), 'tid': int(tid), 'comm': comm, 'wchan': _read(f'/proc/{pid}/task/{tid}/wchan')})
+        if len(blocked) >= max_tasks:
+          state['d_tasks'] = blocked
+          return state
+  state['d_tasks'] = blocked
+  return state
+
+
 class Snapshot(NamedTuple):
   stage: str
   stage_started: float
@@ -97,6 +141,10 @@ class HardwareWatchdog:
       for tid, frame in frames.items()
     }
     del frames
+    try:
+      event['system'] = system_state(self.native_id)
+    except Exception as e:  # diagnostics only
+      event['system'] = {'error': repr(e)}
     events.append(event)
     self.reported_publication = snapshot.last_publication
     self.next_dump = now + self.REPEAT_SECONDS

@@ -108,6 +108,7 @@ else:
 OFFROAD_DANGER_TEMP = 85 if HARDWARE.get_device_type() == "mici" else 75
 
 prev_offroad_states: dict[str, tuple[bool, str | None]] = {}
+prev_bool_params: dict[str, bool] = {}
 
 
 
@@ -116,6 +117,14 @@ def set_offroad_alert_if_changed(offroad_alert: str, show_alert: bool, extra_tex
     return
   prev_offroad_states[offroad_alert] = (show_alert, extra_text)
   set_offroad_alert(offroad_alert, show_alert, extra_text)
+
+def put_bool_if_changed(params: Params, key: str, value: bool) -> None:
+  # every param write takes the params lock and fsyncs; in the publish loop that blocked
+  # deviceState for up to 5.6 s (hardwared-watchdog.log, Oct 27 - Nov 1)
+  if prev_bool_params.get(key) == value:
+    return
+  prev_bool_params[key] = value
+  params.put_bool(key, value)
 
 def touch_thread(end_event):
   count = 0
@@ -394,7 +403,7 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
     startup_conditions["not_tici"] = not is_unsupported_combo
     onroad_conditions["not_tici"] = not is_unsupported_combo
     watchdog.stage('tici_support_alert')
-    set_offroad_alert("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
+    set_offroad_alert_if_changed("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
 
     # if the temperature enters the danger zone, go offroad to cool down
     onroad_conditions["device_temp_good"] = thermal_status < ThermalStatus.critical
@@ -462,7 +471,7 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
     # GitHub runner auto off: 9V is used as the threshold because most desktop runners
     # will rarely exceed 5V so 9V is set as our buffer between desk use and car use.
     watchdog.stage('runner_voltage_param')
-    params.put_bool("GithubRunnerSufficientVoltage", ((voltage or 0) and voltage > 9000))
+    put_bool_if_changed(params, "GithubRunnerSufficientVoltage", bool((voltage or 0) and voltage > 9000))
 
     watchdog.stage('power_monitor_calculate')
     power_monitor.calculate(voltage, onroad_conditions["ignition"])
@@ -538,7 +547,7 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
           cloudlog.exception("failed to save offroad status")
 
     watchdog.stage('network_metered_param')
-    params.put_bool("NetworkMetered", msg.deviceState.networkMetered)
+    put_bool_if_changed(params, "NetworkMetered", msg.deviceState.networkMetered)
 
     watchdog.stage('uptime_accounting')
     now_ts = time.monotonic()

@@ -4,7 +4,8 @@ import time
 
 import pytest
 
-from openpilot.system.hardware.watchdog import HardwareWatchdog
+from openpilot.system.hardware import watchdog as watchdog_module
+from openpilot.system.hardware.watchdog import HardwareWatchdog, system_state
 
 
 class Clock:
@@ -185,3 +186,23 @@ def test_blocked_diagnostic_writer_does_not_block_publication(tmp_path, monkeypa
     release.set()
     diagnostic.join(2.)
   assert not diagnostic.is_alive()
+
+
+def test_stall_records_the_system_state(tmp_path):
+  clock = Clock()
+  watchdog = HardwareWatchdog(str(tmp_path / 'watchdog.log'), clock=clock)
+  watchdog.arm()
+  clock.now += 2.
+  event = watchdog.poll()[-1]
+  state = event['system']
+  assert state['loadavg'] is not None
+  assert state['publisher_task']['state'] in ('R', 'S')
+  assert isinstance(state['d_tasks'], list)
+  json.dumps(event)
+
+
+def test_system_state_is_bounded_and_survives_missing_proc_files(monkeypatch):
+  assert len(system_state(threading.get_native_id(), max_tasks=0)['d_tasks']) <= 1
+  monkeypatch.setattr(watchdog_module, '_read', lambda path, limit=512: None)
+  state = system_state(None)
+  assert state['pressure_io'] is None and state['d_tasks'] == [] and 'publisher_task' not in state
