@@ -30,6 +30,7 @@ from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.chestnut.monitoring import chestnut_state_thread
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
+from openpilot.system.hardware.thermal_reader import ThermalReader
 from openpilot.system.hardware.watchdog import HardwareWatchdog
 from openpilot.common.version import terms_version, training_version, get_build_metadata, terms_version_sp
 
@@ -252,7 +253,9 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
   last_uptime_ts: float = time.monotonic()
 
   HARDWARE.initialize_hardware()
-  thermal_config = HARDWARE.get_thermal_config()
+  thermal_reader = ThermalReader(HARDWARE.get_thermal_config())
+  thermal_reader.read_once()
+  threading.Thread(target=thermal_reader.run, args=(end_event,), name='thermal_reader', daemon=True).start()
 
   fan_controller = FanController(int(1./DT_HW))
   chestnut = Chestnut()
@@ -295,7 +298,7 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
 
     msg = messaging.new_message('deviceState', valid=True)
     watchdog.stage('thermal_read')
-    msg.deviceState = thermal_config.get_msg()
+    msg.deviceState = thermal_reader.latest()
     msg.deviceState.deviceType = HARDWARE.get_device_type()
 
     try:
