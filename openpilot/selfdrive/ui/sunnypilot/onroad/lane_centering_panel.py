@@ -7,7 +7,8 @@ bottom-right corner with a one-line status strip beside it, so what lane centeri
 tracked radar wall. Everything sits as low as it can (the rear-view mirror hides the top of
 the screen): above the bottom developer bar, lifted above a small/mid alert while one shows.
 Tapping opens a panel that grows upward with the pill in its bottom row (so it closes where it
-opened) and, from the bottom up, the status line, an on/off button with a live
+opened; beside the pill the title and the steering delay setting, LagdToggleDelay) and, from the
+bottom up, the status line, an on/off button with a live
 readout from lateralTuneStateSP (lane position, applied offset, spare clearance per side,
 walls) and -/+ rows for LaneCenterOffset and LaneCenteringGain (trim mode) or
 LaneCenteringMinClearance (camera mode). The buttons only write Params -- controlsd picks
@@ -121,6 +122,7 @@ class LaneCenteringPanel(Widget):
     self._enabled = False
     self._camera_mode = True
     self._values = {k[0]: k[3] for k in ALL_KNOBS}
+    self._delay: float | None = None
     self._last_refresh = 0.0
     self._hit: dict[str, rl.Rectangle] = {}
 
@@ -140,6 +142,10 @@ class LaneCenteringPanel(Widget):
         self._values[key] = min(max(float(self._params.get(key, return_default=True)), lo), hi)
       except (TypeError, ValueError):
         pass
+    try:
+      self._delay = float(self._params.get("LagdToggleDelay", return_default=True))
+    except (TypeError, ValueError):
+      self._delay = None
 
   def _update_state(self) -> None:
     self._refresh_params()
@@ -263,7 +269,10 @@ class LaneCenteringPanel(Widget):
       self._arrow(pill, status in ARROW_LEFT)
 
     x0 = rect.x + PAD
-    self._text("LANE CENTER", x0, pill.y + (PILL_H - 50) / 2, 50)
+    # title and the steering delay setting, two lines beside the pill
+    self._text("LANE CENTER", x0, pill.y + 8, 44)
+    delay = "delay --" if self._delay is None else f"delay {self._delay:.2f} s"
+    self._text(delay, x0, pill.y + 60, 40, GREY)
 
     # status: shrink to fit the long guard reasons
     y_status = pill.y - ROW_H + 30
