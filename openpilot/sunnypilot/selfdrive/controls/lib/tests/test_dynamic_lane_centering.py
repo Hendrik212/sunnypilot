@@ -422,10 +422,63 @@ def test_no_shift_toward_a_near_wall():
   _cam_run_walls(d, _model(lane_left=False), 15.0, (wall, None))  # LEFT lane -> offset left
   assert d.offset == pytest.approx(-0.25)
   wall = Wall(y=-1.85, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 0.91 m from the body, 0.35 m beyond the line
-  _cam_run_walls(d, _model(lane_left=False), 0.5, (wall, None))
-  # frozen where it was: no further toward the wall, but no step back to the centre either
-  _cam_run_walls(d, _model(lane_left=False), 3.0, (wall, None))
-  assert d.offset == pytest.approx(-0.25, abs=1e-6)
+  # route 25d: the offset toward the wall goes back to 0 at the ramp rate, never a step
+  offs = []
+  for _ in range(40):
+    _cam_run_walls(d, _model(lane_left=False), 0.25, (wall, None))
+    offs.append(d.offset)
+  assert np.max(np.diff([-0.25] + offs)) <= dlc.OFFSET_RAMP_RATE * 0.25 + 1e-6
+  assert d.offset == pytest.approx(0.0, abs=1e-6)
+  assert d.limit_cause == dlc.LimitCause.WALL_NO_SHIFT_LEFT
+
+
+def test_wall_near_is_also_judged_at_the_car():
+  m = _model(lane_left=False)
+  # the plan ahead is 0.5 m right of the car: ahead the wall looks 1.86 m off (not near), at the
+  # car it is 1.36 m off and sits at the line -- near; the slack stays on the plan
+  m.position = _path(0.5)
+  wall = Wall(y=-2.3, slope=0.0, curvature=0.0, residual=0.02, points=12)
+  sl = dlc.plan_slack(m, V, 0.0, 0.94, 0.25, (wall, None), 0.6)
+  assert sl.wall_near_left
+  assert sl.wall_slack_left == pytest.approx(2.8 - 0.94 - 0.6)
+
+
+def test_between_two_walls_the_target_is_their_middle():
+  d = _dyn(LaneCenterOffset=0.2, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0, LaneCenteringMinClearance=0.0)
+  # route 25d: walls 1.45 m left / 2.2 m right of the car, lines at -1.75/+1.75: the middle is
+  # 0.375 m right of the lane centre; the LEFT-lane offset would have been -0.2
+  walls = (Wall(y=-1.45, slope=0.0, curvature=0.0, residual=0.02, points=12),
+           Wall(y=2.2, slope=0.0, curvature=0.0, residual=0.02, points=12))
+  sl = dlc.plan_slack(_model(lane_left=False), V, 0.0, 0.94, 0.0, walls, 0.0)
+  assert sl.wall_near_left and sl.wall_mid == pytest.approx(0.375)
+  cam = 0.0
+  for i in range(int(round(20.0 / DT_CTRL))):
+    upd = i % 5 == 0
+    if upd:
+      cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)
+    # the lines here stay put in the real frame (the car does not move), so do the walls
+    walls = tuple(Wall(y=y, slope=0.0, curvature=0.0, residual=0.02, points=12) for y in (-1.45, 2.2))
+    d.update(0.0, _narrow_model(cam, 1.0, left=-1.75, right=1.75), upd, True, V, True, False, False, cam, walls)
+  assert d.offset_target == pytest.approx(0.375, abs=1e-3)
+  assert d.offset == pytest.approx(0.375, abs=1e-3)
+
+
+def test_a_wall_inside_the_model_line_allows_a_bigger_push():
+  g = dlc.ClearanceGuard()
+  sl = dlc.Slack(right=0.0, left=-0.8, wall_left=True, wall_near_left=True, wall_inside_left=True, wall_slack_left=-0.8)
+  g.set_slack(sl)
+  g.update()
+  # route 25d: the model's right line ran through the car as well -- it yields more
+  assert g.apply(0.0)[0] == pytest.approx(dlc.WALL_INSIDE_GIVE + 0.5 * (0.8 - dlc.WALL_INSIDE_GIVE))
+  g = dlc.ClearanceGuard()
+  g.set_slack(dlc.Slack(right=0.0, left=-1.2, wall_left=True, wall_near_left=True, wall_inside_left=True, wall_slack_left=-1.2))
+  g.update()
+  assert g.apply(0.0)[0] == pytest.approx(dlc.WALL_INSIDE_CAP)
+  g = dlc.ClearanceGuard()
+  sl.wall_inside_left = False
+  g.set_slack(sl)
+  g.update()
+  assert g.apply(0.0)[0] == pytest.approx(dlc.WALL_CAP)
 
 
 def test_near_wall_freezes_and_a_flicker_does_not_step_the_offset():
@@ -435,7 +488,7 @@ def test_near_wall_freezes_and_a_flicker_does_not_step_the_offset():
   near = Wall(y=-2.0, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 0.25 m beyond the left line
   _cam_run_walls(d, _model(), 15.0, (far, None))  # middle lane: offset 0
   assert d.offset == pytest.approx(0.0)
-  # a near left wall appears while the lane position asks for a left offset: frozen at 0
+  # a near left wall appears while the lane position asks for a left offset: held at 0
   _cam_run_walls(d, _model(lane_left=False), 5.0, (near, None))
   assert d.offset == pytest.approx(0.0, abs=1e-6)
   assert d.status == St.LIMITED and d.limit_cause == dlc.LimitCause.WALL_NO_SHIFT_LEFT
