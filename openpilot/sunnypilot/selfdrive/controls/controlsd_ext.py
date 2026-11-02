@@ -13,6 +13,7 @@ from opendbc.car import structs
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
+from openpilot.selfdrive.controls.lib.drive_helpers import MAX_LATERAL_ACCEL_NO_ROLL
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
@@ -34,6 +35,15 @@ CITY_SPEED_KPH = 50.0
 HIGHWAY_SPEED_KPH = 80.0
 MAX_DELAY = 0.50
 
+# Low-speed lateral accel cap (MaxLateralAccel param). Stock clip_curvature caps the model's
+# command at 3.0 m/s^2; in tight country-road corners the model asks 3.6-5.0 and the driver
+# has to help (route 25d serpentine, Nov 2026). The param raises the cap below
+# LAT_ACCEL_FULL_KPH, fading back to stock by LAT_ACCEL_STOCK_KPH so highway behaviour is
+# unchanged. Clamped to [stock, LAT_ACCEL_MAX]; the default 3.0 is a no-op.
+LAT_ACCEL_FULL_KPH = 60.0
+LAT_ACCEL_STOCK_KPH = 80.0
+LAT_ACCEL_MAX = 4.5
+
 
 class ControlsExt(ModelStateBase):
   def __init__(self, CP: structs.CarParams, params: Params):
@@ -51,6 +61,7 @@ class ControlsExt(ModelStateBase):
     self.lagd_toggle = True
     self.city_speed_kph = CITY_SPEED_KPH
     self.highway_speed_kph = HIGHWAY_SPEED_KPH
+    self.lat_accel_low_speed = MAX_LATERAL_ACCEL_NO_ROLL
 
     cloudlog.info("controlsd_ext is waiting for CarParamsSP")
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
@@ -111,6 +122,11 @@ class ControlsExt(ModelStateBase):
       self.blinker_pause_lateral.get_params()
       self.lane_change_shaper.get_params(self.params)
       self.lane_centering.get_params(self.params)
+      try:
+        v = float(self.params.get("MaxLateralAccel", return_default=True))
+      except (TypeError, ValueError):
+        v = MAX_LATERAL_ACCEL_NO_ROLL
+      self.lat_accel_low_speed = min(max(v, MAX_LATERAL_ACCEL_NO_ROLL), LAT_ACCEL_MAX)
 
       if self.CP.lateralTuning.which() == 'torque':
         self.lat_delay = get_lat_delay(self.params, sm["lateralDelay"].lateralDelay)
@@ -134,6 +150,16 @@ class ControlsExt(ModelStateBase):
           profile.get_params(self.params)
 
       self._param_update_time = time.monotonic()
+
+  @staticmethod
+  def speed_dependent_lat_accel(v_ego: float, low_speed_accel: float) -> float:
+    """low_speed_accel up to LAT_ACCEL_FULL_KPH, linear fade to the stock cap by
+    LAT_ACCEL_STOCK_KPH, stock above."""
+    ratio = min(max((v_ego * 3.6 - LAT_ACCEL_FULL_KPH) / (LAT_ACCEL_STOCK_KPH - LAT_ACCEL_FULL_KPH), 0.0), 1.0)
+    return low_speed_accel + ratio * (MAX_LATERAL_ACCEL_NO_ROLL - low_speed_accel)
+
+  def max_lat_accel(self, v_ego: float) -> float:
+    return self.speed_dependent_lat_accel(v_ego, self.lat_accel_low_speed)
 
   def lane_centre_walls(self):
     """(left, right) radar walls for the clearance guard; parsed only when radard sends, so the

@@ -202,7 +202,7 @@ class Controls(ControlsExt):
     jerk_factor = self.lane_change_shaper.update(in_lane_change and CC.latActive, CS.vEgo,
                                                  new_desired_curvature, self.desired_curvature)
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll,
-                                                               jerk_factor)
+                                                               jerk_factor, self.max_lat_accel(CS.vEgo))
     lat_delay = self._effective_lat_delay(CS.vEgo) + LAT_SMOOTH_SECONDS
 
     actuators.curvature = self.desired_curvature
