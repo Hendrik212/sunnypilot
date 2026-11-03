@@ -343,7 +343,8 @@ class Car:
       # Once a second: card shares the saturated core 4 with controlsd and selfdrived.
       if i % 10 == 0:
         set_live_limits(self.params.get("SteerHeadroomCan", return_default=True),
-                        self.params.get("SteerDeltaDownLow", return_default=True))
+                        self.params.get("SteerDeltaDownLow", return_default=True),
+                        self.params.get("SteerDriverAllowanceLow", return_default=True))
       i += 1
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl

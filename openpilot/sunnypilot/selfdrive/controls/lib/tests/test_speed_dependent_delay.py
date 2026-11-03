@@ -84,3 +84,10 @@ def test_zero_boost_ignores_endpoints():
   for v in (5.0, 60.0 / 3.6, 90.0 / 3.6, 120.0 / 3.6):
     d = ControlsExt.speed_dependent_delay(v, 0.33, 0.0, 80.0, 100.0)
     assert math.isclose(d, 0.33, abs_tol=1e-9)
+
+
+def test_max_delay_cap_is_passed_through():
+  # Nov 2026: base 0.38 + boost 0.30 was capped at 0.50; LagdMaxDelay 0.68 lets the boost through
+  assert math.isclose(ControlsExt.speed_dependent_delay(10.0, 0.38, 0.30), 0.50, abs_tol=1e-9)
+  assert math.isclose(ControlsExt.speed_dependent_delay(10.0, 0.38, 0.30, max_delay=0.68), 0.68, abs_tol=1e-9)
+  assert math.isclose(ControlsExt.speed_dependent_delay(30.0, 0.38, 0.30, max_delay=0.68), 0.38, abs_tol=1e-9)

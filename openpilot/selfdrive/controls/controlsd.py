@@ -102,7 +102,7 @@ class Controls(ControlsExt):
     directly when LagdToggle is True, so the boost has no effect)."""
     if self.city_delay_boost > 0.0 and not self.lagd_toggle:
       return self.speed_dependent_delay(v_ego, self.lat_delay, self.city_delay_boost,
-                                        self.city_speed_kph, self.highway_speed_kph)
+                                        self.city_speed_kph, self.highway_speed_kph, self.max_delay)
     return self.lat_delay
 
   def state_control(self):

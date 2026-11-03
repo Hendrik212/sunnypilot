@@ -33,7 +33,8 @@ from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v3 import Lat
 # LagdCitySpeedKmh / LagdHighwaySpeedKmh params (<=0 = the code default here).
 CITY_SPEED_KPH = 50.0
 HIGHWAY_SPEED_KPH = 80.0
-MAX_DELAY = 0.50
+MAX_DELAY = 0.50  # default of the live LagdMaxDelay cap (clamped MAX_DELAY_RANGE)
+MAX_DELAY_RANGE = (0.3, 0.8)
 
 # Low-speed lateral accel cap (MaxLateralAccel param). Stock clip_curvature caps the model's
 # command at 3.0 m/s^2; in tight country-road corners the model asks 3.6-5.0 and the driver
@@ -61,6 +62,7 @@ class ControlsExt(ModelStateBase):
     self.lagd_toggle = True
     self.city_speed_kph = CITY_SPEED_KPH
     self.highway_speed_kph = HIGHWAY_SPEED_KPH
+    self.max_delay = MAX_DELAY
     self.lat_accel_low_speed = MAX_LATERAL_ACCEL_NO_ROLL
 
     cloudlog.info("controlsd_ext is waiting for CarParamsSP")
@@ -100,15 +102,16 @@ class ControlsExt(ModelStateBase):
   @staticmethod
   def speed_dependent_delay(v_ego: float, highway_delay: float, city_boost: float,
                             city_speed_kph: float = CITY_SPEED_KPH,
-                            highway_speed_kph: float = HIGHWAY_SPEED_KPH) -> float:
-    """Highway delay at high speed, highway + city_boost (capped at MAX_DELAY) at low speed,
+                            highway_speed_kph: float = HIGHWAY_SPEED_KPH, max_delay: float = MAX_DELAY) -> float:
+    """Highway delay at high speed, highway + city_boost (capped at max_delay) at low speed,
     linear fade between city_speed_kph and highway_speed_kph. city_boost <= 0 = highway_delay
     everywhere. Endpoints default to the module constants (50/80 km/h) but are live-overridable
-    via LagdCitySpeedKmh / LagdHighwaySpeedKmh (the instance passes its cached values)."""
-    highway_delay = min(highway_delay, MAX_DELAY)
+    via LagdCitySpeedKmh / LagdHighwaySpeedKmh (the instance passes its cached values), the cap
+    via LagdMaxDelay (at 0.50 a 0.38 base left only 0.12 s of boost, Nov 2026)."""
+    highway_delay = min(highway_delay, max_delay)
     if city_boost <= 0.0:
       return highway_delay
-    city_delay = min(highway_delay + city_boost, MAX_DELAY)
+    city_delay = min(highway_delay + city_boost, max_delay)
     speed_kph = v_ego * 3.6
     if speed_kph <= city_speed_kph:
       return city_delay
@@ -145,6 +148,11 @@ class ControlsExt(ModelStateBase):
           except (TypeError, ValueError):
             v = default
           setattr(self, attr, default if v <= 0.0 else v)
+        try:
+          v = float(self.params.get("LagdMaxDelay", return_default=True))
+        except (TypeError, ValueError):
+          v = MAX_DELAY
+        self.max_delay = min(max(v, MAX_DELAY_RANGE[0]), MAX_DELAY_RANGE[1])
         profile = getattr(self.LaC, "profile", None)
         if profile is not None:
           profile.get_params(self.params)

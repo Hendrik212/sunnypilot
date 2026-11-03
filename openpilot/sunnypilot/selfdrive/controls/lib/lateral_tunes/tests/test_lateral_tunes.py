@@ -757,10 +757,36 @@ class TestSaturationHeadroom:
 
   def test_live_limits_are_clipped(self):
     from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
-    ll.set_live_limits(9999, 99)
-    assert ll._live == {"headroom_can": 650, "delta_down_low": 10}
-    ll.set_live_limits("x", None)
-    assert ll._live == {"headroom_can": ll.DEFAULT_HEADROOM_CAN, "delta_down_low": ll.DEFAULT_DELTA_DOWN_LOW}
+    ll.set_live_limits(9999, 99, 9999)
+    assert ll._live == {"headroom_can": 650, "delta_down_low": 10, "driver_allowance_low": 250}
+    ll.set_live_limits("x", None, "y")
+    assert ll._live == {"headroom_can": ll.DEFAULT_HEADROOM_CAN, "delta_down_low": ll.DEFAULT_DELTA_DOWN_LOW,
+                        "driver_allowance_low": ll.STARPILOT_STEER_DRIVER_ALLOWANCE}
+    ll.set_live_limits(600, 10, 10)  # never below the StarPilot 75
+    assert ll._live["driver_allowance_low"] == 75
+
+  def test_driver_allowance_opens_only_in_the_headroom_band(self):
+    from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
+    CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
+    CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
+    ll.set_live_limits(650, 10, 150)
+    try:
+      allow = {v: CarControllerParams(CP, v, CP_SP=CP_SP).STEER_DRIVER_ALLOWANCE for v in (2.0, 10.0, 14.6, 25.0)}
+    finally:
+      ll.set_live_limits(ll.DEFAULT_HEADROOM_CAN, ll.DEFAULT_DELTA_DOWN_LOW)
+    assert allow == {2.0: 75, 10.0: 150, 14.6: 113, 25.0: 75}
+
+  def test_light_hand_resistance_keeps_the_headroom_with_a_bigger_allowance(self):
+    from types import SimpleNamespace
+    from opendbc.sunnypilot.car.hyundai.lateral_limits import apply_headroom_driver_limits
+    # route 267 turn-in: -87 CAN against the command, no override
+    P = SimpleNamespace(STEER_SCALE=409, STEER_MAX=650, STEER_DRIVER_ALLOWANCE=75, STEER_DRIVER_MULTIPLIER=2,
+                        STEER_DRIVER_FACTOR=1, STEER_DELTA_UP=10, STEER_DELTA_DOWN=10)
+    assert apply_headroom_driver_limits(650, 385, -87, P) == 385
+    P.STEER_DRIVER_ALLOWANCE = 150
+    assert apply_headroom_driver_limits(650, 645, -87, P) == 650
 
   def test_opposing_driver_is_limited_exactly_as_before(self):
     from types import SimpleNamespace
