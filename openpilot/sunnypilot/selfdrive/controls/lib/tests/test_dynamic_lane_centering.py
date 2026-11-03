@@ -416,7 +416,13 @@ def _cam_run_walls(d, model, seconds, walls):
     d.update(0.0, model, i % 5 == 0, True, V, True, False, False, d.camera_offset, walls)
 
 
+def _weak_right_line(m):
+  m.laneLineProbs = [m.laneLineProbs[0], m.laneLineProbs[1], 0.3, m.laneLineProbs[3]]
+  return m
+
+
 def test_no_shift_toward_a_near_wall():
+  # without a confident line opposite there is no middle to aim at (the lane class holds)
   d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1)
   wall = Wall(y=-2.6, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 1.66 m from the body: not near yet
   _cam_run_walls(d, _model(lane_left=False), 15.0, (wall, None))  # LEFT lane -> offset left
@@ -425,7 +431,7 @@ def test_no_shift_toward_a_near_wall():
   # route 25d: the offset toward the wall goes back to 0 at the ramp rate, never a step
   offs = []
   for _ in range(40):
-    _cam_run_walls(d, _model(lane_left=False), 0.25, (wall, None))
+    _cam_run_walls(d, _weak_right_line(_model(lane_left=False)), 0.25, (wall, None))
     offs.append(d.offset)
   assert np.max(np.diff([-0.25] + offs)) <= dlc.OFFSET_RAMP_RATE * 0.25 + 1e-6
   assert d.offset == pytest.approx(0.0, abs=1e-6)
@@ -463,6 +469,49 @@ def test_between_two_walls_the_target_is_their_middle():
   assert d.offset == pytest.approx(0.375, abs=1e-3)
 
 
+@pytest.mark.parametrize("follow", [1.0, 0.5])
+def test_a_wall_and_the_line_opposite_the_target_is_their_middle(follow):
+  # route 266 back: wall 1.0 m from the body, the model rides 0.2 m right of its centre and 0.15 m
+  # from the right line; the middle between the wall and that line is 0.39 m further left. The
+  # plan follows only `follow` of a shift, so the offset keeps going until the plan is there
+  d = _dyn(LaneCenterOffset=0.2, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0, LaneCenteringMinClearance=0.0,
+           LaneCenteringWallClearance=0.3)
+  wall = (Wall(y=-1.94, slope=0.0, curvature=0.0, residual=0.02, points=12), None)
+  sl = dlc.plan_slack(_narrow_model(0.0, follow, left=-1.6, right=1.09), V, 0.0, 0.94, 0.0, wall, 0.3)
+  assert sl.wall_near_left and sl.wall_line_err == pytest.approx(-0.425)
+  cam = 0.0
+  for i in range(int(round(40.0 / DT_CTRL))):
+    upd = i % 5 == 0
+    if upd:
+      cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)
+    d.update(0.0, _narrow_model(cam, follow, left=-1.6, right=1.09), upd, True, V, True, False, False, cam, wall)
+  assert follow * d.offset == pytest.approx(-0.425, abs=0.01)  # the plan, real frame
+  assert d.limit_cause != dlc.LimitCause.WALL_NO_SHIFT_LEFT
+
+
+def test_the_wall_line_middle_keeps_the_wall_clearance():
+  # route 266 out: wall 0.33 m from the body, the right line 0.1 m inside the body: the middle would
+  # sit 0.12 m off the wall; the wall clearance wins and the line yields
+  d = _dyn(LaneCenterOffset=0.2, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0, LaneCenteringMinClearance=0.0)
+  wall = (Wall(y=-1.27, slope=0.0, curvature=0.0, residual=0.02, points=12), None)
+  cam = 0.0
+  for i in range(int(round(40.0 / DT_CTRL))):
+    upd = i % 5 == 0
+    if upd:
+      cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)
+    d.update(0.0, _narrow_model(cam, 1.0, left=-2.3, right=0.84), upd, True, V, True, False, False, cam, wall)
+  assert d.offset > 0.0
+  assert 1.27 + d.offset - 0.94 == pytest.approx(dlc.DEFAULT_WALL_CLEARANCE, abs=0.02)
+
+
+def test_wall_inside_cap_is_a_live_param():
+  d = _dyn(LaneCenteringWallInsideCap=0.9)
+  assert d.guard.inside_cap == pytest.approx(0.9)
+  d.reset()
+  assert d.guard.inside_cap == pytest.approx(0.9)
+  assert _dyn(LaneCenteringWallInsideCap=5.0).guard.inside_cap == pytest.approx(1.5)
+
+
 def test_a_wall_inside_the_model_line_allows_a_bigger_push():
   g = dlc.ClearanceGuard()
   sl = dlc.Slack(right=0.0, left=-0.8, wall_left=True, wall_near_left=True, wall_inside_left=True, wall_slack_left=-0.8)
@@ -471,7 +520,7 @@ def test_a_wall_inside_the_model_line_allows_a_bigger_push():
   # route 25d: the model's right line ran through the car as well -- it yields more
   assert g.apply(0.0)[0] == pytest.approx(dlc.WALL_INSIDE_GIVE + 0.5 * (0.8 - dlc.WALL_INSIDE_GIVE))
   g = dlc.ClearanceGuard()
-  g.set_slack(dlc.Slack(right=0.0, left=-1.2, wall_left=True, wall_near_left=True, wall_inside_left=True, wall_slack_left=-1.2))
+  g.set_slack(dlc.Slack(right=0.0, left=-1.8, wall_left=True, wall_near_left=True, wall_inside_left=True, wall_slack_left=-1.8))
   g.update()
   assert g.apply(0.0)[0] == pytest.approx(dlc.WALL_INSIDE_CAP)
   g = dlc.ClearanceGuard()
@@ -485,21 +534,25 @@ def test_near_wall_freezes_and_a_flicker_does_not_step_the_offset():
   St = dlc.LaneCenteringStatus
   d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0, LaneCenteringMiddleBias=0.0)
   far = Wall(y=-2.6, slope=0.0, curvature=0.0, residual=0.02, points=12)
-  near = Wall(y=-2.0, slope=0.0, curvature=0.0, residual=0.02, points=12)  # 0.25 m beyond the left line
+  # 0.05 m beyond the left line (it stays near with the line shifted by the -0.25 offset)
+  near = Wall(y=-1.8, slope=0.0, curvature=0.0, residual=0.02, points=12)
   _cam_run_walls(d, _model(), 15.0, (far, None))  # middle lane: offset 0
   assert d.offset == pytest.approx(0.0)
-  # a near left wall appears while the lane position asks for a left offset: held at 0
-  _cam_run_walls(d, _model(lane_left=False), 5.0, (near, None))
+  _cam_run_walls(d, _model(lane_left=False), 6.0, (far, None))  # LEFT lane: offset left
+  # a near left wall appears while the lane position asks for a left offset: back to 0 (no
+  # confident line opposite, so no wall-line middle; weak frames keep the lane class)
+  weak = _weak_right_line(_model(lane_left=False))
+  _cam_run_walls(d, weak, 6.0, (near, None))
   assert d.offset == pytest.approx(0.0, abs=1e-6)
   assert d.status == St.LIMITED and d.limit_cause == dlc.LimitCause.WALL_NO_SHIFT_LEFT
   # route 23b: the wall flickers in and out every second -- the offset must not move
   offs = []
   for k in range(10):
-    _cam_run_walls(d, _model(lane_left=False), 1.0, (near if k % 2 else None, None))
+    _cam_run_walls(d, weak, 1.0, (near if k % 2 else None, None))
     offs.append(d.offset)
   assert np.ptp(offs) < 1e-6
   # gone for longer than WALL_HOLD: released at the normal ramp rate
-  _cam_run_walls(d, _model(lane_left=False), dlc.WALL_HOLD + 1.0, (None, None))
+  _cam_run_walls(d, weak, dlc.WALL_HOLD + 1.0, (None, None))
   assert -dlc.OFFSET_RAMP_RATE * 1.1 - 1e-6 <= d.offset < -0.01
 
 

@@ -65,6 +65,17 @@ the wall, the driver steering right 69% of the time. So:
   the target is the middle between them, relative to the lane centre, held WALL_HOLD;
 - a near wall inside the model's line on its side (the line is not the boundary) raises the
   cap to WALL_INSIDE_CAP and the other side's give to WALL_INSIDE_GIVE.
+Route 266 (2026-11-03), same zone with that in place: between two walls the car kept within
+0.2 m of their middle. With only the left wall, outbound, the offset sat at the 0.8 m cap and
+the real plan still pointed 0.5 m left (the model held to the old line behind the wall), body
+0.30-0.40 m from the wall, driver steering right. On the way back the wall was 0.9-1.3 m off and
+the no-shift rule held the offset at 0 while the car rode 0.1-0.3 m from the right line (the
+model ran 0.2-0.4 m right of its centre, left line barely seen). So:
+- one near wall and a confident line on the other side: the target is their middle, measured
+  against the plan and added to the offset in use, so the offset keeps moving until the plan is
+  there (the plan follows only part of a shift); wall clearance and the line's give still bound it;
+- WALL_INSIDE_CAP 0.8 -> 1.2 m, live as LaneCenteringWallInsideCap; it also caps a middle
+  target (WALL_CAP stopped the plan half way there).
 
 Each side's slack becomes a bound on the offset (hi = offset_used + right slack, lo =
 offset_used - left slack). A bound tightens at once, holds BOUND_RELAX_HOLD, then relaxes over
@@ -98,7 +109,7 @@ LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneC
 LaneCenteringSwitchDist, LaneCenteringE2EAuthority,
 LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk,
 LaneCenteringMinClearance, LaneCenteringCarWidth, LaneCenteringWallClearance,
-LaneCenteringMiddleBias. Frame: model y positive to the RIGHT.
+LaneCenteringMiddleBias, LaneCenteringWallInsideCap. Frame: model y positive to the RIGHT.
 """
 from dataclasses import dataclass
 from enum import IntEnum
@@ -137,7 +148,7 @@ BOUND_HOLD = 2.0  # s a side keeps its bound after its boundary was last seen
 WALL_HOLD = 3.0  # s a near wall keeps its bound and the offset frozen after it was last seen
 OFFSET_CAP = 0.30  # m
 WALL_CAP = 0.50  # m with a near wall: the plan only follows ~half a camera shift
-WALL_INSIDE_CAP = 0.80  # m when that wall stands inside the model's lane line on its side
+WALL_INSIDE_CAP = 1.20  # m when that wall stands inside the model's lane line on its side (LaneCenteringWallInsideCap)
 WALL_INSIDE_GIVE = 0.70  # m the other side yields then (its line is likely an old one as well)
 NARROW_BIAS = 0.05  # m more clearance on the left than on the right when the deficit is split
 LINE_GIVE = 0.25  # m a line or edge yields in a narrow lane (body ~at the paint at margin 0.25)
@@ -291,6 +302,7 @@ class Slack:
   wall_inside_right: bool = False  # near wall closer than the model's line on that side
   wall_inside_left: bool = False
   wall_mid: float | None = None  # offset (m, + = right) that puts the car between two near walls
+  wall_line_err: float | None = None  # plan to the middle of a lone near wall and the line opposite (m, + = right)
 
 
 def _wall_near(gap: float, line_gap: float | None) -> bool:
@@ -350,6 +362,13 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
       # wall middle minus the real lane centre, along the plan
       centre = 0.5 * (_interp(x, lines[1]) + _interp(x, lines[2])) + camera_offset
       out.wall_mid = float(np.mean(0.5 * (wl.at(x) + wr.at(x)) - centre))
+    elif len(lines) >= 3 and len(probs) >= 3:
+      # one near wall and a confident line on the other side: the middle between them, against
+      # the plan (not the lane centre: the wall-side line is often old or not seen)
+      if wl is not None and wr is None and out.wall_near_left and probs[2] >= LINE_MIN_PROB:
+        out.wall_line_err = float(np.mean(0.5 * (wl.at(x) + _interp(x, lines[2]) + camera_offset) - track))
+      elif wr is not None and wl is None and out.wall_near_right and probs[1] >= LINE_MIN_PROB:
+        out.wall_line_err = float(np.mean(0.5 * (wr.at(x) + _interp(x, lines[1]) + camera_offset) - track))
     right = [r for r in right if np.isfinite(r[0])]
     left = [lf for lf in left if np.isfinite(lf[0])]
     if right:
@@ -399,6 +418,7 @@ class ClearanceGuard:
   def __init__(self):
     self._b = [_Bound(BOUND_HOLD), _Bound(BOUND_HOLD)]  # any boundary (right, left)
     self._w = [_Bound(WALL_HOLD), _Bound(WALL_HOLD)]  # radar walls only
+    self.inside_cap = WALL_INSIDE_CAP  # live: LaneCenteringWallInsideCap
     self.reset()
 
   def reset(self) -> None:
@@ -408,8 +428,9 @@ class ClearanceGuard:
     self._causes = [LimitCause.NONE, LimitCause.NONE]
     self._near_t = [WALL_HOLD, WALL_HOLD]  # s since a near wall was seen (right, left)
     self._inside_t = [WALL_HOLD, WALL_HOLD]  # s since a near wall inside the model's line was seen
-    self._mid: float | None = None  # last offset between two walls
+    self._mid: float | None = None  # last offset between two walls, or a wall and the line opposite
     self._mid_t = WALL_HOLD
+    self._frame_mid: float | None = None
     self.single = False  # single-lane road: the left side is oncoming traffic
     self.blindspot = (False, False)  # (right, left) car seen by the blind-spot monitor
 
@@ -432,6 +453,10 @@ class ClearanceGuard:
       self._w[i].update(None if wsl is None else sign * offset_used + wsl, dt)
       if sl is not None:
         self._causes[i] = cause
+    # the wall-line middle is relative to the plan, which follows only part of a shift: adding
+    # it to the offset in use keeps moving the offset until the plan is there (or the cap)
+    self._frame_mid = slack.wall_mid if slack.wall_mid is not None else \
+      None if slack.wall_line_err is None else offset_used + slack.wall_line_err
 
   def update(self, dt: float = DT_CTRL) -> None:
     sl = self.slack
@@ -439,14 +464,15 @@ class ClearanceGuard:
                      (self._inside_t, (sl.wall_inside_right, sl.wall_inside_left))):
       for i, seen in enumerate(flags):
         t[i] = 0.0 if seen else min(t[i] + dt, WALL_HOLD)
-    if sl.wall_mid is not None:
-      self._mid, self._mid_t = sl.wall_mid, 0.0
+    if self._frame_mid is not None:
+      self._mid, self._mid_t = self._frame_mid, 0.0
     else:
       self._mid_t = min(self._mid_t + dt, WALL_HOLD)
 
   @property
   def mid(self) -> float | None:
-    """Offset (m, + = right) that centres the car between two walls, held WALL_HOLD."""
+    """Offset (m, + = right) that centres the car between two walls, or a wall and the line
+    opposite, held WALL_HOLD."""
     return self._mid if self._mid_t < WALL_HOLD else None
 
   @property
@@ -470,7 +496,10 @@ class ClearanceGuard:
 
   def apply(self, target: float) -> tuple[float, LimitCause]:
     near = self.near
-    cap = WALL_INSIDE_CAP if any(t < WALL_HOLD for t in self._inside_t) else WALL_CAP if any(near) else OFFSET_CAP
+    # a middle target is measured in the real frame and bounded by the wall clearance, so it
+    # gets the inside cap as well: with WALL_CAP the plan stopped half way (it follows ~half)
+    inside = self.mid is not None or any(t < WALL_HOLD for t in self._inside_t)
+    cap = self.inside_cap if inside else WALL_CAP if any(near) else OFFSET_CAP
     hi, lo = self.hi, self.lo
     out, cause = target, LimitCause.NONE
     if hi is not None and lo is not None and lo > hi:  # too close on both sides
@@ -495,7 +524,8 @@ class ClearanceGuard:
       out, cause = lo, self._causes[1]
     out = float(np.clip(out, -cap, cap))
     # never shift toward a wall close to the body (shifting away stays allowed); between two
-    # walls the target is their middle, which is the only offset toward one of them
+    # walls, or a wall and a confident line opposite, the target is their middle, which is the
+    # only offset toward a wall
     if self.mid is None:
       if near[0] and out > 0.0:
         out, cause = 0.0, LimitCause.WALL_NO_SHIFT_RIGHT
@@ -558,6 +588,7 @@ class DynamicLaneCentering:
     self.classifier.switch_dist = _get_float(params, "LaneCenteringSwitchDist", DEFAULT_SWITCH_DIST, 0.0, 5000.0)
     self.margin = _get_float(params, "LaneCenteringMinClearance", DEFAULT_MIN_CLEARANCE, -0.5, 1.0)
     self.wall_margin = _get_float(params, "LaneCenteringWallClearance", DEFAULT_WALL_CLEARANCE, 0.0, 2.0)
+    self.guard.inside_cap = _get_float(params, "LaneCenteringWallInsideCap", WALL_INSIDE_CAP, 0.3, 1.5)
     self.half_width = _get_float(params, "LaneCenteringCarWidth", DEFAULT_CAR_WIDTH, 1.0, 3.0) / 2
 
   def reset(self) -> None:
