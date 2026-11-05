@@ -35,6 +35,7 @@ WHITELIST: dict[str, tuple[float, float]] = {
   "LagdMaxDelay": (0.3, 0.8),
   "LagdCityDelayBoost": (0.0, 0.5),
   "LagdToggleDelay": (0.1, 0.4),
+  "IoniqHighwayCenterDamping": (0.0, 0.2),
 }
 
 CAUSES = {0: "none", 1: "right line", 2: "left line", 3: "right edge", 4: "left edge", 5: "right wall", 6: "left wall",

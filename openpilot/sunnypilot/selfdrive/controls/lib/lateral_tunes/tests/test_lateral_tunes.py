@@ -383,7 +383,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
         self.v = v
 
       def get(self, key, return_default=False):
-        assert key in ("LatAccelFactorCap", "SteerHeadroomCan")
+        assert key in ("LatAccelFactorCap", "SteerHeadroomCan", "IoniqHighwayCenterDamping")
         return self.v
 
     from opendbc.sunnypilot.car.hyundai.lateral_limits import DEFAULT_HEADROOM_CAN
@@ -823,3 +823,28 @@ class TestSaturationHeadroom:
       outs[h] = res
     assert outs[409][0] == outs[600][0]
     assert np.isclose(outs[409][1], 1.0, atol=1e-6) and np.isclose(outs[600][1], 600 / 409, atol=1e-3)
+
+
+def test_highway_center_damping_acts_only_near_centre_at_highway_speed():
+  f = i6.get_ioniq_6_highway_center_damping_scale
+  # route 26a straight: ~0.03 m/s^2 of ripple at 29 m/s; the soft sigmoid gives ~7% of the 8%
+  assert 0.92 < f(0.03, -0.02, 29.0, 0.08) < 0.94
+  assert f(0.0, 0.0, 23.5, 0.08) > f(0.0, 0.0, 29.0, 0.08)  # grows with speed
+  assert f(0.03, 0.0, 29.0, 0.0) == 1.0  # default off
+  # a bend ahead (future request 1.0 m/s^2) is not damped, even while the setpoint is still ~0
+  assert f(0.0, 1.0, 29.0, 0.08) == pytest.approx(1.0, abs=1e-3)
+  assert f(1.0, 0.0, 29.0, 0.08) == pytest.approx(1.0, abs=1e-3)
+  # city speeds are untouched
+  assert f(0.0, 0.0, 12.0, 0.08) == pytest.approx(1.0, abs=1e-3)
+  # the amount is capped
+  assert f(0.0, 0.0, 35.0, 5.0) >= 1.0 - i6.IONIQ_6_HIGHWAY_CENTER_DAMPING_MAX - 1e-9
+
+
+def test_highway_center_damping_is_a_clamped_live_param():
+  ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+  assert ctl.profile.highway_center_damping == 0.0
+  params = Params()
+  for v, expected in ((0.08, 0.08), (1.0, i6.IONIQ_6_HIGHWAY_CENTER_DAMPING_MAX), (-0.5, 0.0)):
+    params.put("IoniqHighwayCenterDamping", v, block=True)
+    ctl.profile.get_params(params)
+    assert ctl.profile.highway_center_damping == pytest.approx(expected)

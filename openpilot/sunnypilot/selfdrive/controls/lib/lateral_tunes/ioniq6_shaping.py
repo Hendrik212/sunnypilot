@@ -95,6 +95,13 @@ IONIQ_6_HIGHWAY_OUTPUT_TAPER_LAT_WIDTH = 0.04
 IONIQ_6_HIGHWAY_OUTPUT_TAPER_SPEED = 23.5
 IONIQ_6_HIGHWAY_OUTPUT_TAPER_SPEED_WIDTH = 2.0
 IONIQ_6_HIGHWAY_TRANSITION_OUTPUT_TAPER_MAX = 0.18
+# Highway centre damping (port of StarPilot 1e4fe7c8a4, "Damp EV6 near-center steering while
+# preserving turn-in", Nov 3 2026: KIA_EV6_HIGHWAY_CENTER_DAMPING 0.08). Extra output reduction
+# near centre at highway speed, judged on BOTH the current setpoint and the future request so a
+# bend entry is not damped. Here on the Ioniq 6 highway-output-taper speed and centre bands; the
+# amount is the live IoniqHighwayCenterDamping param (default 0 = off). Route 26a (Nov 4 2026,
+# 92-110 km/h): wheel +-0.5 deg at 0.27-0.30 Hz, ~0.03 m/s^2 of request ripple, P in phase with FF.
+IONIQ_6_HIGHWAY_CENTER_DAMPING_MAX = 0.20
 IONIQ_6_HIGHWAY_TRANSITION_OUTPUT_TAPER_LAT = 1.05
 IONIQ_6_HIGHWAY_TRANSITION_OUTPUT_TAPER_LAT_WIDTH = 0.22
 IONIQ_6_HIGHWAY_TRANSITION_OUTPUT_TAPER_JERK = 0.24
@@ -453,6 +460,15 @@ def get_ioniq_6_highway_output_taper_scale(desired_lateral_accel: float, v_ego: 
                                    IONIQ_6_HIGHWAY_OUTPUT_TAPER_LAT_WIDTH)
   reduction = IONIQ_6_HIGHWAY_OUTPUT_TAPER_MAX * speed_weight * center_weight
   return 1.0 - reduction
+
+def get_ioniq_6_highway_center_damping_scale(desired_lateral_accel: float, future_lateral_accel: float, v_ego: float,
+                                              damping: float) -> float:
+  if damping <= 0.0:
+    return 1.0
+  speed_weight = _ioniq_6_sigmoid((v_ego - IONIQ_6_HIGHWAY_OUTPUT_TAPER_SPEED) / IONIQ_6_HIGHWAY_OUTPUT_TAPER_SPEED_WIDTH)
+  accel = max(abs(desired_lateral_accel), abs(future_lateral_accel))
+  center_weight = _ioniq_6_sigmoid((IONIQ_6_HIGHWAY_OUTPUT_TAPER_LAT - accel) / IONIQ_6_HIGHWAY_OUTPUT_TAPER_LAT_WIDTH)
+  return 1.0 - min(damping, IONIQ_6_HIGHWAY_CENTER_DAMPING_MAX) * speed_weight * center_weight
 
 def get_ioniq_6_highway_transition_output_taper_scale(desired_lateral_accel: float, desired_lateral_jerk: float, v_ego: float) -> float:
   speed_weight = _ioniq_6_sigmoid((v_ego - IONIQ_6_HIGHWAY_OUTPUT_TAPER_SPEED) / IONIQ_6_HIGHWAY_OUTPUT_TAPER_SPEED_WIDTH)

@@ -141,6 +141,11 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
       self.headroom_can = float(params.get("SteerHeadroomCan", return_default=True))
     except (TypeError, ValueError):
       self.headroom_can = DEFAULT_HEADROOM_CAN
+    try:
+      damping = float(params.get("IoniqHighwayCenterDamping", return_default=True))
+    except (TypeError, ValueError):
+      damping = 0.0
+    self.highway_center_damping = min(max(damping, 0.0), i6.IONIQ_6_HIGHWAY_CENTER_DAMPING_MAX)
 
   def _apply_headroom(self, ctl, v_ego: float) -> None:
     # Only the clip moves (PID limits = lateral_accel_from_torque(+-steer_max)); the 409 scale,
@@ -202,6 +207,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     # Set before the first _apply_speed_scheduled_factor call below.
     self.lat_accel_factor_cap = -1.0
     self.headroom_can = DEFAULT_HEADROOM_CAN
+    self.highway_center_damping = 0.0
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
     # written once at fingerprint time, so on a live switch from upstream it still holds the
     # UPSTREAM factor -- multiplying that by 1.22 would give a gain that is neither tune.
@@ -384,6 +390,8 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     # sweepers smooth rather than notchy.
     output_torque *= i6.get_ioniq_6_highway_output_taper_scale(setpoint, CS.vEgo)
     output_torque *= i6.get_ioniq_6_highway_transition_output_taper_scale(setpoint, desired_lateral_jerk, CS.vEgo)
+    output_torque *= i6.get_ioniq_6_highway_center_damping_scale(setpoint, future_desired_lateral_accel, CS.vEgo,
+                                                               self.highway_center_damping)
 
     # The extension is a passthrough here (jerk-aware + NNLC off), but call it for parity
     # with the upstream path and so the jerk/NN telemetry fields stay populated.
