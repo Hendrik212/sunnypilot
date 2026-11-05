@@ -42,6 +42,7 @@ from openpilot.sunnypilot.modeld_v2.parse_model_outputs import Parser
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
 from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper, LaneCentreCameraOffset, LANE_CENTRE_STALE_S
+from openpilot.sunnypilot.modeld_v2.yaw_rate_blend import YAW_RATE_BLEND_MAX, yaw_rate_blend_correction
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.modeld_v2.helpers import load_model
@@ -105,6 +106,7 @@ class ModelState(ModelStateBase):
     self.LONG_SMOOTH_SECONDS = float(overrides.get('long', ".0"))
     self.MIN_LAT_CONTROL_SPEED = 0.3
     self.PLANPLUS_CONTROL: float = 1.0
+    self.YAW_RATE_BLEND: float = 0.0  # ModelYawRateBlend param, see yaw_rate_blend.py
     self.chestnut = chestnut
 
     pkl_path = _find_driving_pkl(model_bundle)
@@ -231,7 +233,8 @@ class ModelState(ModelStateBase):
     return outputs
 
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
-                            lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
+                            lat_action_t: float, long_action_t: float, v_ego: float,
+                            yaw_rate_measured: float | None = None) -> log.ModelDataV2.Action:
     if 'action' not in model_output:
       plan = model_output['plan'][0]
       desired_accel = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0], self.constants.T_IDXS,
@@ -240,6 +243,8 @@ class ModelState(ModelStateBase):
       curvature_plan = (plan + (self.PLANPLUS_CONTROL - 1.0) * model_output['planplus'][0]
                         if 'planplus' in model_output and self.PLANPLUS_CONTROL != 1.0 else plan)
       desired_curvature = get_curvature_from_output(model_output, curvature_plan, v_ego, lat_action_t, self.mlsim)
+      if self.mlsim or 'desired_curvature' not in model_output:  # plan path only
+        desired_curvature += yaw_rate_blend_correction(curvature_plan, v_ego, yaw_rate_measured, self.YAW_RATE_BLEND)
     else:
       desired_accel = model_output['action'][0, 1]
       desired_curvature = model_output['action'][0, 0] / (max(1.0, v_ego))**2
@@ -336,7 +341,7 @@ def main(demo=False):
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
-                  "carControl", "controlsState", "lateralDelay", "lateralTuneStateSP"])
+                  "carControl", "controlsState", "lateralDelay", "lateralTuneStateSP", "deviceMotion"])
 
   publish_state = PublishState()
   chestnut_state = ChestnutGpuState(pm, model.chestnut) if CHESTNUT else None
@@ -427,6 +432,11 @@ def main(demo=False):
       lat_smooth = float(params.get("LatSmoothSeconds", return_default=True))
       model.LAT_SMOOTH_SECONDS = lat_smooth if lat_smooth >= 0.0 else model.BUNDLE_LAT_SMOOTH_SECONDS
       model.PLANPLUS_CONTROL = params.get("PlanplusControl", return_default=True)
+      try:
+        blend = float(params.get("ModelYawRateBlend", return_default=True))
+      except (TypeError, ValueError):
+        blend = 0.0
+      model.YAW_RATE_BLEND = min(max(blend, 0.0), YAW_RATE_BLEND_MAX) if np.isfinite(blend) else 0.0
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["lateralTuneStateSP"]:
@@ -511,7 +521,10 @@ def main(demo=False):
 
       if not sm['carControl'].latActive:
         prev_action.desiredCurvature = sm['controlsState'].curvature
-      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      dm = sm['deviceMotion']
+      yaw_rate_measured = (dm.angularVelocityDevice.z if sm.valid['deviceMotion'] and sm.alive['deviceMotion']
+                           and dm.angularVelocityDevice.valid else None)
+      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego, yaw_rate_measured)
       prev_action = action
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,

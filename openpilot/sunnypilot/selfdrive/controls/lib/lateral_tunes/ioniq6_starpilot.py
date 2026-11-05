@@ -146,6 +146,11 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     except (TypeError, ValueError):
       damping = 0.0
     self.highway_center_damping = min(max(damping, 0.0), i6.IONIQ_6_HIGHWAY_CENTER_DAMPING_MAX)
+    try:
+      q = float(params.get("RippleNotchQ", return_default=True))
+    except (TypeError, ValueError):
+      q = rn.RIPPLE_NOTCH_Q
+    self.ripple_notch_q = min(q, rn.RIPPLE_NOTCH_Q_MAX) if math.isfinite(q) else rn.RIPPLE_NOTCH_Q
 
   def _apply_headroom(self, ctl, v_ego: float) -> None:
     # Only the clip moves (PID limits = lateral_accel_from_torque(+-steer_max)); the 409 scale,
@@ -190,6 +195,11 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     mv = getattr(ctl.extension, "model_v2", None)
     big = bool(getattr(mv, "big", False)) if mv is not None else False
     self.curvature_ripple_notch.set_frequency(rn.ripple_notch_hz_for(big))
+    # RippleNotchQ <= 0 switches the output off; the filter keeps stepping at its last valid
+    # width so switching it back on starts from a primed state.
+    notch_on = self.ripple_notch_q > 0.0
+    if notch_on:
+      self.curvature_ripple_notch.set_q(self.ripple_notch_q)
 
     if not active:
       self.curvature_ripple_notch.reset(desired_curvature)
@@ -198,7 +208,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     # Stepped even while disabled so the state is primed if the switch is ever flipped
     # back at runtime; only the output is gated.
     filtered = self.curvature_ripple_notch.update(desired_curvature)
-    if not rn.RIPPLE_NOTCH_ENABLED:
+    if not rn.RIPPLE_NOTCH_ENABLED or not notch_on:
       return desired_curvature
     blend = np.interp(CS.vEgo, rn.RIPPLE_NOTCH_SPEED_BP, rn.RIPPLE_NOTCH_BLEND_V)
     return float(desired_curvature + blend * (filtered - desired_curvature))
@@ -208,6 +218,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     self.lat_accel_factor_cap = -1.0
     self.headroom_can = DEFAULT_HEADROOM_CAN
     self.highway_center_damping = 0.0
+    self.ripple_notch_q = rn.RIPPLE_NOTCH_Q
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
     # written once at fingerprint time, so on a live switch from upstream it still holds the
     # UPSTREAM factor -- multiplying that by 1.22 would give a gain that is neither tune.

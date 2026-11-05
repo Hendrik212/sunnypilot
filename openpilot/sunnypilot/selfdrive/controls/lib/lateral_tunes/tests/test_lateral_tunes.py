@@ -383,7 +383,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
         self.v = v
 
       def get(self, key, return_default=False):
-        assert key in ("LatAccelFactorCap", "SteerHeadroomCan", "IoniqHighwayCenterDamping")
+        assert key in ("LatAccelFactorCap", "SteerHeadroomCan", "IoniqHighwayCenterDamping", "RippleNotchQ")
         return self.v
 
     from opendbc.sunnypilot.car.hyundai.lateral_limits import DEFAULT_HEADROOM_CAN
@@ -848,3 +848,47 @@ def test_highway_center_damping_is_a_clamped_live_param():
     params.put("IoniqHighwayCenterDamping", v, block=True)
     ctl.profile.get_params(params)
     assert ctl.profile.highway_center_damping == pytest.approx(expected)
+
+
+def test_ripple_notch_q_is_a_live_param():
+  ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+  assert ctl.profile.ripple_notch_q == rn.RIPPLE_NOTCH_Q
+  params = Params()
+  for v, expected in ((4.0, 4.0), (20.0, rn.RIPPLE_NOTCH_Q_MAX), (0.0, 0.0), (-1.0, -1.0)):
+    params.put("RippleNotchQ", v, block=True)
+    ctl.profile.get_params(params)
+    assert ctl.profile.ripple_notch_q == pytest.approx(expected)
+  params.put("RippleNotchQ", rn.RIPPLE_NOTCH_Q, block=True)
+
+
+def test_ripple_notch_q_width_and_off_switch():
+  """Q changes the filter in place; Q <= 0 passes the command through untouched."""
+  ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+  CS = car.CarState.new_message()
+  CS.vEgo = 27.0
+  p = ctl.profile
+  t = np.arange(0, 20, ctl.dt)
+  x = 1e-4 * np.sin(2 * np.pi * 0.69 * t)
+
+  def run(q):
+    p.ripple_notch_q = q
+    p.curvature_ripple_notch.reset(0.0)
+    return np.array([p.filter_desired_curvature(ctl, CS, float(v), True) for v in x])
+
+  narrow, wide, off = run(4.0), run(2.0), run(0.0)
+  assert p.curvature_ripple_notch.q == 2.0  # off keeps the last valid width for a primed re-arm
+  tail = slice(len(t) // 2, None)
+  assert np.abs(wide[tail]).max() < 0.1e-4 and np.abs(narrow[tail]).max() < 0.1e-4  # both null the centre
+  assert np.allclose(off, x)
+  # at the 0.30 Hz loop crossover the narrow notch lags less than the default
+  x3 = 1e-4 * np.sin(2 * np.pi * 0.30 * t)
+
+  def lag_deg(q):
+    p.ripple_notch_q = q
+    p.curvature_ripple_notch.reset(0.0)
+    y = np.array([p.filter_desired_curvature(ctl, CS, float(v), True) for v in x3])[tail]
+    ref = x3[tail]
+    ph = np.angle(np.sum(y * np.exp(-2j * np.pi * 0.30 * t[tail]))) - np.angle(np.sum(ref * np.exp(-2j * np.pi * 0.30 * t[tail])))
+    return -np.degrees(ph)
+
+  assert 0 < lag_deg(4.0) < lag_deg(2.0)

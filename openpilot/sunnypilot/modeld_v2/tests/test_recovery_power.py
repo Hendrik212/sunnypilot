@@ -20,6 +20,7 @@ class TestRecoveryPower(OpenpilotTestCase):
   def test_recovery_power_scaling(self):
     state: Any = MockStruct(
       PLANPLUS_CONTROL=0.75,
+      YAW_RATE_BLEND=0.0,
       LONG_SMOOTH_SECONDS=0.3,
       LAT_SMOOTH_SECONDS=0.1,
       MIN_LAT_CONTROL_SPEED=0.3,

@@ -275,6 +275,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SteerDeltaDownLow", {PERSISTENT | BACKUP, INT, "10"}},
     {"SteerDriverAllowanceLow", {PERSISTENT | BACKUP, INT, "75"}},
     {"IoniqHighwayCenterDamping", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
+    {"RippleNotchQ", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
+    {"ModelYawRateBlend", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"LagdMaxDelay", {PERSISTENT | BACKUP, FLOAT, "0.50"}},
     {"LiveProbe", {PERSISTENT, BOOL, "0"}},
     {"MaxLateralAccel", {PERSISTENT | BACKUP, FLOAT, "3.0"}},

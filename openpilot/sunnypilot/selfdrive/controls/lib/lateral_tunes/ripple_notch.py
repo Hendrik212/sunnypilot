@@ -127,6 +127,17 @@ is the plant. Of the lag we own, the notch was the only element with no measured
 
 RIPPLE_NOTCH_ENABLED exists so the disabled state can be reproduced; it is True.
 
+## 2026-11-05: lookahead gone, notch width is a live param
+
+LatLookaheadOffset was set back to 0 on Sep 14 and removed on Sep 21 (28f9348d67), so the
+configuration in point 5 no longer exists: the notch runs without its lead. The replay sim
+(real video + CD210 + this controller, route 0000026a segs 14-16) measured the outer loop at
+13-21 deg phase margin at the 0.30 Hz crossover; the notch costs 12-20 deg of it, and with it
+off the loop amplifies the model's own broadband 0.5-1 Hz output 2-3x (|S| 3.1 at 0.5 Hz vs
+1.6 notch on), i.e. the notch is the gain margin there. Sim trade at the wheel vs Q=2:
+Q=4 weave -13..-20% / chatter x1.4-1.8, off -33..-36% / x2.5. RippleNotchQ makes the width a
+live param for an on-car A/B (default 2.0 = this constant, <= 0 = off).
+
 The monitor keeps running. If a future bundle brings a real 0.69 Hz ripple back, it
 shows as `rippleMeasuredHz` ~0.69 with `rippleExcess` >> 3 during MANUAL driving as
 well as engaged -- that is the test that separates a model ripple from a loop mode --
@@ -147,6 +158,8 @@ RIPPLE_NOTCH_HZ = 0.69
 # driving data; the per-model selection is kept so that can be dialled in per bundle.
 RIPPLE_NOTCH_HZ_BIG = RIPPLE_NOTCH_HZ
 RIPPLE_NOTCH_Q = 2.0  # -3 dB width f0/Q; 0.35 Hz at 0.69
+# Live override: RippleNotchQ param (profile get_params), default = RIPPLE_NOTCH_Q, <= 0 = off.
+RIPPLE_NOTCH_Q_MAX = 8.0
 # Master switch. Off for one drive on 2026-09-13 (00000208): halved the weave, 5-10x more
 # 0.5-1 Hz chatter. Kept ON; the weave is addressed with lead (LatLookaheadOffset) instead.
 # See the module docstring before flipping this.
@@ -211,6 +224,13 @@ class NotchFilter:
     self.b2 = 1.0 / a0
     self.a1 = -2.0 * cw / a0
     self.a2 = (1.0 - alpha) / a0
+
+  def set_q(self, q: float) -> None:
+    if abs(q - self.q) < 1e-6:
+      return
+    self.q = q
+    f0, self.f0 = self.f0, 0.0
+    self.set_frequency(f0)
 
   def reset(self, x: float) -> None:
     # A notch passes DC at unity, so a constant x is its own steady state.
