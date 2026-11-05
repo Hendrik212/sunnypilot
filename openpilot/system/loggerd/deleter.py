@@ -11,7 +11,7 @@ from openpilot.system.loggerd.uploader import listdir_by_creation
 from openpilot.system.loggerd.xattr_cache import getxattr
 
 MIN_BYTES = 5 * 1024 * 1024 * 1024
-MIN_PERCENT = 10
+MIN_PERCENT = 20  # at 10% /data (90% full) stalled 8 s on route 269 (Nov 4 2026): iowait, commIssue
 
 DELETE_LAST = ['boot', 'crash']
 

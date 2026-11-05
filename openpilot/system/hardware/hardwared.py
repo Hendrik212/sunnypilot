@@ -30,6 +30,7 @@ from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.chestnut.monitoring import chestnut_state_thread
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
+from openpilot.system.hardware.param_writer import ParamWriter
 from openpilot.system.hardware.thermal_reader import ThermalReader
 from openpilot.system.hardware.watchdog import HardwareWatchdog
 from openpilot.common.version import terms_version, training_version, get_build_metadata, terms_version_sp
@@ -110,6 +111,8 @@ OFFROAD_DANGER_TEMP = 85 if HARDWARE.get_device_type() == "mici" else 75
 
 prev_offroad_states: dict[str, tuple[bool, str | None]] = {}
 prev_bool_params: dict[str, bool] = {}
+# every params write in the publish loop goes through this thread (param_writer.py)
+param_writer = ParamWriter()
 
 
 
@@ -117,7 +120,7 @@ def set_offroad_alert_if_changed(offroad_alert: str, show_alert: bool, extra_tex
   if prev_offroad_states.get(offroad_alert, None) == (show_alert, extra_text):
     return
   prev_offroad_states[offroad_alert] = (show_alert, extra_text)
-  set_offroad_alert(offroad_alert, show_alert, extra_text)
+  param_writer.submit(set_offroad_alert, offroad_alert, show_alert, extra_text)
 
 def put_bool_if_changed(params: Params, key: str, value: bool) -> None:
   # every param write takes the params lock and fsyncs; in the publish loop that blocked
@@ -125,7 +128,7 @@ def put_bool_if_changed(params: Params, key: str, value: bool) -> None:
   if prev_bool_params.get(key) == value:
     return
   prev_bool_params[key] = value
-  params.put_bool(key, value)
+  param_writer.submit(params.put_bool, key, value)
 
 def touch_thread(end_event):
   count = 0
@@ -244,6 +247,7 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
   engaged_prev = False
   pwrsave = False
   offroad_cycle_count = 0
+  onroad_cycle_queued = False
 
   params = Params()
   power_monitor = PowerMonitoring()
@@ -273,8 +277,12 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
     # handle requests to cycle system started state
     watchdog.stage('onroad_cycle_params')
     if params.get_bool("OnroadCycleRequested"):
-      params.put_bool("OnroadCycleRequested", False, block=True)
-      offroad_cycle_count = sm.frame
+      if not onroad_cycle_queued:  # the reset is queued: don't restart the cycle until it lands
+        param_writer.submit(params.put_bool, "OnroadCycleRequested", False, block=True)
+        offroad_cycle_count = sm.frame
+        onroad_cycle_queued = True
+    else:
+      onroad_cycle_queued = False
     onroad_conditions["not_onroad_cycle"] = (sm.frame - offroad_cycle_count) >= ONROAD_CYCLE_TIME * SERVICE_LIST['pandaStates'].frequency
 
     if sm.updated['pandaStates'] and len(pandaStates) > 0:
@@ -425,13 +433,13 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
 
     watchdog.stage('engagement_params')
     if should_start != should_start_prev or (count == 0):
-      params.put_bool("IsEngaged", False, block=True)
+      param_writer.submit(params.put_bool, "IsEngaged", False, block=True)
       engaged_prev = False
 
     if sm.updated['selfdriveState']:
       engaged = sm['selfdriveState'].enabled
       if engaged != engaged_prev:
-        params.put_bool("IsEngaged", engaged, block=True)
+        param_writer.submit(params.put_bool, "IsEngaged", engaged, block=True)
         engaged_prev = engaged
 
       watchdog.stage('engagement_kmsg')
@@ -494,7 +502,7 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
     watchdog.stage('shutdown_check')
     if power_monitor.should_shutdown(onroad_conditions["ignition"], in_car, off_ts, started_seen):
       cloudlog.warning(f"shutting device down, offroad since {off_ts}")
-      params.put_bool("DoShutdown", True, block=True)
+      param_writer.submit(params.put_bool, "DoShutdown", True, block=True)
 
     msg.deviceState.started = started_ts is not None and not offroad_mode
     msg.deviceState.startedMonoTime = int(1e9*(started_ts or 0))
@@ -544,10 +552,7 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
       # save last one before going onroad
       if rising_edge_started:
         watchdog.stage('last_offroad_status_param')
-        try:
-          params.put("LastOffroadStatusPacket", dat, block=True)
-        except Exception:
-          cloudlog.exception("failed to save offroad status")
+        param_writer.submit(params.put, "LastOffroadStatusPacket", dat, block=True)
 
     watchdog.stage('network_metered_param')
     put_bool_if_changed(params, "NetworkMetered", msg.deviceState.networkMetered)
@@ -562,9 +567,9 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
 
     if (count % int(60. / DT_HW)) == 0:
       watchdog.stage('uptime_offroad_persist')
-      params.put("UptimeOffroad", uptime_offroad, block=True)
+      param_writer.submit(params.put, "UptimeOffroad", uptime_offroad, block=True)
       watchdog.stage('uptime_onroad_persist')
-      params.put("UptimeOnroad", uptime_onroad, block=True)
+      param_writer.submit(params.put, "UptimeOnroad", uptime_onroad, block=True)
 
     count += 1
     should_start_prev = should_start
@@ -586,6 +591,8 @@ def main():
     threads.append(threading.Thread(target=chestnut_state_thread, args=(end_event,)))
 
   diagnostic_thread.start()
+  writer_thread = threading.Thread(target=param_writer.run, args=(end_event,), name='param_writer')
+  writer_thread.start()
   for t in threads:
     t.start()
 
@@ -599,6 +606,7 @@ def main():
 
   for t in threads:
     t.join()
+  writer_thread.join(timeout=5.)
   diagnostic_thread.join(timeout=1.)
 
 
