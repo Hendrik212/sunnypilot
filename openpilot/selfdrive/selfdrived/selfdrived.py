@@ -690,7 +690,9 @@ class SelfdriveD(CruiseHelper):
 
 
 def main():
-  config_realtime_process(4, Priority.CTRL_HIGH)
+  # core 4 (card + controlsd + selfdrived) hit 100% on route 26c (Nov 5 2026) and controlsd missed
+  # its deadlines (commIssue: controlsState/carControl not alive); core 6 only runs dmonitoringmodeld (~15%)
+  config_realtime_process(6, Priority.CTRL_HIGH)
   s = SelfdriveD()
   s.run()
 
