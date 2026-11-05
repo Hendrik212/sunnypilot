@@ -591,3 +591,57 @@ def test_wall_margin_keeps_distance(follow):
   track = -follow * cam
   assert track + 1.3 - 0.94 == pytest.approx(0.6, abs=0.03)  # pushed right until the wall margin holds
   assert d.limit_cause == dlc.LimitCause.LEFT_WALL
+
+
+def _zone_model(cam=0.0, follow=0.45, plan=-0.10, lane_left=-1.15, lane_right=1.55, edge_left=-1.9):
+  """Route 269 construction zone: a 2.70 m lane between the old white line on the left and a
+  yellow dashed one on the right, the guardrail edge 0.75 m beyond the white line (the valid
+  yellow line in between), a lane on the right. The model rides 0.1 m left of its lines' centre."""
+  m = _model(lane_left=False, lane_right=True)
+  m.laneLines = [_path(-5.0 - cam), _path(lane_left - cam), _path(lane_right - cam), _path(5.0 - cam)]
+  m.roadEdges = [_path(edge_left - cam), _path(7.5 - cam)]
+  m.position = _path(plan - follow * cam)
+  return m
+
+
+def test_plan_slack_narrow_lane_with_a_barrier_behind_the_line_gets_the_small_margin():
+  v = 21.0
+  sl = dlc.plan_slack(_zone_model(), v, 0.0, 0.94, 0.25, multi_lane=True)
+  assert sl.barrier_left and not sl.barrier_right
+  assert sl.left == pytest.approx(1.15 - 0.10 - 0.94 - dlc.BARRIER_LINE_MARGIN)
+  assert sl.right == pytest.approx(1.55 + 0.10 - 0.94 - 0.25)
+  for kw in ({"multi_lane": False}, {"multi_lane": True, "v": 15.0}):  # country road / below 60 km/h
+    sl = dlc.plan_slack(_zone_model(), kw.pop("v", v), 0.0, 0.94, 0.25, **kw)
+    assert not sl.barrier_left and sl.left == pytest.approx(1.15 - 0.10 - 0.94 - 0.25)
+  for m in (_zone_model(lane_right=1.95),  # 3.10 m lane: a normal one
+            _zone_model(edge_left=-3.0)):  # edge 1.85 m out: a shoulder, not a barrier at the line
+    assert not dlc.plan_slack(m, v, 0.0, 0.94, 0.25, multi_lane=True).barrier_left
+
+
+def test_plan_slack_a_radar_wall_behind_the_line_counts_as_the_barrier():
+  m = _zone_model(edge_left=-4.0)
+  m.roadEdgeStds = [2.0, 0.3]  # no usable edge on the left
+  wall = Wall(y=-1.8, slope=0.0, curvature=0.0, residual=0.02, points=12)
+  assert dlc.plan_slack(m, 21.0, 0.0, 0.94, 0.25, (wall, None), 0.6, multi_lane=True).barrier_left
+
+
+def _zone_run(v, seconds=20.0):
+  d = _dyn(LaneCenterOffset=0.1, LaneCenteringOffsetMode=1, LaneCenteringDwell=0.0)
+  cam = 0.0
+  for i in range(int(round(seconds / DT_CTRL))):
+    upd = i % 5 == 0
+    if upd:
+      cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)
+    d.update(0.0, _zone_model(cam), upd, True, v, True, False, False, cam)
+  return d
+
+
+def test_double_line_zone_keeps_the_lane_offset_instead_of_pushing_off_the_old_line():
+  # route 269: margin 0.25 to the old white line pushed the offset to the +0.30 cap (right) and
+  # the driver steered left 20-50% of the time; the yellow line was between it and the guardrail
+  d = _zone_run(21.0)
+  assert d.position == LanePosition.LEFT
+  assert d.offset == pytest.approx(-0.10, abs=0.01) and not d.limited
+  # the same lane below 60 km/h keeps the normal margin and is pushed right
+  d = _zone_run(15.0)
+  assert d.offset > 0.1 and d.limit_cause == dlc.LimitCause.LEFT_LINE

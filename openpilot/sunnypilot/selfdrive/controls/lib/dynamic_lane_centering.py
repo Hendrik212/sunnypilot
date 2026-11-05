@@ -76,6 +76,15 @@ model ran 0.2-0.4 m right of its centre, left line barely seen). So:
   there (the plan follows only part of a shift); wall clearance and the line's give still bound it;
 - WALL_INSIDE_CAP 0.8 -> 1.2 m, live as LaneCenteringWallInsideCap; it also caps a middle
   target (WALL_CAP stopped the plan half way there).
+Route 269 (2026-11-04, construction zone ~75 km/h, ~3 min): a 2.70 m lane, on the left the old
+white line and the valid yellow one between it and the guardrail (road edge 0.7-1.2 m beyond
+the white line). The model's lines were the white one, its plan rode the yellow lane ~0.15 m
+from the white paint; the 0.25 m margin pushed the offset from -0.10 to the +0.30 cap and the
+driver steered left 20-50% of the time. So in a lane narrower than BARRIER_LANE_WIDTH with a
+lane on the other side (MIDDLE/LEFT), above BARRIER_MIN_SPEED, a line with a road edge or radar
+wall BARRIER_BEYOND outside it gets BARRIER_LINE_MARGIN; the barrier keeps its own clearance.
+On routes 24f-26a this fires only there (2.9 min) and for seconds elsewhere; RIGHT/SINGLE
+country roads are excluded (a verge behind the right line is common there, routes 237/238).
 
 Each side's slack becomes a bound on the offset (hi = offset_used + right slack, lo =
 offset_used - left slack). A bound tightens at once, holds BOUND_RELAX_HOLD, then relaxes over
@@ -154,6 +163,12 @@ NARROW_BIAS = 0.05  # m more clearance on the left than on the right when the de
 LINE_GIVE = 0.25  # m a line or edge yields in a narrow lane (body ~at the paint at margin 0.25)
 WALL_GIVE = 0.45  # m it yields against a near wall (construction lines are often the old ones)
 LINE_MIN_PROB = 0.5
+# narrow multi-lane lane with a barrier just behind a line: the line is likely an old white one
+# with the valid yellow one between it and the barrier, so the car may come closer to it
+BARRIER_LINE_MARGIN = 0.05  # m, body to that line instead of the min clearance
+BARRIER_LANE_WIDTH = 2.85  # m, lanes narrower than this (construction lanes 2.5-2.75 m)
+BARRIER_BEYOND = (0.3, 1.2)  # m, road edge or radar wall this far outside the line
+BARRIER_MIN_SPEED = 60 / 3.6  # m/s
 EDGE_MAX_STD = 0.5
 # camera-mode status readout only
 CAMERA_STATUS_MIN_PROB = 0.5
@@ -303,6 +318,8 @@ class Slack:
   wall_inside_left: bool = False
   wall_mid: float | None = None  # offset (m, + = right) that puts the car between two near walls
   wall_line_err: float | None = None  # plan to the middle of a lone near wall and the line opposite (m, + = right)
+  barrier_right: bool = False  # that line got BARRIER_LINE_MARGIN (narrow lane, barrier just behind it)
+  barrier_left: bool = False
 
 
 def _wall_near(gap: float, line_gap: float | None) -> bool:
@@ -311,8 +328,14 @@ def _wall_near(gap: float, line_gap: float | None) -> bool:
   return gap < WALL_NEAR and (line_gap is None or gap < line_gap + WALL_BEYOND_LINE)
 
 
+def _barrier_beyond(line_y: np.ndarray, sign: float, edge_y: np.ndarray | None, wall_y: np.ndarray | None) -> bool:
+  """A road edge or radar wall BARRIER_BEYOND outside a line (sign +1 right side, -1 left side)."""
+  lo, hi = BARRIER_BEYOND
+  return any(y is not None and lo <= float(np.median(sign * (y - line_y))) <= hi for y in (edge_y, wall_y))
+
+
 def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, margin: float,
-               walls=(None, None), wall_margin: float = DEFAULT_WALL_CLEARANCE) -> Slack:
+               walls=(None, None), wall_margin: float = DEFAULT_WALL_CLEARANCE, multi_lane: bool = False) -> Slack:
   out = Slack()
   try:
     pos = model_v2.position
@@ -327,20 +350,27 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
     left: list[tuple[float, LimitCause]] = []
     line_gap = [None, None]  # body to a confident lane line (right, left)
     # model boundaries are in the shifted frame: real = model + camera offset
+    wl, wr = walls
     if len(lines) >= 3 and len(probs) >= 3:
+      line_l, line_r = _interp(x, lines[1]) + camera_offset, _interp(x, lines[2]) + camera_offset
+      if multi_lane and v_ego > BARRIER_MIN_SPEED and min(probs[1], probs[2]) >= LINE_MIN_PROB and \
+         float(np.median(line_r - line_l)) < BARRIER_LANE_WIDTH:
+        edge_ok = len(edges) >= 2 and len(edge_stds) >= 2
+        edge = [_interp(x, edges[i]) + camera_offset if edge_ok and edge_stds[i] <= EDGE_MAX_STD else None for i in (1, 0)]
+        out.barrier_right = _barrier_beyond(line_r, 1.0, edge[0], None if wr is None else wr.at(x))
+        out.barrier_left = _barrier_beyond(line_l, -1.0, edge[1], None if wl is None else wl.at(x))
       if probs[2] >= LINE_MIN_PROB:
-        line_gap[0] = float(np.min(_interp(x, lines[2]) + camera_offset - track) - half_width)
-        right.append((line_gap[0] - margin, LimitCause.RIGHT_LINE))
+        line_gap[0] = float(np.min(line_r - track) - half_width)
+        right.append((line_gap[0] - (BARRIER_LINE_MARGIN if out.barrier_right else margin), LimitCause.RIGHT_LINE))
       if probs[1] >= LINE_MIN_PROB:
-        line_gap[1] = float(np.min(track - _interp(x, lines[1]) - camera_offset) - half_width)
-        left.append((line_gap[1] - margin, LimitCause.LEFT_LINE))
+        line_gap[1] = float(np.min(track - line_l) - half_width)
+        left.append((line_gap[1] - (BARRIER_LINE_MARGIN if out.barrier_left else margin), LimitCause.LEFT_LINE))
     if len(edges) >= 2 and len(edge_stds) >= 2:
       if edge_stds[1] <= EDGE_MAX_STD:
         right.append((np.min(_interp(x, edges[1]) + camera_offset - track) - half_width - margin - EDGE_EXTRA, LimitCause.RIGHT_EDGE))
       if edge_stds[0] <= EDGE_MAX_STD:
         left.append((np.min(track - _interp(x, edges[0]) - camera_offset) - half_width - margin - EDGE_EXTRA, LimitCause.LEFT_EDGE))
     # radar walls are in the real frame already; the car is at y = 0 now
-    wl, wr = walls
     if wr is not None:
       out.wall_right = True
       gap = float(np.min(wr.at(x) - track)) - half_width
@@ -644,7 +674,9 @@ class DynamicLaneCentering:
           self.guard.reset()
         else:
           cam = applied_camera_offset if applied_camera_offset is not None else self.camera_offset
-          self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin), -cam)
+          multi_lane = self.classifier.position in (LanePosition.MIDDLE, LanePosition.LEFT)
+          self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin,
+                                          multi_lane), -cam)
       self.guard.single = self.classifier.position == LanePosition.SINGLE
       self.guard.blindspot = (bool(blindspot[1]), bool(blindspot[0]))
       self.guard.update()
