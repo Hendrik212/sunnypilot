@@ -103,7 +103,8 @@ class _Params:
 def test_set_is_whitelisted_ranged_typed_and_undo_walks_back(tmp_path):
   log = str(tmp_path / "changes.jsonl")
   p = _Params(LaneCenteringWallClearance=0.6, SteerDriverAllowanceLow=75)
-  assert q.set_param(p, "SteerHeadroomCan", "900", log).startswith("refused")
+  assert q.set_param(p, "LatAccelFactorCap", "3.0", log).startswith("refused")
+  assert q.set_param(p, "SteerHeadroomCan", "1100", log).startswith("refused")
   assert q.set_param(p, "LaneCenteringWallClearance", "2.0", log).startswith("refused")
   assert q.set_param(p, "LaneCenteringWallClearance", "0.8", log) == "LaneCenteringWallClearance: 0.6 -> 0.8"
   assert q.set_param(p, "SteerDriverAllowanceLow", "150.4", log) == "SteerDriverAllowanceLow: 75 -> 150"

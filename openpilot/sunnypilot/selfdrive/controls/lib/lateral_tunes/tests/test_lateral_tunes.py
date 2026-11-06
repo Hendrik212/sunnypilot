@@ -753,15 +753,16 @@ class TestSaturationHeadroom:
     assert ll.headroom_ratio(3.0) == 1.0 and ll.headroom_ratio(20.0) == 1.0
     assert np.isclose(ll.headroom_ratio(10.0), 600 / 409)
     assert ll.headroom_ratio(10.0, 409) == 1.0 and ll.headroom_ratio(10.0, 100) == 1.0  # off
-    assert np.isclose(ll.headroom_ratio(10.0, 9999), 650 / 409)  # panda envelope
+    assert np.isclose(ll.headroom_ratio(10.0, 9999), 1023 / 409)  # panda envelope
 
   def test_live_limits_are_clipped(self):
     from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
-    ll.set_live_limits(9999, 99, 9999)
-    assert ll._live == {"headroom_can": 650, "delta_down_low": 10, "driver_allowance_low": 250}
-    ll.set_live_limits("x", None, "y")
+    ll.set_live_limits(9999, 99, 9999, 99)
+    assert ll._live == {"headroom_can": 1023, "delta_down_low": 50, "driver_allowance_low": 250, "delta_up_low": 50}
+    ll.set_live_limits("x", None, "y", "z")
     assert ll._live == {"headroom_can": ll.DEFAULT_HEADROOM_CAN, "delta_down_low": ll.DEFAULT_DELTA_DOWN_LOW,
-                        "driver_allowance_low": ll.STARPILOT_STEER_DRIVER_ALLOWANCE}
+                        "driver_allowance_low": ll.STARPILOT_STEER_DRIVER_ALLOWANCE,
+                        "delta_up_low": ll.DEFAULT_DELTA_UP_LOW}
     ll.set_live_limits(600, 10, 10)  # never below the StarPilot 75
     assert ll._live["driver_allowance_low"] == 75
 
@@ -777,6 +778,22 @@ class TestSaturationHeadroom:
     finally:
       ll.set_live_limits(ll.DEFAULT_HEADROOM_CAN, ll.DEFAULT_DELTA_DOWN_LOW)
     assert allow == {2.0: 75, 10.0: 150, 14.6: 113, 25.0: 75}
+
+  def test_live_rates_apply_at_low_speed_and_ramp_to_highway_rates(self):
+    from opendbc.sunnypilot.car.hyundai import lateral_limits as ll
+    CarInterface = interfaces[HYUNDAI.HYUNDAI_IONIQ_6]
+    CP = CarInterface.get_non_essential_params(HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HYUNDAI.HYUNDAI_IONIQ_6)
+    CP_SP.flags |= HyundaiFlagsSP.LAT_TUNE_STARPILOT.value
+    rates = {}
+    for up in (10, 30):
+      ll.set_live_limits(ll.DEFAULT_HEADROOM_CAN, 40, ll.STARPILOT_STEER_DRIVER_ALLOWANCE, up)
+      try:
+        rates[up] = {v: (P.STEER_DELTA_UP, P.STEER_DELTA_DOWN)
+                     for v in (10.0, 25.0) for P in [CarControllerParams(CP, v, CP_SP=CP_SP)]}
+      finally:
+        ll.set_live_limits(ll.DEFAULT_HEADROOM_CAN, ll.DEFAULT_DELTA_DOWN_LOW)
+    assert rates == {10: {10.0: (10, 40), 25.0: (2, 3)}, 30: {10.0: (30, 40), 25.0: (2, 3)}}
 
   def test_light_hand_resistance_keeps_the_headroom_with_a_bigger_allowance(self):
     from types import SimpleNamespace
