@@ -395,7 +395,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
       desired_angle_no_offset = math.degrees(VM.get_steer_from_curvature(-desired_curvature, CS.vEgo, params.roll))
       actual_angle_no_offset = CS.steeringAngleDeg - params.angleOffsetDeg
       output_torque = i6.get_ioniq_6_low_speed_angle_assist_torque(desired_angle_no_offset, actual_angle_no_offset,
-                                                                   output_torque, CS.vEgo)
+                                                                   output_torque, CS.vEgo, ctl.steer_max)
 
     # Highway output tapers: trim authority at high speed / during transitions to keep
     # sweepers smooth rather than notchy.

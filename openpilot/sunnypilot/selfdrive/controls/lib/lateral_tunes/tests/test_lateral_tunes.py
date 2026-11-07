@@ -795,6 +795,14 @@ class TestSaturationHeadroom:
         ll.set_live_limits(ll.DEFAULT_HEADROOM_CAN, ll.DEFAULT_DELTA_DOWN_LOW)
     assert rates == {10: {10.0: (10, 40), 25.0: (2, 3)}, 30: {10.0: (30, 40), 25.0: (2, 3)}}
 
+  def test_low_speed_assists_keep_the_headroom_clip(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_shaping as sh
+    # route 26f: 22 km/h, desired -110 deg, actual -60 deg, controller already at the 650 clip
+    v, lim = 22 / 3.6, 650 / 409
+    assert sh.get_ioniq_6_low_speed_angle_assist_torque(110.0, 60.0, -lim, v, lim) == -lim  # assist term is tiny, sign opposite
+    assert np.isclose(sh.get_ioniq_6_low_speed_angle_assist_torque(-110.0, -60.0, lim, v, lim), lim)
+    assert sh.get_ioniq_6_low_speed_angle_assist_torque(-110.0, -60.0, lim, v) == 1.0  # old +-1 default
+
   def test_light_hand_resistance_keeps_the_headroom_with_a_bigger_allowance(self):
     from types import SimpleNamespace
     from opendbc.sunnypilot.car.hyundai.lateral_limits import apply_headroom_driver_limits

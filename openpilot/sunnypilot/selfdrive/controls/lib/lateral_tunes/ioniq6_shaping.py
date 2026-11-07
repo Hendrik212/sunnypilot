@@ -543,7 +543,11 @@ def get_ioniq_6_2023_low_speed_center_error_scale(desired_lateral_accel: float, 
 
 
 def get_ioniq_6_low_speed_angle_assist_torque(desired_angle_deg: float, actual_angle_deg: float,
-                                              current_output_torque: float, v_ego: float) -> float:
+                                              current_output_torque: float, v_ego: float,
+                                              torque_limit: float = 1.0) -> float:
+  # torque_limit = the controller's steer_max. A fixed +-1.0 here undid the saturation headroom
+  # (> 1.0 between 18 and 55 km/h): the sigmoid speed weights stay above the 1e-4 early return
+  # up to ~25 km/h, so route 26f held the request at exactly 409 through 18-25 km/h corners.
   angle_error = desired_angle_deg - actual_angle_deg
   if desired_angle_deg * angle_error > 0.0:
     speed_weight = _ioniq_6_sigmoid((IONIQ_6_LOW_SPEED_ANGLE_ASSIST_SPEED - max(v_ego, 0.0)) /
@@ -568,9 +572,9 @@ def get_ioniq_6_low_speed_angle_assist_torque(desired_angle_deg: float, actual_a
       add_scale = float(np.interp(abs(current_output_torque),
                                   IONIQ_6_LOW_SPEED_ANGLE_ASSIST_ADD_BP,
                                   IONIQ_6_LOW_SPEED_ANGLE_ASSIST_ADD_V))
-      return float(np.clip(current_output_torque + (assist_torque * add_scale), -1.0, 1.0))
+      return float(np.clip(current_output_torque + (assist_torque * add_scale), -torque_limit, torque_limit))
 
-    return float(np.clip(current_output_torque + assist_torque, -1.0, 1.0))
+    return float(np.clip(current_output_torque + assist_torque, -torque_limit, torque_limit))
 
   speed_weight = _ioniq_6_sigmoid((IONIQ_6_LOW_SPEED_UNWIND_ASSIST_SPEED - max(v_ego, 0.0)) /
                                   IONIQ_6_LOW_SPEED_UNWIND_ASSIST_SPEED_WIDTH)
@@ -585,4 +589,4 @@ def get_ioniq_6_low_speed_angle_assist_torque(desired_angle_deg: float, actual_a
   if current_output_torque * assist_torque >= 0.0:
     assist_torque *= IONIQ_6_LOW_SPEED_UNWIND_ASSIST_BLEND
 
-  return float(np.clip(current_output_torque + assist_torque, -1.0, 1.0))
+  return float(np.clip(current_output_torque + assist_torque, -torque_limit, torque_limit))
