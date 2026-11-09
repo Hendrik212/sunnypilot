@@ -59,8 +59,23 @@ def _pkl_exists(path):
   return os.path.exists(path)
 
 
-def _find_driving_pkl(bundle):
-  if (override := os.environ.get('COMBINED_MODEL_PKL')) and _pkl_exists(override):
+def _override_pkl(chestnut: bool) -> str | None:
+  # COMBINED_MODEL_PKL runs a pkl that is not in the model registry (e.g. a compiled upstream PR model).
+  # Small model only: a QCOM pkl must never be picked up as the chestnut model.
+  override = os.environ.get('COMBINED_MODEL_PKL')
+  return override if override and not chestnut and _pkl_exists(override) else None
+
+
+def _override_generation() -> int | None:
+  # COMBINED_MODEL_GENERATION: the registry generation the override pkl runs as (curvature smoothing >= 10, mlsim >= 11)
+  try:
+    return int(os.environ['COMBINED_MODEL_GENERATION'])
+  except (KeyError, ValueError):
+    return None
+
+
+def _find_driving_pkl(bundle, chestnut: bool = False):
+  if override := _override_pkl(chestnut):
     return override
   if bundle is None or not bundle.models:
     return None
@@ -91,12 +106,12 @@ class ModelState(ModelStateBase):
   def __init__(self, cam_w: int, cam_h: int, chestnut: bool = False):
     ModelStateBase.__init__(self)
 
-    env_pkl = os.environ.get('COMBINED_MODEL_PKL')
-    if env_pkl and os.path.exists(env_pkl):
+    if _override_pkl(chestnut):
       model_bundle = None
+      self.generation = _override_generation()
     else:
       model_bundle = get_active_bundle(chestnut=chestnut)
-    self.generation = model_bundle.generation if model_bundle is not None else None
+      self.generation = model_bundle.generation if model_bundle is not None else None
     overrides = {override.key: override.value for override in model_bundle.overrides} if model_bundle else {}
 
     # Bundle defaults. LAT_SMOOTH_SECONDS can be overridden at runtime by the LatSmoothSeconds
@@ -109,7 +124,7 @@ class ModelState(ModelStateBase):
     self.YAW_RATE_BLEND: float = 0.0  # ModelYawRateBlend param, see yaw_rate_blend.py
     self.chestnut = chestnut
 
-    pkl_path = _find_driving_pkl(model_bundle)
+    pkl_path = _find_driving_pkl(model_bundle, chestnut)
     assert pkl_path is not None, f"No driving pkl found for {'chestnut' if chestnut else 'small model'} — all models must be compiled with compile_modeld.py"
     self._init_combined(pkl_path, cam_w, cam_h, model_bundle)
 
@@ -267,7 +282,7 @@ def main(demo=False):
   cloudlog.bind(daemon=PROCESS_NAME)
   setproctitle(PROCESS_NAME)
 
-  CHESTNUT = _find_driving_pkl(get_active_bundle(chestnut=True)) is not None and (chestnut_present() or cable_connected())
+  CHESTNUT = _find_driving_pkl(get_active_bundle(chestnut=True), chestnut=True) is not None and (chestnut_present() or cable_connected())
   if CHESTNUT:
     from tinygrad.runtime.ops_amd import AMDDevice
     AMDDevice.wait_timeout_ms = 3000

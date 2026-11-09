@@ -53,6 +53,22 @@ class TestFindDrivingPkl(OpenpilotTestCase):
     assert result is not None
     assert 'driving_fof_tinygrad.pkl' in result
 
+  def test_env_override_small_model_only(self, tmp_path, monkeypatch):
+    override = tmp_path / 'driving_cheddar_tinygrad.pkl'
+    override.write_bytes(b'fake')
+    monkeypatch.setattr(modeld_module.os, 'environ', {'COMBINED_MODEL_PKL': str(override)})
+    assert _find_driving_pkl(None) == str(override)
+    assert _find_driving_pkl(None, chestnut=True) is None
+
+  def test_env_override_missing_file_is_ignored(self, tmp_path, monkeypatch):
+    monkeypatch.setattr(modeld_module.os, 'environ', {'COMBINED_MODEL_PKL': str(tmp_path / 'missing.pkl')})
+    assert _find_driving_pkl(None) is None
+
+  def test_override_generation(self, monkeypatch):
+    for env, expected in (({'COMBINED_MODEL_GENERATION': '12'}, 12), ({'COMBINED_MODEL_GENERATION': 'x'}, None), ({}, None)):
+      monkeypatch.setattr(modeld_module.os, 'environ', env)
+      assert modeld_module._override_generation() == expected
+
 
 # Init — assertion guard
 
