@@ -76,6 +76,13 @@ model ran 0.2-0.4 m right of its centre, left line barely seen). So:
   there (the plan follows only part of a shift); wall clearance and the line's give still bound it;
 - WALL_INSIDE_CAP 0.8 -> 1.2 m, live as LaneCenteringWallInsideCap; it also caps a middle
   target (WALL_CAP stopped the plan half way there).
+Route 272 (2026-11-09, same zone, ~35 s between two walls): the middle target was taken raw from
+every model frame and swung up to 0.33 m in 0.5 s -- the left wall was fitted only about a third
+of the time and the left line sat around LINE_MIN_PROB, so it switched between the two-wall
+middle (against the lane centre) and the wall-line middle (against the plan); the offset
+wandered -0.15..+0.26 m and the car drifted left and right. So both middles are measured against
+the plan (the two-wall one needs no lane line) and low-passed over MID_TAU (a deadband would leave
+up to its width as a lasting error: the middle is integrated against the plan).
 Route 269 (2026-11-04, construction zone ~75 km/h, ~3 min): a 2.70 m lane, on the left the old
 white line and the valid yellow one between it and the guardrail (road edge 0.7-1.2 m beyond
 the white line). The model's lines were the white one, its plan rode the yellow lane ~0.15 m
@@ -155,6 +162,7 @@ BOUND_RELAX_TAU = 3.0  # s, then it relaxes over this (it tightens at once)
 FAST_SLACK = 0.05  # m inside a margin before the offset moves at GUARD_RELEASE_RATE
 BOUND_HOLD = 2.0  # s a side keeps its bound after its boundary was last seen
 WALL_HOLD = 3.0  # s a near wall keeps its bound and the offset frozen after it was last seen
+MID_TAU = 3.0  # s low-pass on the middle target between walls (route 272: raw it swung 0.33 m in 0.5 s)
 OFFSET_CAP = 0.30  # m
 WALL_CAP = 0.50  # m with a near wall: the plan only follows ~half a camera shift
 WALL_INSIDE_CAP = 1.20  # m when that wall stands inside the model's lane line on its side (LaneCenteringWallInsideCap)
@@ -316,8 +324,7 @@ class Slack:
   wall_slack_left: float | None = None
   wall_inside_right: bool = False  # near wall closer than the model's line on that side
   wall_inside_left: bool = False
-  wall_mid: float | None = None  # offset (m, + = right) that puts the car between two near walls
-  wall_line_err: float | None = None  # plan to the middle of a lone near wall and the line opposite (m, + = right)
+  mid_err: float | None = None  # plan to the middle of two near walls, or of a lone near wall and the line opposite (m, + = right)
   barrier_right: bool = False  # that line got BARRIER_LINE_MARGIN (narrow lane, barrier just behind it)
   barrier_left: bool = False
 
@@ -387,18 +394,16 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
       gap = min(gap, -float(wl.at(0.0)) - half_width)
       out.wall_near_left = _wall_near(gap, line_gap[1])
       out.wall_inside_left = out.wall_near_left and line_gap[1] is not None and gap < line_gap[1]
-    if wl is not None and wr is not None and len(lines) >= 3 and len(probs) >= 3 and \
-       max(-wl.at(0.0), wr.at(0.0)) - half_width < WALL_NEAR and min(probs[1], probs[2]) >= LINE_MIN_PROB:
-      # wall middle minus the real lane centre, along the plan
-      centre = 0.5 * (_interp(x, lines[1]) + _interp(x, lines[2])) + camera_offset
-      out.wall_mid = float(np.mean(0.5 * (wl.at(x) + wr.at(x)) - centre))
+    # middles are measured against the plan (not the lane centre: the wall-side line is often
+    # old or not seen), so both kinds of middle agree when a wall drops in and out
+    if wl is not None and wr is not None and max(-wl.at(0.0), wr.at(0.0)) - half_width < WALL_NEAR:
+      out.mid_err = float(np.mean(0.5 * (wl.at(x) + wr.at(x)) - track))
     elif len(lines) >= 3 and len(probs) >= 3:
-      # one near wall and a confident line on the other side: the middle between them, against
-      # the plan (not the lane centre: the wall-side line is often old or not seen)
+      # one near wall and a confident line on the other side: the middle between them
       if wl is not None and wr is None and out.wall_near_left and probs[2] >= LINE_MIN_PROB:
-        out.wall_line_err = float(np.mean(0.5 * (wl.at(x) + _interp(x, lines[2]) + camera_offset) - track))
+        out.mid_err = float(np.mean(0.5 * (wl.at(x) + _interp(x, lines[2]) + camera_offset) - track))
       elif wr is not None and wl is None and out.wall_near_right and probs[1] >= LINE_MIN_PROB:
-        out.wall_line_err = float(np.mean(0.5 * (wr.at(x) + _interp(x, lines[1]) + camera_offset) - track))
+        out.mid_err = float(np.mean(0.5 * (wr.at(x) + _interp(x, lines[1]) + camera_offset) - track))
     right = [r for r in right if np.isfinite(r[0])]
     left = [lf for lf in left if np.isfinite(lf[0])]
     if right:
@@ -458,7 +463,7 @@ class ClearanceGuard:
     self._causes = [LimitCause.NONE, LimitCause.NONE]
     self._near_t = [WALL_HOLD, WALL_HOLD]  # s since a near wall was seen (right, left)
     self._inside_t = [WALL_HOLD, WALL_HOLD]  # s since a near wall inside the model's line was seen
-    self._mid: float | None = None  # last offset between two walls, or a wall and the line opposite
+    self._mid: float | None = None  # low-passed offset between two walls, or a wall and the line opposite
     self._mid_t = WALL_HOLD
     self._frame_mid: float | None = None
     self.single = False  # single-lane road: the left side is oncoming traffic
@@ -483,10 +488,9 @@ class ClearanceGuard:
       self._w[i].update(None if wsl is None else sign * offset_used + wsl, dt)
       if sl is not None:
         self._causes[i] = cause
-    # the wall-line middle is relative to the plan, which follows only part of a shift: adding
-    # it to the offset in use keeps moving the offset until the plan is there (or the cap)
-    self._frame_mid = slack.wall_mid if slack.wall_mid is not None else \
-      None if slack.wall_line_err is None else offset_used + slack.wall_line_err
+    # the middle is relative to the plan, which follows only part of a shift: adding it to the
+    # offset in use keeps moving the offset until the plan is there (or the cap)
+    self._frame_mid = None if slack.mid_err is None else offset_used + slack.mid_err
 
   def update(self, dt: float = DT_CTRL) -> None:
     sl = self.slack
@@ -495,7 +499,11 @@ class ClearanceGuard:
       for i, seen in enumerate(flags):
         t[i] = 0.0 if seen else min(t[i] + dt, WALL_HOLD)
     if self._frame_mid is not None:
-      self._mid, self._mid_t = self._frame_mid, 0.0
+      if self.mid is None:
+        self._mid = self._frame_mid
+      else:
+        self._mid += (1.0 - np.exp(-dt / MID_TAU)) * (self._frame_mid - self._mid)
+      self._mid_t = 0.0
     else:
       self._mid_t = min(self._mid_t + dt, WALL_HOLD)
 

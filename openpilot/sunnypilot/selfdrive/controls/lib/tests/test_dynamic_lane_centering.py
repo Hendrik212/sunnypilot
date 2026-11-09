@@ -456,7 +456,7 @@ def test_between_two_walls_the_target_is_their_middle():
   walls = (Wall(y=-1.45, slope=0.0, curvature=0.0, residual=0.02, points=12),
            Wall(y=2.2, slope=0.0, curvature=0.0, residual=0.02, points=12))
   sl = dlc.plan_slack(_model(lane_left=False), V, 0.0, 0.94, 0.0, walls, 0.0)
-  assert sl.wall_near_left and sl.wall_mid == pytest.approx(0.375)
+  assert sl.wall_near_left and sl.mid_err == pytest.approx(0.375)
   cam = 0.0
   for i in range(int(round(20.0 / DT_CTRL))):
     upd = i % 5 == 0
@@ -469,6 +469,26 @@ def test_between_two_walls_the_target_is_their_middle():
   assert d.offset == pytest.approx(0.375, abs=1e-3)
 
 
+def test_a_flickering_wall_does_not_swing_the_middle():
+  # route 272: between two walls the left one was fitted only about a third of the time, so the
+  # target switched between the two-wall middle and the right-wall/left-line middle every few
+  # frames; low-passed it stays within a few cm
+  d = _dyn(LaneCenterOffset=0.2, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0, LaneCenteringMinClearance=0.0,
+           LaneCenteringWallClearance=0.0)
+  left, right = Wall(y=-1.45, slope=0.0, curvature=0.0, residual=0.02, points=12), Wall(y=1.9, slope=0.0, curvature=0.0, residual=0.02, points=12)
+  cam, targets = 0.0, []
+  for i in range(int(round(30.0 / DT_CTRL))):
+    upd = i % 5 == 0
+    if upd:
+      cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)
+    walls = (left if (i // 5) % 3 == 0 else None, right)
+    d.update(0.0, _narrow_model(cam, 1.0, left=-1.75, right=1.75), upd, True, V, True, False, False, cam, walls)
+    targets.append(d.offset_target)
+  last = np.array(targets[-int(10.0 / DT_CTRL):])
+  assert np.ptp(last) < 0.06
+  assert 0.075 < last.mean() < 0.225  # between the wall-line and the two-wall middle
+
+
 @pytest.mark.parametrize("follow", [1.0, 0.5])
 def test_a_wall_and_the_line_opposite_the_target_is_their_middle(follow):
   # route 266 back: wall 1.0 m from the body, the model rides 0.2 m right of its centre and 0.15 m
@@ -478,7 +498,7 @@ def test_a_wall_and_the_line_opposite_the_target_is_their_middle(follow):
            LaneCenteringWallClearance=0.3)
   wall = (Wall(y=-1.94, slope=0.0, curvature=0.0, residual=0.02, points=12), None)
   sl = dlc.plan_slack(_narrow_model(0.0, follow, left=-1.6, right=1.09), V, 0.0, 0.94, 0.0, wall, 0.3)
-  assert sl.wall_near_left and sl.wall_line_err == pytest.approx(-0.425)
+  assert sl.wall_near_left and sl.mid_err == pytest.approx(-0.425)
   cam = 0.0
   for i in range(int(round(40.0 / DT_CTRL))):
     upd = i % 5 == 0

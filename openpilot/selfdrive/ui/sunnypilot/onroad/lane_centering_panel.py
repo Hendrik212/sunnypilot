@@ -85,8 +85,9 @@ BOUNDARY = {Lc.RIGHT_LINE: ("RIGHT LINE", 1), Lc.LEFT_LINE: ("LEFT LINE", -1),
             Lc.RIGHT_WALL: ("RIGHT RADAR WALL", 1), Lc.LEFT_WALL: ("LEFT RADAR WALL", -1)}
 
 
-def describe(status: St, cause: int, offset: float) -> tuple[str, rl.Color]:
-  """One line saying what lane centering is doing right now, and why when it is limited."""
+def describe(status: St, cause: int, offset: float, walls: tuple[bool, bool] = (False, False)) -> tuple[str, rl.Color]:
+  """One line saying what lane centering is doing right now, and why when it is limited.
+  walls: (left, right) radar wall seen."""
   if status != St.LIMITED:
     name, color = STATUS[status]
     if status in (St.SHIFT_LEFT, St.SHIFT_RIGHT, St.HOLD_LEFT, St.HOLD_RIGHT):
@@ -107,7 +108,12 @@ def describe(status: St, cause: int, offset: float) -> tuple[str, rl.Color]:
   if cause == Lc.WALL_NO_SHIFT_LEFT:
     return "RADAR WALL LEFT: NO SHIFT", AMBER
   if cause == Lc.NARROW:
-    return "NARROW LANE", AMBER
+    # route 272: "NARROW LANE" read as doing nothing while the shift was 0.9 m away from the wall
+    if abs(offset) < 0.02:
+      return "NARROW LANE: CENTERED", AMBER
+    wall_behind = walls[0] if offset > 0.0 else walls[1]  # the shift moves away from that wall
+    cm = f"{abs(offset) * 100:.0f} cm"
+    return (f"NARROW: WALL FIRST {cm}" if wall_behind else f"NARROW: {cm} {'RIGHT' if offset > 0.0 else 'LEFT'}"), AMBER
   return "LIMITED", AMBER
 
 
@@ -162,7 +168,8 @@ class LaneCenteringPanel(Widget):
     status = St(st.laneCentreStatus) if st.laneCentreStatus in St._value2member_map_ else St.OFF
     if not self._enabled:
       status = St.OFF
-    text, color = describe(status, st.laneCentreLimitCause, st.laneCentreOffset)
+    text, color = describe(status, st.laneCentreLimitCause, st.laneCentreOffset,
+                           (st.laneCentreWallLeft, st.laneCentreWallRight))
     return status, text, color
 
   @staticmethod
