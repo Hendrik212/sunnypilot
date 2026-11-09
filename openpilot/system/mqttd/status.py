@@ -11,12 +11,25 @@ from collections import defaultdict
 from openpilot.system.mqttd import mqttd
 from opendbc.car.hyundai import mqtt
 from openpilot.common.hardware import HARDWARE
+from openpilot.common.params import Params
 from openpilot.system.hardware.power_monitoring import VBATT_PAUSE_CHARGING
 
 # hardwared compares a low-passed car voltage against the shutdown threshold,
 # not the instantaneous reading (power_monitoring.CAR_VOLTAGE_LOW_PASS_K, 45s).
 # Mirror that here so the published value matches what actually triggers shutdown.
 CAR_VOLTAGE_LOW_PASS_TAU_S = 45.0
+
+# Cable probe: a parked car sleeps its CAN buses, so a cable plugged in later is never seen. pandad wakes the
+# car on CanWakeRequest (see CanWake in pandad.cc) so the 0x405 plug state is read again.
+CABLE_PROBE_INTERVAL_S = 3600.
+CABLE_PROBE_MIN_VOLTAGE = 12.0  # above the comma's own 11.8 V cutoff: never drain a weak 12 V battery
+
+
+def should_probe_cable(mqtt_connected, onroad, connector_connected, car_voltage, last_probe, now):
+  """Wake the parked car to read the plug state: only with the broker reachable (car at home), offroad, when the
+  cable is not known to be plugged in (unplugged, or unknown after a reboot), at most hourly, on a healthy 12 V."""
+  return (mqtt_connected and not onroad and connector_connected is not True and car_voltage is not None
+          and car_voltage >= CABLE_PROBE_MIN_VOLTAGE and now - last_probe >= CABLE_PROBE_INTERVAL_S)
 
 
 #f = open("mqtt_status_log.txt", "w")
@@ -176,7 +189,7 @@ def publish_binary_sensor_discovery(pm, sensor_name, device_info, config_prefix)
     "connector_connected": {
       "name": "Connector Connected",
       "state_topic": "openpilot/car_status",
-      # null (no 0x41c seen since boot) -> 'None' = unknown in HA, not unplugged
+      # null (no 0x405 seen since boot) -> 'None' = unknown in HA, not unplugged
       "value_template": "{{ 'ON' if value_json.connector_connected == true else ('OFF' if value_json.connector_connected == false else 'None') }}",
       "device_class": "plug",
     },
@@ -294,6 +307,8 @@ def status_thread():
   charging_time_remaining_prev = None
   charging_status_prev = None
   sleeptimer = time.monotonic()
+  params = Params()
+  last_probe = -CABLE_PROBE_INTERVAL_S  # first probe as soon as the conditions hold
   car_voltage_instant = None
   car_voltage_filtered = None
   car_voltage_last_t = None
@@ -351,16 +366,8 @@ def status_thread():
           print("[MQTT] Wake CAN bus button pressed - triggering wake", flush=True)
           with open("/tmp/mqtt_wake.log", "a") as f:
             f.write(f"{datetime.datetime.now()} - WAKE TRIGGERED\n")
-          try:
-            result = mqtt.wakeCanBus()
-            print(f"[MQTT] Wake result: {result}", flush=True)
-            with open("/tmp/mqtt_wake.log", "a") as f:
-              f.write(f"{datetime.datetime.now()} - Wake result: {result}\n")
-          except Exception as e:
-            print(f"[MQTT] Wake failed: {e}", flush=True)
-            with open("/tmp/mqtt_wake.log", "a") as f:
-              f.write(f"{datetime.datetime.now()} - Wake FAILED: {e}\n")
-
+          params.put_bool("CanWakeRequest", True)
+          last_probe = cur_time
 
       panda = messaging.recv_sock(panda_state_sock)
       location = messaging.recv_sock(location_sock)
@@ -369,6 +376,13 @@ def status_thread():
       panda_prev = panda if panda else panda_prev
       device_prev = device if device else device_prev
       location_prev = location if location else location_prev
+
+      onroad = device_prev is not None and device_prev.deviceState.started
+      if should_probe_cable(params.get_bool("MqttConnected"), onroad, mqtt.connector_connected_out, car_voltage_filtered,
+                            last_probe, cur_time):
+        print("[MQTT] cable state not known plugged in, requesting a CAN wake", flush=True)
+        params.put_bool("CanWakeRequest", True)
+        last_probe = cur_time
 
       topic = f"{status_prefix}/openpilot/status"
       content = {"panda_state": (strip_deprecated_keys(panda_prev.to_dict()) if panda_prev else None),

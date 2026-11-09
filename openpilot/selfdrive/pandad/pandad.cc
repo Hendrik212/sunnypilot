@@ -175,7 +175,7 @@ void fill_panda_can_state(cereal::PandaState::PandaCanState::Builder &cs, const 
   cs.setCanCoreResetCnt(can_health.can_core_reset_cnt);
 }
 
-std::optional<bool> send_panda_states(PubMaster *pm, Panda *panda, bool is_onroad, bool spoofing_started, bool always_offroad) {
+std::optional<bool> send_panda_states(PubMaster *pm, Panda *panda, bool is_onroad, bool spoofing_started, bool always_offroad, bool can_wake_active) {
   // build msg
   MessageBuilder msg;
   auto evt = msg.initEvent();
@@ -208,14 +208,15 @@ std::optional<bool> send_panda_states(PubMaster *pm, Panda *panda, bool is_onroa
     panda->set_safety_model(cereal::CarParams::SafetyModel::NO_OUTPUT);
   }
 
-  bool power_save_desired = !ignition_local;
+  // a CanWake window (offroad, ignition off) keeps the transceivers up and ELM327 safety until it ends
+  bool power_save_desired = !ignition_local && !can_wake_active;
   if (((health.flags_pkt & HEALTH_FLAG_POWER_SAVE_ENABLED) != 0U) != power_save_desired) {
     panda->set_power_saving(power_save_desired);
   }
 
   // set safety mode to NO_OUTPUT when car is off or we're not onroad. ELM327 is an alternative if we want to leverage athenad/connect
   bool should_close_relay = !ignition_local || !is_onroad;
-  if (should_close_relay && (health.safety_mode_pkt != (uint8_t)(cereal::CarParams::SafetyModel::NO_OUTPUT))) {
+  if (should_close_relay && !can_wake_active && (health.safety_mode_pkt != (uint8_t)(cereal::CarParams::SafetyModel::NO_OUTPUT))) {
     panda->set_safety_model(cereal::CarParams::SafetyModel::NO_OUTPUT);
   }
 
@@ -272,11 +273,12 @@ void send_peripheral_state(Panda *panda, PubMaster *pm) {
   pm->send("peripheralState", msg);
 }
 
-void process_panda_state(Panda *panda, PubMaster *pm, bool engaged, bool engaged_mads, bool is_onroad, bool spoofing_started, bool always_offroad) {
-  auto ignition_opt = send_panda_states(pm, panda, is_onroad, spoofing_started, always_offroad);
+std::optional<bool> process_panda_state(Panda *panda, PubMaster *pm, bool engaged, bool engaged_mads, bool is_onroad, bool spoofing_started,
+                                        bool always_offroad, bool can_wake_active) {
+  auto ignition_opt = send_panda_states(pm, panda, is_onroad, spoofing_started, always_offroad, can_wake_active);
   if (!ignition_opt) {
     LOGE("Failed to get ignition_opt");
-    return;
+    return std::nullopt;
   }
 
   // check if we should have pandad reconnect
@@ -288,7 +290,79 @@ void process_panda_state(Panda *panda, PubMaster *pm, bool engaged, bool engaged
   }
 
   panda->send_heartbeat(engaged, engaged_mads);
+  return ignition_opt;
 }
+
+// Offroad CAN wake for mqttd's charge-cable probe. A parked Ioniq 6 sleeps its buses, so a cable plugged in later
+// is never reported. On CanWakeRequest (offroad, ignition off) leave power save, switch to ELM327 safety (it only
+// passes 8-byte diagnostic frames such as 0x7DF) and send UDS session control + tester present on buses 0 and 1
+// for 3 s, then hold 10 s so the car's periodic status frames (0x405 plug state, 5 Hz) are received. Measured
+// 2026-11-09: the car answers within 0.2 s. Ends early if the car starts.
+class CanWake {
+public:
+  // true while a wake window is active
+  bool update(Panda *panda, uint64_t frame, bool is_onroad, bool ignition) {
+    if (active_) {
+      if (is_onroad || ignition) {
+        active_ = false;
+        LOGW("can wake: car started, window ended");
+        return false;
+      }
+      const uint64_t n = frame - start_;
+      if (n < SEND_FRAMES && n % 5 == 0) {
+        send(panda);
+      }
+      if (n >= WINDOW_FRAMES) {
+        active_ = false;
+        panda->set_safety_model(cereal::CarParams::SafetyModel::NO_OUTPUT);
+        panda->set_power_saving(true);
+        LOGW("can wake: done");
+      }
+      return active_;
+    }
+    if (frame % 100 != 0 || !params_.getBool("CanWakeRequest")) {
+      return false;
+    }
+    params_.remove("CanWakeRequest");
+    if (is_onroad || ignition) {
+      LOGW("can wake: request ignored, car is on");
+      return false;
+    }
+    panda->set_power_saving(false);
+    panda->set_safety_model(cereal::CarParams::SafetyModel::ELM327, 1U);
+    active_ = true;
+    start_ = frame;
+    LOGW("can wake: start");
+    return true;
+  }
+
+private:
+  static constexpr uint64_t SEND_FRAMES = 300;     // 3 s at 100 Hz
+  static constexpr uint64_t WINDOW_FRAMES = 1300;  // + 10 s listening
+
+  void send(Panda *panda) {
+    static const std::array<std::array<uint8_t, 8>, 2> uds = {{
+      {0x02, 0x10, 0x01, 0, 0, 0, 0, 0},  // diagnostic session control, default session
+      {0x02, 0x3e, 0x80, 0, 0, 0, 0, 0},  // tester present, no response
+    }};
+    MessageBuilder msg;
+    auto frames = msg.initEvent().initSendcan(4);
+    int i = 0;
+    for (uint8_t bus : {0, 1}) {
+      for (const auto &dat : uds) {
+        auto f = frames[i++];
+        f.setAddress(0x7DF);
+        f.setSrc(bus);
+        f.setDat(kj::arrayPtr(dat.data(), dat.size()));
+      }
+    }
+    panda->can_send(frames.asReader());
+  }
+
+  Params params_;
+  bool active_ = false;
+  uint64_t start_ = 0;
+};
 
 void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, bool is_onroad) {
   static Params params;
@@ -387,6 +461,9 @@ void pandad_run(Panda *panda) {
   bool engaged_mads = false;
   bool is_onroad = false;
   bool always_offroad = false;
+  bool ignition = false;
+  bool can_wake_active = false;
+  CanWake can_wake;
 
   // Main loop: receive CAN first, then process lower priority panda and peripheral state.
   while (!do_exit && check_connected(panda)) {
@@ -406,9 +483,13 @@ void pandad_run(Panda *panda) {
       }
       engaged_mads = process_mads_heartbeat(&sm);
       always_offroad = panda_safety.getOffroadMode();
-      process_panda_state(panda, &pm, engaged, engaged_mads, is_onroad, spoofing_started, always_offroad);
+      if (auto ign = process_panda_state(panda, &pm, engaged, engaged_mads, is_onroad, spoofing_started, always_offroad, can_wake_active)) {
+        ignition = *ign;
+      }
       panda_safety.configureSafetyMode(is_onroad);
     }
+
+    can_wake_active = can_wake.update(panda, rk.frame(), is_onroad, ignition);
 
     // Send out peripheralState at 2Hz
     if (rk.frame() % 50 == 0) {

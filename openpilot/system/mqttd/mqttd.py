@@ -7,6 +7,7 @@ from openpilot.common.hardware import HARDWARE
 from pyextra.paho.mqtt import client as mqtt_client
 from pyextra.paho.mqtt.client import MQTT_ERR_SUCCESS
 import json
+from openpilot.common.params import Params
 
 #f = open("mqtt_daemon_log.txt", "w")
 
@@ -47,6 +48,7 @@ def unsubscribe(pm, topic):
 def on_connect(client, userdata, flags, rc):
     if rc != 0:
         client.connected_flag = False
+        Params().put_bool("MqttConnected", False)
         print(f"Failed to connect, return code {rc}")
         #f.write(f"{datetime.datetime.now()} Failed to connect, return code {rc}\n")
         #f.flush()
@@ -54,6 +56,7 @@ def on_connect(client, userdata, flags, rc):
         #f.write(f"{datetime.datetime.now()} connected successfully\n")
         #f.flush()
         client.connected_flag = True
+        Params().put_bool("MqttConnected", True)  # status.py: broker reachable = car at home, may probe the cable
         client.sub_dict = update_subs(client, True)
 
         # Publish birth message for availability
@@ -90,6 +93,7 @@ def on_disconnect(client, userdata, rc):
         #f.write(f"{datetime.datetime.now()} Unexpected disconnection.\n")
         #f.flush()
     client.connected_flag = False
+    Params().put_bool("MqttConnected", False)
     for key in client.sub_dict.keys():
         client.sub_dict[key]["server_state"] = False
 
