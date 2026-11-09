@@ -176,7 +176,8 @@ def publish_binary_sensor_discovery(pm, sensor_name, device_info, config_prefix)
     "connector_connected": {
       "name": "Connector Connected",
       "state_topic": "openpilot/car_status",
-      "value_template": "{{ 'ON' if value_json.connector_connected else 'OFF' }}",
+      # null (no 0x41c seen since boot) -> 'None' = unknown in HA, not unplugged
+      "value_template": "{{ 'ON' if value_json.connector_connected == true else ('OFF' if value_json.connector_connected == false else 'None') }}",
       "device_class": "plug",
     },
   }
