@@ -164,9 +164,9 @@ procs = [
   PythonProcess("uploader", "openpilot.system.loggerd.uploader", uploader_ready),
   PythonProcess("statsd", "openpilot.sunnypilot.system.statsd", always_run),
 
-  # mqtt
-  PythonProcess("mqttd", "openpilot.system.mqttd.mqttd", only_offroad),
-  PythonProcess("mqttd_status", "openpilot.system.mqttd.status", only_offroad),
+  # mqtt: the car's own broker; a PC run (verify_host_boot, replay) would publish to the same topics
+  PythonProcess("mqttd", "openpilot.system.mqttd.mqttd", only_offroad, enabled=not PC),
+  PythonProcess("mqttd_status", "openpilot.system.mqttd.status", only_offroad, enabled=not PC),
 
   # abrp ble (disabled - needs investigation)
   # PythonProcess("abrp_ble", "openpilot.system.abrp_ble.abrp_ble", always_run),
