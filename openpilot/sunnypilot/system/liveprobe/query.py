@@ -27,6 +27,8 @@ MARK_DIR = os.path.join(DATA_DIR, "marks")
 WHITELIST: dict[str, tuple[float, float]] = {
   "LaneCenteringWallClearance": (0.3, 1.0),
   "LaneCenteringWallInsideCap": (0.3, 1.5),
+  "LaneCenteringOncomingClearance": (0.0, 0.6),
+  "LaneCenteringOncomingCap": (0.0, 0.6),
   "LaneCenteringMinClearance": (0.0, 0.5),
   "LaneCenterOffset": (0.0, 0.3),
   "LaneCenteringMiddleBias": (-0.2, 0.2),

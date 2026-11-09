@@ -314,8 +314,8 @@ def test_guard_opens_on_lane_change():
   assert d.guard.hi is None
 
 
-def _pinched(g, right, left, single=False, blindspot=(False, False), n=50, **kw):
-  g.single, g.blindspot = single, blindspot
+def _pinched(g, right, left, single=False, oncoming=False, blindspot=(False, False), n=50, **kw):
+  g.single, g.oncoming, g.blindspot = single, oncoming, blindspot
   for _ in range(n):
     g.set_slack(dlc.Slack(right=right, left=left, right_cause=dlc.LimitCause.RIGHT_LINE, left_cause=dlc.LimitCause.LEFT_LINE, **kw))
     g.update(0.0)
@@ -332,9 +332,64 @@ def test_narrow_single_lane_keeps_the_centre_line_clear():
   # 10 cm short on both sides of a country road: the left (oncoming) side gets its margin, the
   # right line yields; the old balance put the deficit on both sides
   assert _pinched(dlc.ClearanceGuard(), -0.1, -0.1, single=True) == (pytest.approx(0.1), dlc.LimitCause.NARROW)
-  # more short than the right line may give: the rest is split
+  # above ONCOMING_SPEED (single only) the right line gives LINE_GIVE, the rest is split
   out, cause = _pinched(dlc.ClearanceGuard(), -0.3, -0.2, single=True)
   assert cause == dlc.LimitCause.NARROW and out == pytest.approx(-0.05 + 0.5 * (0.2 + 0.05))
+  # oncoming traffic (below ONCOMING_SPEED): the right line yields all of it (route 275)
+  assert _pinched(dlc.ClearanceGuard(), -0.3, -0.2, oncoming=True) == (pytest.approx(0.2), dlc.LimitCause.NARROW)
+  # a car alongside on the right: the right line gives nothing, the deficit is split
+  out, cause = _pinched(dlc.ClearanceGuard(), -0.3, -0.2, oncoming=True, blindspot=(True, False))
+  assert cause == dlc.LimitCause.NARROW and out == pytest.approx(-0.3 + 0.5 * 0.5)
+
+
+def test_oncoming_beats_a_guardrail_that_keeps_its_own_clearance():
+  # route 275: a guardrail 1.2 m from the body (a near wall) took the narrow-lane priority and the
+  # no-shift rule and pushed the car onto the centre line. With oncoming traffic on the left the
+  # left margin comes first; the guardrail keeps its wall clearance
+  kw = {'wall_right': True, 'wall_near_right': True, 'wall_slack_right': 0.3}
+  assert _pinched(dlc.ClearanceGuard(), -0.2, -0.15, oncoming=True, **kw) == (pytest.approx(0.15), dlc.LimitCause.NARROW)
+  out, _ = _pinched(dlc.ClearanceGuard(), -0.5, -0.4, oncoming=True, **{**kw, 'wall_slack_right': 0.2})
+  assert out == pytest.approx(0.5 * (0.4 + 0.2))  # both hard: split between them
+  # not oncoming: the old wall priority (right first, the left line gives)
+  out, _ = _pinched(dlc.ClearanceGuard(), -0.2, -0.15, **kw)
+  assert out <= 0.0
+  # room on both sides: the nominal shift right is allowed up to the wall bound, not frozen at 0
+  assert _pinched(dlc.ClearanceGuard(), 0.5, 0.5, oncoming=True, **{**kw, 'wall_slack_right': 0.1}) == \
+    (pytest.approx(0.1), dlc.LimitCause.RIGHT_WALL)
+  assert _pinched(dlc.ClearanceGuard(), 0.5, 0.5, **kw)[0] == 0.0
+
+
+def test_oncoming_cap_only_to_the_right():
+  g = dlc.ClearanceGuard()
+  assert _pinched(g, -0.2, -0.6, oncoming=True)[0] == pytest.approx(dlc.ONCOMING_CAP)
+  assert _pinched(dlc.ClearanceGuard(), -0.6, 0.5, oncoming=True)[0] == pytest.approx(-dlc.OFFSET_CAP)
+  assert _pinched(dlc.ClearanceGuard(), -0.2, -1.0)[0] == pytest.approx(dlc.OFFSET_CAP)  # split 0.425, capped
+
+
+def test_oncoming_left_line_margin():
+  m = _model(lane_left=False, lane_right=False)  # lines at +-1.75, plan centred: body gap 0.81
+  assert dlc.plan_slack(m, 20.0, 0.0, 0.94, 0.15).left == pytest.approx(0.66)
+  assert dlc.plan_slack(m, 20.0, 0.0, 0.94, 0.15, left_margin=0.35).left == pytest.approx(0.46)
+  assert dlc.plan_slack(m, 20.0, 0.0, 0.94, 0.15, left_margin=0.35).right == pytest.approx(0.66)
+
+
+@pytest.mark.parametrize("v_kmh,was,expected", [(70, False, True), (82, False, False), (82, True, True), (90, True, False)])
+def test_oncoming_below_80_in_the_right_lane(v_kmh, was, expected):
+  d = _dyn(LaneCenterOffset=0.15, LaneCenteringOffsetMode=1, LaneCenteringDwell=0.0)
+  m = _model(lane_right=False)
+  for i in range(int(round(1.0 / DT_CTRL))):
+    d.update(0.0, m, i % 5 == 0, True, V, True, False, False, d.camera_offset)
+  assert d.position == LanePosition.RIGHT
+  d.oncoming = was
+  d.update(0.0, m, True, True, v_kmh / 3.6, True, False, False, d.camera_offset)
+  assert d.oncoming == expected and d.guard.oncoming == expected
+
+
+def test_oncoming_params():
+  d = _dyn(LaneCenteringOncomingClearance=0.3, LaneCenteringOncomingCap=9.0)
+  assert d.oncoming_margin == pytest.approx(0.3) and d.guard.oncoming_cap == pytest.approx(0.6)
+  d = _dyn()
+  assert d.oncoming_margin == pytest.approx(dlc.DEFAULT_ONCOMING_CLEARANCE) and d.guard.oncoming_cap == pytest.approx(dlc.ONCOMING_CAP)
 
 
 def test_narrow_between_lanes_splits_with_a_slight_left_margin():

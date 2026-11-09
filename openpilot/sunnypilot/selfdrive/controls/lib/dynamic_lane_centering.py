@@ -92,6 +92,18 @@ lane on the other side (MIDDLE/LEFT), above BARRIER_MIN_SPEED, a line with a roa
 wall BARRIER_BEYOND outside it gets BARRIER_LINE_MARGIN; the barrier keeps its own clearance.
 On routes 24f-26a this fires only there (2.9 min) and for seconds elsewhere; RIGHT/SINGLE
 country roads are excluded (a verge behind the right line is common there, routes 237/238).
+Route 275 (2026-11-09, L352 hill, two-lane road, 35-55 km/h, Cheddar): the plan itself rides
+0.27-0.33 m inside every bend (KV and CD210 the same), the left body gap in left bends was below
+-0.06 m in 5% of the frames (on the centre line). The oncoming lane reads as a lane, so the road
+was RIGHT, not SINGLE, the left line had the plain 0.15 m margin, and a guardrail on the right
+(a near radar wall) took the narrow-lane priority and the no-shift rule and pushed the offset
+to -0.3..-0.5 m before and in left bends. So below ONCOMING_SPEED in a RIGHT or SINGLE lane the
+left side counts as oncoming traffic: the left line gets LaneCenteringOncomingClearance, a narrow
+lane keeps that margin in full and the right line, verge or guardrail yields (a right wall only
+down to its own clearance), and the cap to the right is LaneCenteringOncomingCap. A near wall on
+the left, or a car in the right blind spot, keeps the rules above. Closed-loop replay (plan
+follows 0.5 of a shift) on 275: left-bend gap p5 -0.06 -> +0.06 m, right-bend right gap p5
++0.08 -> +0.07, offset travel +12-16%/km; above 80 km/h and in the A560 zone (272) unchanged.
 
 Each side's slack becomes a bound on the offset (hi = offset_used + right slack, lo =
 offset_used - left slack). A bound tightens at once, holds BOUND_RELAX_HOLD, then relaxes over
@@ -125,7 +137,8 @@ LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneC
 LaneCenteringSwitchDist, LaneCenteringE2EAuthority,
 LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk,
 LaneCenteringMinClearance, LaneCenteringCarWidth, LaneCenteringWallClearance,
-LaneCenteringMiddleBias, LaneCenteringWallInsideCap. Frame: model y positive to the RIGHT.
+LaneCenteringMiddleBias, LaneCenteringWallInsideCap, LaneCenteringOncomingClearance,
+LaneCenteringOncomingCap. Frame: model y positive to the RIGHT.
 """
 from dataclasses import dataclass
 from enum import IntEnum
@@ -177,6 +190,9 @@ BARRIER_LINE_MARGIN = 0.05  # m, body to that line instead of the min clearance
 BARRIER_LANE_WIDTH = 2.85  # m, lanes narrower than this (construction lanes 2.5-2.75 m)
 BARRIER_BEYOND = (0.3, 1.2)  # m, road edge or radar wall this far outside the line
 BARRIER_MIN_SPEED = 60 / 3.6  # m/s
+ONCOMING_SPEED = (80 / 3.6, 85 / 3.6)  # m/s: below the first the left of a RIGHT/SINGLE lane is oncoming traffic, above the second no longer
+DEFAULT_ONCOMING_CLEARANCE = 0.35  # m, body to the left line then (LaneCenteringOncomingClearance)
+ONCOMING_CAP = 0.45  # m, offset cap to the right then (LaneCenteringOncomingCap)
 EDGE_MAX_STD = 0.5
 # camera-mode status readout only
 CAMERA_STATUS_MIN_PROB = 0.5
@@ -342,8 +358,11 @@ def _barrier_beyond(line_y: np.ndarray, sign: float, edge_y: np.ndarray | None, 
 
 
 def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, margin: float,
-               walls=(None, None), wall_margin: float = DEFAULT_WALL_CLEARANCE, multi_lane: bool = False) -> Slack:
+               walls=(None, None), wall_margin: float = DEFAULT_WALL_CLEARANCE, multi_lane: bool = False,
+               left_margin: float | None = None) -> Slack:
+  """left_margin: the left line's margin when the left side is oncoming traffic (at least `margin`)."""
   out = Slack()
+  line_margin_l = margin if left_margin is None else max(margin, left_margin)
   try:
     pos = model_v2.position
     px = np.asarray(pos.x, dtype=float)
@@ -371,7 +390,7 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
         right.append((line_gap[0] - (BARRIER_LINE_MARGIN if out.barrier_right else margin), LimitCause.RIGHT_LINE))
       if probs[1] >= LINE_MIN_PROB:
         line_gap[1] = float(np.min(track - line_l) - half_width)
-        left.append((line_gap[1] - (BARRIER_LINE_MARGIN if out.barrier_left else margin), LimitCause.LEFT_LINE))
+        left.append((line_gap[1] - (BARRIER_LINE_MARGIN if out.barrier_left else line_margin_l), LimitCause.LEFT_LINE))
     if len(edges) >= 2 and len(edge_stds) >= 2:
       if edge_stds[1] <= EDGE_MAX_STD:
         right.append((np.min(_interp(x, edges[1]) + camera_offset - track) - half_width - margin - EDGE_EXTRA, LimitCause.RIGHT_EDGE))
@@ -454,6 +473,7 @@ class ClearanceGuard:
     self._b = [_Bound(BOUND_HOLD), _Bound(BOUND_HOLD)]  # any boundary (right, left)
     self._w = [_Bound(WALL_HOLD), _Bound(WALL_HOLD)]  # radar walls only
     self.inside_cap = WALL_INSIDE_CAP  # live: LaneCenteringWallInsideCap
+    self.oncoming_cap = ONCOMING_CAP  # live: LaneCenteringOncomingCap
     self.reset()
 
   def reset(self) -> None:
@@ -466,7 +486,8 @@ class ClearanceGuard:
     self._mid: float | None = None  # low-passed offset between two walls, or a wall and the line opposite
     self._mid_t = WALL_HOLD
     self._frame_mid: float | None = None
-    self.single = False  # single-lane road: the left side is oncoming traffic
+    self.single = False  # single-lane road: the left side has the narrow-lane priority
+    self.oncoming = False  # below ONCOMING_SPEED in a RIGHT/SINGLE lane: the left side is oncoming traffic
     self.blindspot = (False, False)  # (right, left) car seen by the blind-spot monitor
 
   @property
@@ -539,6 +560,11 @@ class ClearanceGuard:
     inside = self.mid is not None or any(t < WALL_HOLD for t in self._inside_t)
     cap = self.inside_cap if inside else WALL_CAP if any(near) else OFFSET_CAP
     hi, lo = self.hi, self.lo
+    # oncoming traffic on the left (no wall there): its margin comes before a line, verge or
+    # guardrail on the right; a right wall keeps its own clearance (route 275: a guardrail as a
+    # near wall took the priority and the no-shift rule, and pushed the car onto the centre line)
+    onc = self.oncoming and not near[1] and not self.blindspot[0]
+    wall_hi = self._w[0].value
     out, cause = target, LimitCause.NONE
     if hi is not None and lo is not None and lo > hi:  # too close on both sides
       cause = LimitCause.NARROW
@@ -547,8 +573,10 @@ class ClearanceGuard:
       elif near[0] and not near[1]:
         prio = 0
       else:
-        prio = 1 if self.single else None
-      if prio == 1:  # left first: the right side yields
+        prio = 1 if self.single or self.oncoming else None
+      if onc:
+        out = lo if wall_hi is None or lo <= wall_hi else 0.5 * (lo + wall_hi)
+      elif prio == 1:  # left first: the right side yields
         hi_g = hi + self._give(0, near[1])
         out = hi_g + 0.5 * max(lo - hi_g, 0.0) if lo > hi_g else lo
       elif prio == 0:
@@ -560,12 +588,16 @@ class ClearanceGuard:
       out, cause = hi, self._causes[0]
     elif lo is not None and target < lo:
       out, cause = lo, self._causes[1]
-    out = float(np.clip(out, -cap, cap))
+    # away from oncoming traffic the plan's bend cut needs more than OFFSET_CAP (it follows ~half)
+    out = float(np.clip(out, -cap, max(cap, self.oncoming_cap) if self.oncoming else cap))
     # never shift toward a wall close to the body (shifting away stays allowed); between two
     # walls, or a wall and a confident line opposite, the target is their middle, which is the
     # only offset toward a wall
     if self.mid is None:
-      if near[0] and out > 0.0:
+      if near[0] and out > 0.0 and onc:
+        if cause != LimitCause.NARROW and wall_hi is not None and out > max(wall_hi, 0.0):
+          out, cause = max(wall_hi, 0.0), LimitCause.RIGHT_WALL
+      elif near[0] and out > 0.0:
         out, cause = 0.0, LimitCause.WALL_NO_SHIFT_RIGHT
       elif near[1] and out < 0.0:
         out, cause = 0.0, LimitCause.WALL_NO_SHIFT_LEFT
@@ -592,6 +624,8 @@ class DynamicLaneCentering:
     self.guard = ClearanceGuard()
     self.margin = DEFAULT_MIN_CLEARANCE
     self.wall_margin = DEFAULT_WALL_CLEARANCE
+    self.oncoming_margin = DEFAULT_ONCOMING_CLEARANCE
+    self.oncoming = False
     self.half_width = DEFAULT_CAR_WIDTH / 2
     self.limited = False
     self.limit_cause = LimitCause.NONE
@@ -627,6 +661,8 @@ class DynamicLaneCentering:
     self.margin = _get_float(params, "LaneCenteringMinClearance", DEFAULT_MIN_CLEARANCE, -0.5, 1.0)
     self.wall_margin = _get_float(params, "LaneCenteringWallClearance", DEFAULT_WALL_CLEARANCE, 0.0, 2.0)
     self.guard.inside_cap = _get_float(params, "LaneCenteringWallInsideCap", WALL_INSIDE_CAP, 0.3, 1.5)
+    self.oncoming_margin = _get_float(params, "LaneCenteringOncomingClearance", DEFAULT_ONCOMING_CLEARANCE, 0.0, 0.6)
+    self.guard.oncoming_cap = _get_float(params, "LaneCenteringOncomingCap", ONCOMING_CAP, 0.0, 0.6)
     self.half_width = _get_float(params, "LaneCenteringCarWidth", DEFAULT_CAR_WIDTH, 1.0, 3.0) / 2
 
   def reset(self) -> None:
@@ -634,7 +670,7 @@ class DynamicLaneCentering:
     self.classifier.reset()
     self.guard.reset()
     self.offset = self.offset_target = self.correction = self.camera_offset = 0.0
-    self.active = self.limited = False
+    self.active = self.limited = self.oncoming = False
     self.limit_cause = LimitCause.NONE
 
   def _ramp_offset(self, rate: float = OFFSET_RAMP_RATE) -> None:
@@ -673,6 +709,11 @@ class DynamicLaneCentering:
       nominal = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
 
     if self.mode == OffsetMode.CAMERA:
+      pos = self.classifier.position
+      if pos in (LanePosition.RIGHT, LanePosition.SINGLE):
+        self.oncoming = v_ego < ONCOMING_SPEED[1] if self.oncoming else v_ego < ONCOMING_SPEED[0]
+      else:
+        self.oncoming = False
       if model_updated:
         try:
           lane_change = model_v2.meta.laneChangeState in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing)
@@ -682,10 +723,13 @@ class DynamicLaneCentering:
           self.guard.reset()
         else:
           cam = applied_camera_offset if applied_camera_offset is not None else self.camera_offset
-          multi_lane = self.classifier.position in (LanePosition.MIDDLE, LanePosition.LEFT)
+          multi_lane = pos in (LanePosition.MIDDLE, LanePosition.LEFT)
+          # a near wall on the left: no oncoming traffic beside the car, the plain line margin
+          left_margin = self.oncoming_margin if self.oncoming and not self.guard.near[1] else None
           self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin,
-                                          multi_lane), -cam)
-      self.guard.single = self.classifier.position == LanePosition.SINGLE
+                                          multi_lane, left_margin), -cam)
+      self.guard.single = pos == LanePosition.SINGLE
+      self.guard.oncoming = self.oncoming
       self.guard.blindspot = (bool(blindspot[1]), bool(blindspot[0]))
       self.guard.update()
       if self.guard.mid is not None:
