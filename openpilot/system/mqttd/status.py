@@ -9,6 +9,7 @@ from openpilot.common.utils import strip_deprecated_keys
 from collections import defaultdict
 
 from openpilot.system.mqttd import mqttd
+from openpilot.system.mqttd.car_cache import CarStatusCache
 from opendbc.car.hyundai import mqtt
 from openpilot.common.hardware import HARDWARE
 from openpilot.common.params import Params
@@ -33,6 +34,11 @@ def should_probe_cable(mqtt_connected, onroad, connector_connected, car_voltage,
 
 
 #f = open("mqtt_status_log.txt", "w")
+
+def live_or(value, awake, idle):
+  """A live charging value while the car is awake and it has been read, else the not-charging value."""
+  return value if awake and value is not None and value >= 0 else idle
+
 
 def format_time(minutes):
   """Convert minutes to HH:MM format. Returns None if minutes < 0."""
@@ -154,6 +160,13 @@ def publish_sensor_discovery(pm, sensor_name, device_info, config_prefix):
       "suggested_display_precision": 2,
       "icon": "mdi:sine-wave",
     },
+    "car_data_time": {
+      "name": "Car Data Time",
+      "state_topic": "openpilot/car_status",
+      "value_template": "{{ value_json.car_data_time }}",
+      "device_class": "timestamp",
+      "icon": "mdi:clock-check-outline",
+    },
     "low_voltage_shutdown_threshold": {
       "name": "Low Voltage Shutdown Threshold",
       "state_topic": "openpilot/car_status",
@@ -253,6 +266,7 @@ def publish_ha_discovery(pm, count, config_prefix):
     "ac_current_limit",
     "car_voltage",
     "car_voltage_filtered",
+    "car_data_time",
     "low_voltage_shutdown_threshold",
   ]
 
@@ -308,6 +322,7 @@ def status_thread():
   charging_status_prev = None
   sleeptimer = time.monotonic()
   params = Params()
+  car_cache = CarStatusCache(params)
   last_probe = -CABLE_PROBE_INTERVAL_S  # first probe as soon as the conditions hold
   car_voltage_instant = None
   car_voltage_filtered = None
@@ -324,6 +339,7 @@ def status_thread():
     can_recv = messaging.drain_sock(logcan)
     bus = 1
     mqtt.getParsedMessages(can_recv, bus, dat, pm)
+    car_cache.update(mqtt, can_recv, cur_time, datetime.datetime.now(datetime.UTC).timestamp())  # wall time: a data timestamp for HA
 
     # sample the 12V line every iteration so the low-pass advances at the real
     # peripheralState rate rather than the 30s publish cadence
@@ -391,19 +407,24 @@ def status_thread():
 
 
       topic = f"openpilot/car_status"
-      content = {"battery_level": mqtt.soc_out,
-                 "range": mqtt.range_out,
+      # asleep (no BMS frame for a minute) = not charging: a charging car keeps its buses awake. -1 here read as
+      # -1 kW in HA's household-demand template once the cached SoC keeps the source on mqtt.
+      awake = car_cache.awake(cur_time)
+      time_remaining = mqtt.charging_time_remaining_out if awake else -1
+      content = {"battery_level": car_cache.get(mqtt, "soc_out"),
+                 "range": car_cache.get(mqtt, "range_out"),
                  "pack_voltage": mqtt.pack_voltage_out,
-                 "charging_current": mqtt.charging_current_out,
-                 "charging_power": mqtt.charging_power_out,
-                 "charging_time_remaining_minutes": mqtt.charging_time_remaining_out,
-                 "charging_time_remaining": format_time(mqtt.charging_time_remaining_out),
-                 "charging_status": mqtt.charging_status_out,
+                 "charging_current": live_or(mqtt.charging_current_out, awake, 0.0),
+                 "charging_power": live_or(mqtt.charging_power_out, awake, 0.0),
+                 "charging_time_remaining_minutes": time_remaining,
+                 "charging_time_remaining": format_time(time_remaining),
+                 "charging_status": mqtt.charging_status_out if awake and mqtt.charging_status_out != "unknown" else "idle",
                  "connector_connected": mqtt.connector_connected_out,
-                 "charge_limit_ac": mqtt.charge_limit_ac_out,
-                 "charge_limit_dc": mqtt.charge_limit_dc_out,
-                 "ac_power_limit_pct": mqtt.ac_power_limit_pct_out,
-                 "ac_current_limit": mqtt.ac_current_limit_out,
+                 "charge_limit_ac": car_cache.get(mqtt, "charge_limit_ac_out"),
+                 "charge_limit_dc": car_cache.get(mqtt, "charge_limit_dc_out"),
+                 "ac_power_limit_pct": car_cache.get(mqtt, "ac_power_limit_pct_out"),
+                 "ac_current_limit": car_cache.get(mqtt, "ac_current_limit_out"),
+                 "car_data_time": car_cache.timestamp(),
                  "car_voltage": round(car_voltage_instant, 2) if car_voltage_instant is not None else None,
                  "car_voltage_filtered": round(car_voltage_filtered, 2) if car_voltage_filtered is not None else None,
                  "low_voltage_shutdown_threshold": VBATT_PAUSE_CHARGING,
