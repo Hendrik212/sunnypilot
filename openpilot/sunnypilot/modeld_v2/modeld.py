@@ -43,6 +43,7 @@ from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
 from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper, LaneCentreCameraOffset, LANE_CENTRE_STALE_S
 from openpilot.sunnypilot.modeld_v2.yaw_rate_blend import YAW_RATE_BLEND_MAX, yaw_rate_blend_correction
+from openpilot.sunnypilot.modeld_v2.crawl_deadband import CRAWL_DEADBAND_MAX, crawl_deadband
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.modeld_v2.helpers import load_model
@@ -122,6 +123,7 @@ class ModelState(ModelStateBase):
     self.MIN_LAT_CONTROL_SPEED = 0.3
     self.PLANPLUS_CONTROL: float = 1.0
     self.YAW_RATE_BLEND: float = 0.0  # ModelYawRateBlend param, see yaw_rate_blend.py
+    self.CRAWL_LAT_DEADBAND: float = 0.04  # ModelCrawlLatDeadband param, see crawl_deadband.py
     self.chestnut = chestnut
 
     pkl_path = _find_driving_pkl(model_bundle, chestnut)
@@ -262,7 +264,8 @@ class ModelState(ModelStateBase):
         desired_curvature += yaw_rate_blend_correction(curvature_plan, v_ego, yaw_rate_measured, self.YAW_RATE_BLEND)
     else:
       desired_accel = model_output['action'][0, 1]
-      desired_curvature = model_output['action'][0, 0] / (max(1.0, v_ego))**2
+      lat_accel = crawl_deadband(float(model_output['action'][0, 0]), v_ego, self.CRAWL_LAT_DEADBAND)
+      desired_curvature = lat_accel / (max(1.0, v_ego))**2
 
     stop = v_ego < 0.3 and desired_accel < 0.1
     desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
@@ -452,6 +455,11 @@ def main(demo=False):
       except (TypeError, ValueError):
         blend = 0.0
       model.YAW_RATE_BLEND = min(max(blend, 0.0), YAW_RATE_BLEND_MAX) if np.isfinite(blend) else 0.0
+      try:
+        crawl = float(params.get("ModelCrawlLatDeadband", return_default=True))
+      except (TypeError, ValueError):
+        crawl = 0.04
+      model.CRAWL_LAT_DEADBAND = min(max(crawl, 0.0), CRAWL_DEADBAND_MAX) if np.isfinite(crawl) else 0.04
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["lateralTuneStateSP"]:
