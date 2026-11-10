@@ -164,6 +164,12 @@ IONIQ_6_LOW_SPEED_UNWIND_ASSIST_ERROR_WIDTH = 0.95
 IONIQ_6_LOW_SPEED_UNWIND_ASSIST_ACTUAL_ANGLE = 10.5
 IONIQ_6_LOW_SPEED_UNWIND_ASSIST_ACTUAL_ANGLE_WIDTH = 4.0
 IONIQ_6_LOW_SPEED_UNWIND_ASSIST_BLEND = 0.52
+# Both angle assists fade out at a standstill. The curvature-to-angle map at v ~ 0 turns any
+# model curvature into a large wheel angle, and nothing moves the car toward it: Nov 10,
+# stopped at a light, the model held -0.022 1/m (~50 deg of wheel) and the assist sent a
+# steady +0.31 torque to the left -- the wheel turned by itself while the speed term
+# (curvature * v^2) and so the PID gave nothing.
+IONIQ_6_LOW_SPEED_ASSIST_STANDSTILL_FADE = ([0.3, 1.1], [0.0, 1.0])  # m/s (1-4 km/h)
 IONIQ_6_HIGH_SPEED_RIGHT_TURN_IN_FF_BOOST = 0.10
 IONIQ_6_HIGH_SPEED_RIGHT_TURN_IN_FF_SPEED = 18.0
 IONIQ_6_HIGH_SPEED_RIGHT_TURN_IN_FF_SPEED_WIDTH = 2.5
@@ -549,9 +555,10 @@ def get_ioniq_6_low_speed_angle_assist_torque(desired_angle_deg: float, actual_a
   # (> 1.0 between 18 and 55 km/h): the sigmoid speed weights stay above the 1e-4 early return
   # up to ~25 km/h, so route 26f held the request at exactly 409 through 18-25 km/h corners.
   angle_error = desired_angle_deg - actual_angle_deg
+  standstill_fade = float(np.interp(v_ego, *IONIQ_6_LOW_SPEED_ASSIST_STANDSTILL_FADE))
   if desired_angle_deg * angle_error > 0.0:
     speed_weight = _ioniq_6_sigmoid((IONIQ_6_LOW_SPEED_ANGLE_ASSIST_SPEED - max(v_ego, 0.0)) /
-                                    IONIQ_6_LOW_SPEED_ANGLE_ASSIST_SPEED_WIDTH)
+                                    IONIQ_6_LOW_SPEED_ANGLE_ASSIST_SPEED_WIDTH) * standstill_fade
     error_weight = _ioniq_6_sigmoid((abs(angle_error) - IONIQ_6_LOW_SPEED_ANGLE_ASSIST_ERROR) /
                                     IONIQ_6_LOW_SPEED_ANGLE_ASSIST_ERROR_WIDTH)
     desired_angle_weight = _ioniq_6_sigmoid((abs(desired_angle_deg) - IONIQ_6_LOW_SPEED_ANGLE_ASSIST_DESIRED_ANGLE) /
@@ -577,7 +584,7 @@ def get_ioniq_6_low_speed_angle_assist_torque(desired_angle_deg: float, actual_a
     return float(np.clip(current_output_torque + assist_torque, -torque_limit, torque_limit))
 
   speed_weight = _ioniq_6_sigmoid((IONIQ_6_LOW_SPEED_UNWIND_ASSIST_SPEED - max(v_ego, 0.0)) /
-                                  IONIQ_6_LOW_SPEED_UNWIND_ASSIST_SPEED_WIDTH)
+                                  IONIQ_6_LOW_SPEED_UNWIND_ASSIST_SPEED_WIDTH) * standstill_fade
   error_weight = _ioniq_6_sigmoid((abs(angle_error) - IONIQ_6_LOW_SPEED_UNWIND_ASSIST_ERROR) /
                                   IONIQ_6_LOW_SPEED_UNWIND_ASSIST_ERROR_WIDTH)
   actual_angle_weight = _ioniq_6_sigmoid((abs(actual_angle_deg) - IONIQ_6_LOW_SPEED_UNWIND_ASSIST_ACTUAL_ANGLE) /

@@ -803,6 +803,20 @@ class TestSaturationHeadroom:
     assert np.isclose(sh.get_ioniq_6_low_speed_angle_assist_torque(-110.0, -60.0, lim, v, lim), lim)
     assert sh.get_ioniq_6_low_speed_angle_assist_torque(-110.0, -60.0, lim, v) == 1.0  # old +-1 default
 
+  def test_low_speed_assists_are_off_at_a_standstill(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_shaping as sh
+    # Nov 10, stopped at a light: model -0.022 1/m = ~50 deg of wheel, wheel near centre;
+    # the angle assist alone held +0.31 torque and turned the wheel
+    for v in (0.0, 0.2, 0.3):
+      assert sh.get_ioniq_6_low_speed_angle_assist_torque(-50.0, -2.0, 0.0, v) == 0.0
+      assert sh.get_ioniq_6_low_speed_angle_assist_torque(0.0, 40.0, 0.0, v) == 0.0  # unwind assist too
+    half = abs(sh.get_ioniq_6_low_speed_angle_assist_torque(-50.0, -2.0, 0.0, 0.7))
+    full = abs(sh.get_ioniq_6_low_speed_angle_assist_torque(-50.0, -2.0, 0.0, 1.1))
+    assert 0.0 < half < full
+    # walking pace and up: unchanged (the fade is 1.0 from 1.1 m/s)
+    assert full == pytest.approx(sh.IONIQ_6_LOW_SPEED_ANGLE_ASSIST_MAX_TORQUE, rel=0.02)
+    assert abs(sh.get_ioniq_6_low_speed_angle_assist_torque(0.0, 40.0, 0.0, 2.0)) > 0.1
+
   def test_light_hand_resistance_keeps_the_headroom_with_a_bigger_allowance(self):
     from types import SimpleNamespace
     from opendbc.sunnypilot.car.hyundai.lateral_limits import apply_headroom_driver_limits
