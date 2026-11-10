@@ -185,6 +185,18 @@ def send_pubs(client):
 
     return updated_pub_list
 
+def queue_message(client, message):
+    if not message.subscribe and not message.publish and message.topic in client.sub_dict:
+        client.sub_dict[message.topic]["subscribe"] = False
+    if message.subscribe:
+        if message.topic not in client.sub_dict:
+            client.sub_dict[message.topic] = {"server_state": False}
+        client.sub_dict[message.topic]["subscribe"] = True
+    if message.publish:
+        msg = {"topic": message.topic, "content": message.content, "qos": message.qos, "retain": message.retain, "attempts": 0, "last_sent": time.time(), "mid": -1}
+        client.pub_list.append(msg)
+        client.pub_list = client.pub_list[-100:]
+
 # Main MQTT thread
 def mqtt_thread():
     #f.write(f"{datetime.datetime.now()} --------------------------------------------\n")
@@ -192,7 +204,9 @@ def mqtt_thread():
     #f.flush()
 
     pm = messaging.PubMaster(['mqttRecvQueue'])
-    sm = messaging.SubMaster(['mqttPubQueue'])
+    # not a SubMaster: it keeps only the newest message per update, so status.py's discovery burst (one config per
+    # sensor, back to back) arrived as its last message only and new sensors never reached HA
+    pub_sock = messaging.sub_sock('mqttPubQueue', timeout=100)
 
     # Set Connecting Client ID
     client = mqtt_client.Client(client_id())
@@ -207,21 +221,12 @@ def mqtt_thread():
         if first_connect:
             first_connect = setup_connection(client, pm)
 
-        sm.update()
-        if not sm.updated["mqttPubQueue"]:
+        events = messaging.drain_sock(pub_sock, wait_for_one=True)
+        if not events:
             continue
 
-        message = sm["mqttPubQueue"]
-        if not message.subscribe and not message.publish and message.topic in client.sub_dict:
-            client.sub_dict[message.topic]["subscribe"] = False
-        if message.subscribe:
-            if message.topic not in client.sub_dict:
-                client.sub_dict[message.topic] = {"server_state": False}
-            client.sub_dict[message.topic]["subscribe"] = True
-        if message.publish:
-            msg = {"topic": message.topic, "content": message.content, "qos": message.qos, "retain": message.retain, "attempts": 0, "last_sent": time.time(), "mid": -1}
-            client.pub_list.append(msg)
-            client.pub_list = client.pub_list[-100:]
+        for event in events:
+            queue_message(client, event.mqttPubQueue)
         if client.connected_flag:
             if not connected:
                 connected = True
