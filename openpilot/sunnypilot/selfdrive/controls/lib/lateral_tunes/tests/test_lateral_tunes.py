@@ -383,7 +383,7 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
         self.v = v
 
       def get(self, key, return_default=False):
-        assert key in ("LatAccelFactorCap", "SteerHeadroomCan", "IoniqHighwayCenterDamping", "RippleNotchQ")
+        assert key in ("LatAccelFactorCap", "SteerHeadroomCan", "IoniqHighwayCenterDamping", "RippleNotchQ", "LatHighwayKpScale")
         return self.v
 
     from opendbc.sunnypilot.car.hyundai.lateral_limits import DEFAULT_HEADROOM_CAN
@@ -884,6 +884,49 @@ def test_ripple_notch_q_is_a_live_param():
     ctl.profile.get_params(params)
     assert ctl.profile.ripple_notch_q == pytest.approx(expected)
   params.put("RippleNotchQ", rn.RIPPLE_NOTCH_Q, block=True)
+
+
+def test_highway_kp_scale_default_is_the_table():
+  from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_starpilot as sp
+  speeds, kp = sp.kp_table(1.0)
+  for v in np.linspace(0.0, 40.0, 401):
+    assert np.interp(v, speeds, kp) == pytest.approx(np.interp(v, sp.INTERP_SPEEDS, sp.KP_INTERP), rel=1e-9, abs=1e-12)
+
+
+def test_highway_kp_scale_only_above_the_fade():
+  from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_starpilot as sp
+  speeds, kp = sp.kp_table(0.5)
+
+  def base(v):
+    return np.interp(v, sp.INTERP_SPEEDS, sp.KP_INTERP)
+
+  for v in (1.0, 5.0, 15.0, sp.HIGHWAY_KP_FADE[0]):
+    assert np.interp(v, speeds, kp) == pytest.approx(base(v))  # city / country untouched
+  for v in (sp.HIGHWAY_KP_FADE[1], 30.0, 36.0):
+    assert np.interp(v, speeds, kp) == pytest.approx(0.5 * base(v))
+  mid = np.interp(22.5, speeds, kp)
+  assert 0.5 * base(22.5) < mid < base(22.5)
+
+
+def test_highway_kp_scale_is_a_clamped_live_param():
+  ctl, _, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+  p = ctl.profile
+  CS = car.CarState.new_message()
+  CS.vEgo = 30.0
+  assert p.highway_kp_scale == 1.0
+  params = Params()
+  for v, expected in ((0.5, 0.5), (5.0, 1.5), (0.0, 0.2), (float("nan"), 1.0)):
+    params.put("LatHighwayKpScale", v, block=True)
+    p.get_params(params)
+    assert p.highway_kp_scale == pytest.approx(expected)
+  params.put("LatHighwayKpScale", 0.5, block=True)
+  p.get_params(params)
+  p.prime_inactive(ctl, CS, 0.0, 0.0)
+  assert np.interp(30.0, *ctl.pid._k_p) == pytest.approx(0.5 * 0.6)
+  params.put("LatHighwayKpScale", 1.0, block=True)
+  p.get_params(params)
+  p.prime_inactive(ctl, CS, 0.0, 0.0)
+  assert np.interp(30.0, *ctl.pid._k_p) == pytest.approx(0.6)
 
 
 def test_ripple_notch_q_width_and_off_switch():

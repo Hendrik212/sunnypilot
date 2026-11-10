@@ -40,6 +40,7 @@ WHITELIST: dict[str, tuple[float, float]] = {
   "IoniqHighwayCenterDamping": (0.0, 0.2),
   "RippleNotchQ": (0.0, 8.0),
   "ModelYawRateBlend": (0.0, 0.7),
+  "LatHighwayKpScale": (0.3, 1.0),
   # EPS limit test (2026-11-06): car-layer limits in the 18-55 km/h band, panda allows 1023 / 50
   "SteerHeadroomCan": (409, 1023),
   "SteerDeltaUpLow": (2, 50),

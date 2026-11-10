@@ -62,6 +62,24 @@ KI = 0.35
 INTERP_SPEEDS = [1, 1.5, 2.0, 3.0, 5, 7.5, 10, 15, 30]
 KP_INTERP = [250, 120, 65, 30, 11.5, 5.5, 3.5, 2.0, KP]
 
+# Live LatHighwayKpScale (default 1.0 = the table above, bit for bit) multiplies kp above
+# HIGHWAY_KP_FADE[1], fading in from HIGHWAY_KP_FADE[0], so city and country roads keep the
+# table. Highway chatter (routes 272/273/275): the 0.5-1 Hz command is the plan's content,
+# the feedback term in phase with it (+0.96) and adding ~50%; the replay sim (Cheddar, Q4 +
+# blend 0.5, roads 26a/26d) with kp x0.5 above ~90 km/h: chatter .5-1 Hz x0.67-0.79, 1-2 Hz
+# x0.77-0.86, torque rate p95 x0.78-0.84, weave -1..+11%, lane error unchanged. Halving ki
+# as well left a 17 -> 25 cm lane error p95, so ki stays.
+HIGHWAY_KP_FADE = (20.0, 25.0)  # m/s, 72-90 km/h
+HIGHWAY_KP_SCALE_RANGE = (0.2, 1.5)
+
+
+def kp_table(scale: float) -> list[list[float]]:
+  """KP_INTERP with the scale faded in over HIGHWAY_KP_FADE (two knots added on the table's
+  own line, so scale 1.0 gives the same kp at every speed)."""
+  lo, hi = HIGHWAY_KP_FADE
+  speeds = [s for s in INTERP_SPEEDS if s < lo] + [lo, hi] + [s for s in INTERP_SPEEDS if s > hi]
+  return [speeds, [float(np.interp(s, INTERP_SPEEDS, KP_INTERP)) * (scale if s >= hi else 1.0) for s in speeds]]
+
 # Small planner jerk changes around the lane center can repeatedly re-trigger the friction
 # compensation term. Keep this correction out of the center band while leaving actual
 # turn-in and unwind commands unchanged.
@@ -151,6 +169,16 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     except (TypeError, ValueError):
       q = rn.RIPPLE_NOTCH_Q
     self.ripple_notch_q = min(q, rn.RIPPLE_NOTCH_Q_MAX) if math.isfinite(q) else rn.RIPPLE_NOTCH_Q
+    try:
+      k = float(params.get("LatHighwayKpScale", return_default=True))
+    except (TypeError, ValueError):
+      k = 1.0
+    self.highway_kp_scale = min(max(k, HIGHWAY_KP_SCALE_RANGE[0]), HIGHWAY_KP_SCALE_RANGE[1]) if math.isfinite(k) else 1.0
+
+  def _apply_kp_scale(self, ctl) -> None:
+    if self.highway_kp_scale != self._kp_scale_applied:
+      ctl.pid._k_p = kp_table(self.highway_kp_scale)
+      self._kp_scale_applied = self.highway_kp_scale
 
   def _apply_headroom(self, ctl, v_ego: float) -> None:
     # Only the clip moves (PID limits = lateral_accel_from_torque(+-steer_max)); the 409 scale,
@@ -219,6 +247,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     self.headroom_can = DEFAULT_HEADROOM_CAN
     self.highway_center_damping = 0.0
     self.ripple_notch_q = rn.RIPPLE_NOTCH_Q
+    self.highway_kp_scale = self._kp_scale_applied = 1.0
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
     # written once at fingerprint time, so on a live switch from upstream it still holds the
     # UPSTREAM factor -- multiplying that by 1.22 would give a gain that is neither tune.
@@ -283,12 +312,14 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     self.prev_steering_pressed = CS.steeringPressed
     self._apply_speed_scheduled_factor(ctl, CS.vEgo)
     self._apply_headroom(ctl, CS.vEgo)
+    self._apply_kp_scale(ctl)
 
   def update(self, ctl, active, CS, VM, params, steer_limited_by_safety,
              desired_curvature, measured_curvature, measurement, calibrated_pose,
              pid_log, lat_delay) -> float:
     self._apply_speed_scheduled_factor(ctl, CS.vEgo)
     self._apply_headroom(ctl, CS.vEgo)
+    self._apply_kp_scale(ctl)
 
     # lat_delay already includes the stock LAT_SMOOTH_SECONDS (0.1) via controlsd, matching
     # StarPilot. The profile offset is 0.0 (see LAT_SMOOTH_SECONDS_OFFSET above); kept as a
