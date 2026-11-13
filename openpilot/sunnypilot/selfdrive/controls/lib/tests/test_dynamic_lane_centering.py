@@ -335,8 +335,9 @@ def test_narrow_single_lane_keeps_the_centre_line_clear():
   # above ONCOMING_SPEED (single only) the right line gives LINE_GIVE, the rest is split
   out, cause = _pinched(dlc.ClearanceGuard(), -0.3, -0.2, single=True)
   assert cause == dlc.LimitCause.NARROW and out == pytest.approx(-0.05 + 0.5 * (0.2 + 0.05))
-  # oncoming traffic (below ONCOMING_SPEED): the right line yields all of it (route 275)
-  assert _pinched(dlc.ClearanceGuard(), -0.3, -0.2, oncoming=True) == (pytest.approx(0.2), dlc.LimitCause.NARROW)
+  # oncoming traffic (below ONCOMING_SPEED): split evenly. Until routes 278-27a the right line
+  # yielded all of it (0.2 here), which put the body over the right line in 2.2-2.6 m lanes
+  assert _pinched(dlc.ClearanceGuard(), -0.3, -0.2, oncoming=True) == (pytest.approx(-0.05), dlc.LimitCause.NARROW)
   # a car alongside on the right: the right line gives nothing, the deficit is split
   out, cause = _pinched(dlc.ClearanceGuard(), -0.3, -0.2, oncoming=True, blindspot=(True, False))
   assert cause == dlc.LimitCause.NARROW and out == pytest.approx(-0.3 + 0.5 * 0.5)
@@ -345,11 +346,11 @@ def test_narrow_single_lane_keeps_the_centre_line_clear():
 def test_oncoming_beats_a_guardrail_that_keeps_its_own_clearance():
   # route 275: a guardrail 1.2 m from the body (a near wall) took the narrow-lane priority and the
   # no-shift rule and pushed the car onto the centre line. With oncoming traffic on the left the
-  # left margin comes first; the guardrail keeps its wall clearance
+  # guardrail does not get the priority: the window is split evenly
   kw = {'wall_right': True, 'wall_near_right': True, 'wall_slack_right': 0.3}
-  assert _pinched(dlc.ClearanceGuard(), -0.2, -0.15, oncoming=True, **kw) == (pytest.approx(0.15), dlc.LimitCause.NARROW)
+  assert _pinched(dlc.ClearanceGuard(), -0.2, -0.15, oncoming=True, **kw) == (pytest.approx(-0.025), dlc.LimitCause.NARROW)
   out, _ = _pinched(dlc.ClearanceGuard(), -0.5, -0.4, oncoming=True, **{**kw, 'wall_slack_right': 0.2})
-  assert out == pytest.approx(0.5 * (0.4 + 0.2))  # both hard: split between them
+  assert out == pytest.approx(0.5 * (0.4 - 0.5))
   # not oncoming: the old wall priority (right first, the left line gives)
   out, _ = _pinched(dlc.ClearanceGuard(), -0.2, -0.15, **kw)
   assert out <= 0.0
@@ -361,7 +362,13 @@ def test_oncoming_beats_a_guardrail_that_keeps_its_own_clearance():
 
 def test_oncoming_cap_only_to_the_right():
   g = dlc.ClearanceGuard()
-  assert _pinched(g, -0.2, -0.6, oncoming=True)[0] == pytest.approx(dlc.ONCOMING_CAP)
+  g.oncoming_cap = 0.45  # LaneCenteringOncomingCap above OFFSET_CAP
+  assert _pinched(g, 0.8, -0.6, oncoming=True)[0] == pytest.approx(0.45)
+  assert _pinched(dlc.ClearanceGuard(), 0.8, -0.6, oncoming=True)[0] == pytest.approx(dlc.OFFSET_CAP)  # the default adds nothing
+  # next to a guardrail on the right the cap stays (routes 278-27a: WALL_CAP 0.5 toward it)
+  kw = {'wall_right': True, 'wall_near_right': True, 'wall_slack_right': 0.8}
+  assert _pinched(dlc.ClearanceGuard(), 0.8, -0.6, oncoming=True, **kw)[0] == pytest.approx(dlc.ONCOMING_CAP)
+  assert _pinched(dlc.ClearanceGuard(), -0.6, 0.8, oncoming=True, **kw)[0] == pytest.approx(-dlc.WALL_CAP)  # away from it
   assert _pinched(dlc.ClearanceGuard(), -0.6, 0.5, oncoming=True)[0] == pytest.approx(-dlc.OFFSET_CAP)
   assert _pinched(dlc.ClearanceGuard(), -0.2, -1.0)[0] == pytest.approx(dlc.OFFSET_CAP)  # split 0.425, capped
 
@@ -371,6 +378,21 @@ def test_oncoming_left_line_margin():
   assert dlc.plan_slack(m, 20.0, 0.0, 0.94, 0.15).left == pytest.approx(0.66)
   assert dlc.plan_slack(m, 20.0, 0.0, 0.94, 0.15, left_margin=0.35).left == pytest.approx(0.46)
   assert dlc.plan_slack(m, 20.0, 0.0, 0.94, 0.15, left_margin=0.35).right == pytest.approx(0.66)
+
+
+def test_a_guardrail_behind_the_right_line_gives_no_middle_on_a_two_way_road():
+  # routes 278-27a: a guardrail up to 0.4 m behind the right line made the target the middle between
+  # it and the left line, and the offset went to 0.5-0.93 m; the road ends at the line there
+  m = _model(lane_left=False, lane_right=False)  # lines at +-1.75
+  wall = (None, Wall(y=2.0, slope=0.0, curvature=0.0, residual=0.02, points=12))
+  sl = dlc.plan_slack(m, 20.0, 0.0, 0.94, 0.15, wall, 0.5)
+  assert sl.wall_near_right and sl.mid_err == pytest.approx(0.125)
+  sl = dlc.plan_slack(m, 20.0, 0.0, 0.94, 0.15, wall, 0.5, left_margin=0.35, right_wall_middle=False)
+  assert sl.wall_near_right and sl.mid_err is None
+  d = _dyn(LaneCenterOffset=0.15, LaneCenteringOffsetMode=1, LaneCenteringDwell=0.0)
+  for i in range(int(round(20.0 / DT_CTRL))):
+    d.update(0.0, m, i % 5 == 0, True, 20.0, True, False, False, d.camera_offset, wall)
+  assert d.oncoming and d.guard.mid is None and d.offset <= 0.15 + 1e-6
 
 
 @pytest.mark.parametrize("v_kmh,was,expected", [(70, False, True), (82, False, False), (82, True, True), (90, True, False)])

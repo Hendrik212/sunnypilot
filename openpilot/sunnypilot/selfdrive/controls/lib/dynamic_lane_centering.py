@@ -98,12 +98,34 @@ Route 275 (2026-11-09, L352 hill, two-lane road, 35-55 km/h, Cheddar): the plan 
 was RIGHT, not SINGLE, the left line had the plain 0.15 m margin, and a guardrail on the right
 (a near radar wall) took the narrow-lane priority and the no-shift rule and pushed the offset
 to -0.3..-0.5 m before and in left bends. So below ONCOMING_SPEED in a RIGHT or SINGLE lane the
-left side counts as oncoming traffic: the left line gets LaneCenteringOncomingClearance, a narrow
-lane keeps that margin in full and the right line, verge or guardrail yields (a right wall only
-down to its own clearance), and the cap to the right is LaneCenteringOncomingCap. A near wall on
+left side counts as oncoming traffic: the left line gets LaneCenteringOncomingClearance, a
+guardrail on the right no longer takes the priority or the no-shift rule (it keeps its own
+clearance), and the cap to the right is LaneCenteringOncomingCap. (Until 2026-11-13 a narrow lane
+kept the left margin in full and the right side yielded all of it: see routes 278-27a below.) A near wall on
 the left, or a car in the right blind spot, keeps the rules above. Closed-loop replay (plan
 follows 0.5 of a shift) on 275: left-bend gap p5 -0.06 -> +0.06 m, right-bend right gap p5
 +0.08 -> +0.07, offset travel +12-16%/km; above 80 km/h and in the A560 zone (272) unchanged.
+Routes 278/279/27a (2026-11-13, country roads with 2.2-2.6 m lanes, 6.8 min engaged): with that rule
+the window was empty 56% of the time (the plan cuts every bend by 0.3-0.65 m, and a bound tightens
+at once but relaxes over seconds, so on a winding road both sides look short), the right side
+yielded without limit while it was 0.3 m inside its margin, and the offset sat above 0.3 m 31% of
+the time (cap 0.45; up to 0.93 where a guardrail up to 0.4 m behind the right line made the target
+the middle between it and the left line). The body was over the right line in 5% of the frames by
+0.19 m or more, 0.06 m over the verge, with the driver steering left 26-28% of the time. So with
+oncoming traffic an empty window is split evenly, a lone wall on the right gives no middle target
+(the road ends at its line, unlike a construction lane), and the cap to the right is
+LaneCenteringOncomingCap, now 0.30, also next to a guardrail (WALL_CAP and the inside cap are for
+moving away from a wall). The centre line in left bends is the bend trim's job now
+(modeld_v2/bend_trim.py). Closed-loop replay with this module and the bend trim in the loop (the
+model as a 0.49 m/s^2 per m spring), these routes: offset above 0.3 m 31% -> 0%, body to the right
+line p5 -0.19 -> -0.01 m (+0.02 with the trim at 1.0), to the verge -0.06 -> +0.12 (+0.14), to the
+left line +0.16 -> +0.01 (+0.05). Only 12% of that time was free of driver torque, so the
+positions are weak evidence; the offsets are not. Routes 275-277, worst body gap to the centre
+line in left bends (R 40-80 / 80-120 / 120-250 m): -0.05/-0.06/-0.17 before, -0.12/-0.15/-0.30
+with this change alone, +0.10/+0.01/-0.12 with the trim at 1.0 (+0.03/-0.01/-0.15 at 0.5): without
+the trim the left bends lose what the rule gave.
+Not addressed: the driver holding the car to one side moves the plan with it, and the window, so
+the offset follows the hand (driver_override is not used in camera mode).
 
 Each side's slack becomes a bound on the offset (hi = offset_used + right slack, lo =
 offset_used - left slack). A bound tightens at once, holds BOUND_RELAX_HOLD, then relaxes over
@@ -192,7 +214,7 @@ BARRIER_BEYOND = (0.3, 1.2)  # m, road edge or radar wall this far outside the l
 BARRIER_MIN_SPEED = 60 / 3.6  # m/s
 ONCOMING_SPEED = (80 / 3.6, 85 / 3.6)  # m/s: below the first the left of a RIGHT/SINGLE lane is oncoming traffic, above the second no longer
 DEFAULT_ONCOMING_CLEARANCE = 0.35  # m, body to the left line then (LaneCenteringOncomingClearance)
-ONCOMING_CAP = 0.45  # m, offset cap to the right then (LaneCenteringOncomingCap)
+ONCOMING_CAP = 0.30  # m, offset cap to the right then (LaneCenteringOncomingCap); 0.45 until routes 278-27a
 EDGE_MAX_STD = 0.5
 # camera-mode status readout only
 CAMERA_STATUS_MIN_PROB = 0.5
@@ -359,8 +381,10 @@ def _barrier_beyond(line_y: np.ndarray, sign: float, edge_y: np.ndarray | None, 
 
 def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, margin: float,
                walls=(None, None), wall_margin: float = DEFAULT_WALL_CLEARANCE, multi_lane: bool = False,
-               left_margin: float | None = None) -> Slack:
-  """left_margin: the left line's margin when the left side is oncoming traffic (at least `margin`)."""
+               left_margin: float | None = None, right_wall_middle: bool = True) -> Slack:
+  """left_margin: the left line's margin when the left side is oncoming traffic (at least `margin`).
+  right_wall_middle: a lone near wall on the right and the left line give a middle target (not on a
+  two-way road: a guardrail just behind the right line is not the lane's boundary there)."""
   out = Slack()
   line_margin_l = margin if left_margin is None else max(margin, left_margin)
   try:
@@ -421,7 +445,7 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
       # one near wall and a confident line on the other side: the middle between them
       if wl is not None and wr is None and out.wall_near_left and probs[2] >= LINE_MIN_PROB:
         out.mid_err = float(np.mean(0.5 * (wl.at(x) + _interp(x, lines[2]) + camera_offset) - track))
-      elif wr is not None and wl is None and out.wall_near_right and probs[1] >= LINE_MIN_PROB:
+      elif right_wall_middle and wr is not None and wl is None and out.wall_near_right and probs[1] >= LINE_MIN_PROB:
         out.mid_err = float(np.mean(0.5 * (wr.at(x) + _interp(x, lines[1]) + camera_offset) - track))
     right = [r for r in right if np.isfinite(r[0])]
     left = [lf for lf in left if np.isfinite(lf[0])]
@@ -560,9 +584,9 @@ class ClearanceGuard:
     inside = self.mid is not None or any(t < WALL_HOLD for t in self._inside_t)
     cap = self.inside_cap if inside else WALL_CAP if any(near) else OFFSET_CAP
     hi, lo = self.hi, self.lo
-    # oncoming traffic on the left (no wall there): its margin comes before a line, verge or
-    # guardrail on the right; a right wall keeps its own clearance (route 275: a guardrail as a
-    # near wall took the priority and the no-shift rule, and pushed the car onto the centre line)
+    # oncoming traffic on the left (no wall there): a guardrail on the right does not take the
+    # priority or the no-shift rule (route 275: it pushed the car onto the centre line); an empty
+    # window is split evenly (routes 278-27a: left first put the body over the right line)
     onc = self.oncoming and not near[1] and not self.blindspot[0]
     wall_hi = self._w[0].value
     out, cause = target, LimitCause.NONE
@@ -575,7 +599,7 @@ class ClearanceGuard:
       else:
         prio = 1 if self.single or self.oncoming else None
       if onc:
-        out = lo if wall_hi is None or lo <= wall_hi else 0.5 * (lo + wall_hi)
+        out = 0.5 * (lo + hi)
       elif prio == 1:  # left first: the right side yields
         hi_g = hi + self._give(0, near[1])
         out = hi_g + 0.5 * max(lo - hi_g, 0.0) if lo > hi_g else lo
@@ -588,8 +612,10 @@ class ClearanceGuard:
       out, cause = hi, self._causes[0]
     elif lo is not None and target < lo:
       out, cause = lo, self._causes[1]
-    # away from oncoming traffic the plan's bend cut needs more than OFFSET_CAP (it follows ~half)
-    out = float(np.clip(out, -cap, max(cap, self.oncoming_cap) if self.oncoming else cap))
+    # to the right with oncoming traffic: LaneCenteringOncomingCap, also next to a guardrail (the
+    # wall caps are for moving away from a wall; routes 278-27a sat at WALL_CAP toward one)
+    cap_right = self.oncoming_cap if onc and self.mid is None else max(cap, self.oncoming_cap) if self.oncoming else cap
+    out = float(np.clip(out, -cap, cap_right))
     # never shift toward a wall close to the body (shifting away stays allowed); between two
     # walls, or a wall and a confident line opposite, the target is their middle, which is the
     # only offset toward a wall
@@ -727,7 +753,7 @@ class DynamicLaneCentering:
           # a near wall on the left: no oncoming traffic beside the car, the plain line margin
           left_margin = self.oncoming_margin if self.oncoming and not self.guard.near[1] else None
           self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin,
-                                          multi_lane, left_margin), -cam)
+                                          multi_lane, left_margin, not self.oncoming), -cam)
       self.guard.single = pos == LanePosition.SINGLE
       self.guard.oncoming = self.oncoming
       self.guard.blindspot = (bool(blindspot[1]), bool(blindspot[0]))
