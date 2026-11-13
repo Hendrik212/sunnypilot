@@ -44,6 +44,7 @@ from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper, LaneCentreCameraOffset, LANE_CENTRE_STALE_S
 from openpilot.sunnypilot.modeld_v2.yaw_rate_blend import YAW_RATE_BLEND_MAX, yaw_rate_blend_correction
 from openpilot.sunnypilot.modeld_v2.crawl_deadband import CRAWL_DEADBAND_MAX, crawl_deadband
+from openpilot.sunnypilot.modeld_v2.split_path import SPLIT_HZ_MAX, SplitPath
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.modeld_v2.helpers import load_model
@@ -65,6 +66,12 @@ def _override_pkl(chestnut: bool) -> str | None:
   # Small model only: a QCOM pkl must never be picked up as the chestnut model.
   override = os.environ.get('COMBINED_MODEL_PKL')
   return override if override and not chestnut and _pkl_exists(override) else None
+
+
+def _split_path_model(chestnut: bool) -> bool:
+  # the split path's reaction weights are a fit of Cheddar (split_path.py): only for that override pkl
+  override = _override_pkl(chestnut)
+  return override is not None and 'cheddar' in os.path.basename(override).lower()
 
 
 def _override_generation() -> int | None:
@@ -124,6 +131,8 @@ class ModelState(ModelStateBase):
     self.PLANPLUS_CONTROL: float = 1.0
     self.YAW_RATE_BLEND: float = 0.0  # ModelYawRateBlend param, see yaw_rate_blend.py
     self.CRAWL_LAT_DEADBAND: float = 0.04  # ModelCrawlLatDeadband param, see crawl_deadband.py
+    self.SPLIT_PATH_HZ: float = 0.0  # LatSplitPathHz param, see split_path.py
+    self.split_path: SplitPath | None = SplitPath() if _split_path_model(chestnut) else None
     self.chestnut = chestnut
 
     pkl_path = _find_driving_pkl(model_bundle, chestnut)
@@ -265,6 +274,8 @@ class ModelState(ModelStateBase):
     else:
       desired_accel = model_output['action'][0, 1]
       lat_accel = crawl_deadband(float(model_output['action'][0, 0]), v_ego, self.CRAWL_LAT_DEADBAND)
+      if self.split_path is not None:
+        lat_accel = self.split_path.update(lat_accel, yaw_rate_measured, v_ego, self.SPLIT_PATH_HZ)
       desired_curvature = lat_accel / (max(1.0, v_ego))**2
 
     stop = v_ego < 0.3 and desired_accel < 0.1
@@ -460,6 +471,11 @@ def main(demo=False):
       except (TypeError, ValueError):
         crawl = 0.04
       model.CRAWL_LAT_DEADBAND = min(max(crawl, 0.0), CRAWL_DEADBAND_MAX) if np.isfinite(crawl) else 0.04
+      try:
+        split_hz = float(params.get("LatSplitPathHz", return_default=True))
+      except (TypeError, ValueError):
+        split_hz = 0.0
+      model.SPLIT_PATH_HZ = min(max(split_hz, 0.0), SPLIT_HZ_MAX) if np.isfinite(split_hz) else 0.0
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["lateralTuneStateSP"]:
@@ -565,6 +581,9 @@ def main(demo=False):
       mdv2sp_send.valid = modelv2_send.valid
       mdv2sp_send.modelDataV2SP.laneTurnDirection = DH.lane_turn_direction
       mdv2sp_send.modelDataV2SP.cameraOffset = float(camera_offset_helper.applied_offset)
+      if model.split_path is not None:
+        mdv2sp_send.modelDataV2SP.splitPathReaction = float(model.split_path.reaction)
+        mdv2sp_send.modelDataV2SP.splitPathWeight = float(model.split_path.weight)
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state
       drivingdata_send.drivingModelData.meta.laneChangeDirection = DH.lane_change_direction
 

@@ -42,6 +42,7 @@ WHITELIST: dict[str, tuple[float, float]] = {
   "ModelYawRateBlend": (0.0, 0.7),
   "LatHighwayKpScale": (0.3, 1.0),
   "ModelCrawlLatDeadband": (0.0, 0.1),
+  "LatSplitPathHz": (0.0, 0.6),  # 0 = off; 0.35-0.6 = scene low-pass cutoff (split_path.py)
   # EPS limit test (2026-11-06): car-layer limits in the 18-55 km/h band, panda allows 1023 / 50
   "SteerHeadroomCan": (409, 1023),
   "SteerDeltaUpLow": (2, 50),

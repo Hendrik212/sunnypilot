@@ -468,6 +468,11 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   # camera offset modeld actually applied (m, positive = model centre LEFT): the static
   # CameraOffset param plus lateralTuneStateSP.laneCentreCameraOffset
   cameraOffset @3 :Float32;
+  # split path (modeld_v2/split_path.py, LatSplitPathHz): the model's reaction to the car's own
+  # motion as predicted from the gyro (m/s^2), and the share of the split applied (0..1: param on,
+  # speed fade, request gate). Both 0 for models without it.
+  splitPathReaction @4 :Float32;
+  splitPathWeight @5 :Float32;
 
   enum TurnDirection {
     none @0;
