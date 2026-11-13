@@ -473,6 +473,12 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   # speed fade, request gate). Both 0 for models without it.
   splitPathReaction @4 :Float32;
   splitPathWeight @5 :Float32;
+  # bend trim (modeld_v2/bend_trim.py, LatBendTrimGain): the correction added to the lateral-accel
+  # request (m/s^2, right +), the share applied (0..1: param on, bend, lines, speed) and the
+  # observer's lane offset (m, car right of the real lane centre, camera offset taken out).
+  bendTrimCorrection @6 :Float32;
+  bendTrimWeight @7 :Float32;
+  bendTrimOffset @8 :Float32;
 
   enum TurnDirection {
     none @0;

@@ -45,6 +45,7 @@ from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelp
 from openpilot.sunnypilot.modeld_v2.yaw_rate_blend import YAW_RATE_BLEND_MAX, yaw_rate_blend_correction
 from openpilot.sunnypilot.modeld_v2.crawl_deadband import CRAWL_DEADBAND_MAX, crawl_deadband
 from openpilot.sunnypilot.modeld_v2.split_path import SPLIT_HZ_MAX, SplitPath
+from openpilot.sunnypilot.modeld_v2.bend_trim import GAIN_MAX as BEND_TRIM_GAIN_MAX, BendTrim
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.modeld_v2.helpers import load_model
@@ -133,6 +134,8 @@ class ModelState(ModelStateBase):
     self.CRAWL_LAT_DEADBAND: float = 0.04  # ModelCrawlLatDeadband param, see crawl_deadband.py
     self.SPLIT_PATH_HZ: float = 0.0  # LatSplitPathHz param, see split_path.py
     self.split_path: SplitPath | None = SplitPath() if _split_path_model(chestnut) else None
+    self.BEND_TRIM_GAIN: float = 0.0  # LatBendTrimGain param, see bend_trim.py
+    self.bend_trim = BendTrim()
     self.chestnut = chestnut
 
     pkl_path = _find_driving_pkl(model_bundle, chestnut)
@@ -260,7 +263,8 @@ class ModelState(ModelStateBase):
 
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                             lat_action_t: float, long_action_t: float, v_ego: float,
-                            yaw_rate_measured: float | None = None) -> log.ModelDataV2.Action:
+                            yaw_rate_measured: float | None = None, trim_active: bool = False,
+                            camera_offset: float = 0.0) -> log.ModelDataV2.Action:
     if 'action' not in model_output:
       plan = model_output['plan'][0]
       desired_accel = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0], self.constants.T_IDXS,
@@ -277,6 +281,13 @@ class ModelState(ModelStateBase):
       if self.split_path is not None:
         lat_accel = self.split_path.update(lat_accel, yaw_rate_measured, v_ego, self.SPLIT_PATH_HZ)
       desired_curvature = lat_accel / (max(1.0, v_ego))**2
+
+    if 'lane_lines' in model_output and 'lane_lines_prob' in model_output:
+      v2 = (max(1.0, v_ego))**2
+      lines, probs = model_output['lane_lines'][0], model_output['lane_lines_prob'][0, 1::2]
+      self.bend_trim.update(float(desired_curvature) * v2, self.constants.X_IDXS, lines[1, :, 0], lines[2, :, 0],
+                            float(probs[1]), float(probs[2]), yaw_rate_measured, v_ego, self.BEND_TRIM_GAIN, trim_active, camera_offset)
+      desired_curvature += self.bend_trim.correction / v2  # 0.0 while off: the request stays bit-identical
 
     stop = v_ego < 0.3 and desired_accel < 0.1
     desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
@@ -476,6 +487,11 @@ def main(demo=False):
       except (TypeError, ValueError):
         split_hz = 0.0
       model.SPLIT_PATH_HZ = min(max(split_hz, 0.0), SPLIT_HZ_MAX) if np.isfinite(split_hz) else 0.0
+      try:
+        trim_gain = float(params.get("LatBendTrimGain", return_default=True))
+      except (TypeError, ValueError):
+        trim_gain = 0.0
+      model.BEND_TRIM_GAIN = min(max(trim_gain, 0.0), BEND_TRIM_GAIN_MAX) if np.isfinite(trim_gain) else 0.0
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["lateralTuneStateSP"]:
@@ -563,7 +579,10 @@ def main(demo=False):
       dm = sm['deviceMotion']
       yaw_rate_measured = (dm.angularVelocityDevice.z if sm.valid['deviceMotion'] and sm.alive['deviceMotion']
                            and dm.angularVelocityDevice.valid else None)
-      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego, yaw_rate_measured)
+      trim_active = (sm['carControl'].latActive and DH.lane_change_state == log.LaneChangeState.off
+                     and not (sm['carState'].leftBlinker or sm['carState'].rightBlinker))
+      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego, yaw_rate_measured, trim_active,
+                                           float(camera_offset_helper.applied_offset))
       prev_action = action
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
@@ -584,6 +603,9 @@ def main(demo=False):
       if model.split_path is not None:
         mdv2sp_send.modelDataV2SP.splitPathReaction = float(model.split_path.reaction)
         mdv2sp_send.modelDataV2SP.splitPathWeight = float(model.split_path.weight)
+      mdv2sp_send.modelDataV2SP.bendTrimCorrection = float(model.bend_trim.correction)
+      mdv2sp_send.modelDataV2SP.bendTrimWeight = float(model.bend_trim.weight)
+      mdv2sp_send.modelDataV2SP.bendTrimOffset = float(model.bend_trim.offset or 0.0)
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state
       drivingdata_send.drivingModelData.meta.laneChangeDirection = DH.lane_change_direction
 
