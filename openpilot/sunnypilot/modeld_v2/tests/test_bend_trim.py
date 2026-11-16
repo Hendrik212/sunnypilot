@@ -108,7 +108,8 @@ def test_modeld_applies_it_on_both_request_paths():
   from openpilot.sunnypilot.modeld_v2 import modeld
 
   def run(gain, active=True):
-    me = SimpleNamespace(CRAWL_LAT_DEADBAND=0.04, SPLIT_PATH_HZ=0.0, split_path=None, BEND_TRIM_GAIN=gain, bend_trim=BendTrim(), constants=ModelConstants,
+    me = SimpleNamespace(CRAWL_LAT_DEADBAND=0.04, SPLIT_PATH_HZ=0.0, SPLIT_PATH_LOW_HZ=0.0, split_path=None, BEND_TRIM_GAIN=gain, bend_trim=BendTrim(),
+                         constants=ModelConstants,
                          LONG_SMOOTH_SECONDS=0.0, LAT_SMOOTH_SECONDS=0.0, MIN_LAT_CONTROL_SPEED=0.3, generation=None)
     left, right = _lines(0.4, 2.0 / V**2)
     lines = np.zeros((1, 4, len(X), 2), dtype=np.float32)

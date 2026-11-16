@@ -44,7 +44,7 @@ from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper, LaneCentreCameraOffset, LANE_CENTRE_STALE_S
 from openpilot.sunnypilot.modeld_v2.yaw_rate_blend import YAW_RATE_BLEND_MAX, yaw_rate_blend_correction
 from openpilot.sunnypilot.modeld_v2.crawl_deadband import CRAWL_DEADBAND_MAX, crawl_deadband
-from openpilot.sunnypilot.modeld_v2.split_path import SPLIT_HZ_MAX, SplitPath
+from openpilot.sunnypilot.modeld_v2.split_path import LOW_HZ_MAX, SPLIT_HZ_MAX, SplitPath
 from openpilot.sunnypilot.modeld_v2.bend_trim import GAIN_MAX as BEND_TRIM_GAIN_MAX, BendTrim
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
@@ -133,6 +133,7 @@ class ModelState(ModelStateBase):
     self.YAW_RATE_BLEND: float = 0.0  # ModelYawRateBlend param, see yaw_rate_blend.py
     self.CRAWL_LAT_DEADBAND: float = 0.04  # ModelCrawlLatDeadband param, see crawl_deadband.py
     self.SPLIT_PATH_HZ: float = 0.0  # LatSplitPathHz param, see split_path.py
+    self.SPLIT_PATH_LOW_HZ: float = 0.15  # LatSplitPathLowHz param
     self.split_path: SplitPath | None = SplitPath() if _split_path_model(chestnut) else None
     self.BEND_TRIM_GAIN: float = 0.0  # LatBendTrimGain param, see bend_trim.py
     self.bend_trim = BendTrim()
@@ -279,7 +280,7 @@ class ModelState(ModelStateBase):
       desired_accel = model_output['action'][0, 1]
       lat_accel = crawl_deadband(float(model_output['action'][0, 0]), v_ego, self.CRAWL_LAT_DEADBAND)
       if self.split_path is not None:
-        lat_accel = self.split_path.update(lat_accel, yaw_rate_measured, v_ego, self.SPLIT_PATH_HZ)
+        lat_accel = self.split_path.update(lat_accel, yaw_rate_measured, v_ego, self.SPLIT_PATH_HZ, self.SPLIT_PATH_LOW_HZ)
       desired_curvature = lat_accel / (max(1.0, v_ego))**2
 
     if 'lane_lines' in model_output and 'lane_lines_prob' in model_output:
@@ -487,6 +488,11 @@ def main(demo=False):
       except (TypeError, ValueError):
         split_hz = 0.0
       model.SPLIT_PATH_HZ = min(max(split_hz, 0.0), SPLIT_HZ_MAX) if np.isfinite(split_hz) else 0.0
+      try:
+        split_low_hz = float(params.get("LatSplitPathLowHz", return_default=True))
+      except (TypeError, ValueError):
+        split_low_hz = 0.15
+      model.SPLIT_PATH_LOW_HZ = min(max(split_low_hz, 0.0), LOW_HZ_MAX) if np.isfinite(split_low_hz) else 0.15
       try:
         trim_gain = float(params.get("LatBendTrimGain", return_default=True))
       except (TypeError, ValueError):

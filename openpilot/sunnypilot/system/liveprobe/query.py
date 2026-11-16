@@ -45,6 +45,7 @@ WHITELIST: dict[str, tuple[float, float]] = {
   "LatBendTrimGain": (0.0, 1.5),  # 0 = off; 1.0 = replay setting (bend_trim.py)
   "LatCornerSpeedWarnAccel": (0.0, 4.0),  # 0 = off; 2.8 = replay setting (corner_speed_warning.py)
   "LatSplitPathHz": (0.0, 0.6),  # 0 = off; 0.35-0.6 = scene low-pass cutoff (split_path.py)
+  "LatSplitPathLowHz": (0.0, 0.3),  # 0 = off; 0.15 = sim setting: the split leaves the lane band below this alone
   # EPS limit test (2026-11-06): car-layer limits in the 18-55 km/h band, panda allows 1023 / 50
   "SteerHeadroomCan": (409, 1023),
   "SteerDeltaUpLow": (2, 50),

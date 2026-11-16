@@ -20,6 +20,18 @@ x0.50-0.66, torque rate p95 x0.68-0.72, lane wobble 2.8-3.3 cm (2.4-3.1 without)
 on the whole request is unstable. Second order or a lower cutoff brings a slow 0.1-0.18 Hz lane
 mode (5-9 cm), a sharp "remove only above fc" form raises the weave by 24-165%.
 
+Slow band (LatSplitPathLowHz param, Hz, default 0.15; 0 = off). Driven Nov 16 (routes 0000027b/27c, 0.5 Hz): gain
+only on straights, slow ping pong in slight bends; lane offset at 0.1-0.18 Hz x1.2-1.45. The sim had it too
+(x1.34 gated, x1.39 ungated, the same on straight and curved stretches): below 0.2 Hz the estimate is wrong
+(phase +60..90 deg, larger than the request), so the low-pass removes part of the real reaction and the lane
+loop loses gain there. A first-order high-pass at LatSplitPathLowHz on the removed part leaves that band alone.
+Sim, with the gate, relative to no split: 0.15 Hz: lane 0.1-0.18 Hz x1.04, weave +14% (+7% at 95 km/h, +23% at
+105-120), chatter 0.5-1 Hz x0.81, 1-2 Hz x0.64, torque rate p95 x0.79; 0.2 Hz: x1.02, +17%, x0.86; 0.3 Hz:
+x1.00, +22%, x0.92. Not driven yet.
+Rejected on the same runs: a road reference from the plans of the last 0.5-3 s (subtracted from the gyro and
+bypassing the low-pass): turn-in on time without a gate open loop, but slow band still x1.38 and weave
++31..+87% at 105-120 km/h.
+
 Limits that are built in, not tunable:
 - Reaction gain. The loop has 2-3 dB of gain margin; an estimate 60% too high went unstable in one
   of four runs, 30% either way was stable. The fit under-predicts, which is the safe side.
@@ -36,6 +48,7 @@ SPLIT_HZ_MIN, SPLIT_HZ_MAX = 0.35, 0.6  # scene low-pass cutoff range; below MIN
 SPEED_BP = [20.0, 25.0]  # m/s: off below 72 km/h, full from 90 km/h
 GATE_BP = [0.3, 0.6]  # m/s^2 of request magnitude: full split below, none above
 GATE_RELEASE_S = 1.0
+LOW_HZ_MAX = 0.3  # LatSplitPathLowHz above this gives the chatter gain away (sim: x0.92 at 0.3)
 FEATURE_HP_HZ = 0.1
 MIN_SPEED = 1.0
 # reaction [m/s^2] = W_E . (e[n], e[n-1]) + W_PSI . (psi[n], psi[n-1]) + W_A . (a[n], a[n-1])
@@ -76,6 +89,7 @@ class SplitPath:
     self.lp_x1: float | None = None  # low-pass state: previous input and output
     self.lp_y1 = 0.0
     self.gate_peak = 0.0
+    self.low_x1 = self.low_y1 = 0.0  # slow-band high-pass on the removed part
     self.reaction = 0.0  # last predicted reaction (m/s^2), for the log
     self.weight = 0.0  # last applied share of the split (0..1), for the log
 
@@ -95,7 +109,7 @@ class SplitPath:
     return (W_E[0] * self.e[0] + W_E[1] * self.e[1] + W_PSI[0] * self.psi[0] + W_PSI[1] * self.psi[1] +
             W_A[0] * self.acc[0] + W_A[1] * self.acc[1])
 
-  def update(self, lat_accel: float, yaw_rate_measured: float | None, v_ego: float, split_hz: float) -> float:
+  def update(self, lat_accel: float, yaw_rate_measured: float | None, v_ego: float, split_hz: float, low_hz: float = 0.0) -> float:
     """lat_accel with the scene part low-passed at split_hz. Call once per model frame, also while
     the split is off, so that it is settled when a live param switches it on."""
     if yaw_rate_measured is None or not np.isfinite(yaw_rate_measured) or not np.isfinite(lat_accel):
@@ -111,8 +125,17 @@ class SplitPath:
     if not on or self.lp_x1 is None:
       # track the scene part: switching on starts from "nothing removed", without a step
       self.lp_x1 = self.lp_y1 = scene
+      self.low_x1 = self.low_y1 = 0.0
       return lat_accel
     k = _k(min(max(split_hz, SPLIT_HZ_MIN), SPLIT_HZ_MAX))
     scene_lp = (k * (scene + self.lp_x1) - (k - 1.0) * self.lp_y1) / (k + 1.0)
     self.lp_x1, self.lp_y1 = scene, scene_lp
-    return lat_accel - self.weight * (scene - scene_lp)
+    removed = scene - scene_lp
+    if low_hz > 0.0 and np.isfinite(low_hz):
+      kl = _k(min(low_hz, LOW_HZ_MAX))
+      high = (removed - self.low_x1 - (kl - 1.0) * self.low_y1) / (kl + 1.0)
+      self.low_x1, self.low_y1 = removed, high
+      removed = high
+    else:
+      self.low_x1 = self.low_y1 = 0.0
+    return lat_accel - self.weight * removed

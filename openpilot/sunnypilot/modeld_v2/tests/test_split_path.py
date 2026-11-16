@@ -96,7 +96,7 @@ def test_modeld_action_path_uses_it(monkeypatch):
   from openpilot.sunnypilot.modeld_v2 import modeld
 
   def run(split, hz):
-    me = SimpleNamespace(CRAWL_LAT_DEADBAND=0.04, SPLIT_PATH_HZ=hz, split_path=split, LONG_SMOOTH_SECONDS=0.0, LAT_SMOOTH_SECONDS=0.0,
+    me = SimpleNamespace(CRAWL_LAT_DEADBAND=0.04, SPLIT_PATH_HZ=hz, SPLIT_PATH_LOW_HZ=0.0, split_path=split, LONG_SMOOTH_SECONDS=0.0, LAT_SMOOTH_SECONDS=0.0,
                          MIN_LAT_CONTROL_SPEED=0.3, generation=None)
     prev = log.ModelDataV2.Action()
     out = []
@@ -117,3 +117,62 @@ def test_modeld_action_path_uses_it(monkeypatch):
   assert not modeld._split_path_model(False)
   monkeypatch.delenv("COMBINED_MODEL_PKL")
   assert not modeld._split_path_model(False)
+
+
+def _sim_reference(a, r, v, hpx):
+  """/mnt/sdc1/opsim/sim/splitpath.py, first-order 0.5 Hz, gate, --split-hpx: same arithmetic with scipy's coefficients"""
+  from scipy.signal import butter
+  b, a_ = butter(1, hpx, btype="high", fs=1 / DT)
+  ref, out, x1, y1 = SplitPath(), [], 0.0, 0.0
+  for i in range(len(a)):
+    o = ref.update(a[i], r[i], v[i], 0.5)
+    removed = (a[i] - o) / ref.weight if ref.weight > 0 else 0.0
+    y = b[0] * removed + b[1] * x1 - a_[1] * y1
+    x1, y1 = removed, y
+    out.append(a[i] - ref.weight * y)
+  return np.array(out)
+
+
+@pytest.mark.parametrize("low_hz", [0.1, 0.15, 0.3])
+def test_low_band_matches_the_sim_form(low_hz):
+  _, a, r, v = _signals()
+  sp = SplitPath()
+  out = np.array([sp.update(a[i], r[i], v[i], 0.5, low_hz) for i in range(len(a))])
+  assert out == pytest.approx(_sim_reference(a, r, v, low_hz), abs=1e-9)
+
+
+def test_low_band_zero_is_the_old_split():
+  _, a, r, v = _signals()
+  old, new = SplitPath(), SplitPath()
+  assert all(old.update(a[i], r[i], v[i], 0.5) == new.update(a[i], r[i], v[i], 0.5, 0.0) for i in range(len(a)))
+
+
+def test_low_band_leaves_slow_scene_content_alone():
+  n = 2400
+  t = np.arange(n) * DT
+  slow = 0.05 * np.sin(2 * np.pi * 0.05 * t)
+  fast = 0.05 * np.sin(2 * np.pi * 1.0 * t)
+  def removed_share(x, low_hz):
+    sp = SplitPath()
+    out = np.array([sp.update(x[i], 0.0, 30.0, 0.5, low_hz) for i in range(n)])
+    return (x - out)[1200:].std() / x[1200:].std()
+  assert removed_share(slow, 0.15) < 0.4 * removed_share(slow, 0.0)
+  assert removed_share(fast, 0.15) > 0.95 * removed_share(fast, 0.0)
+
+
+def test_low_band_param_is_capped_and_bad_values_are_off():
+  from openpilot.sunnypilot.modeld_v2.split_path import LOW_HZ_MAX
+  _, a, r, v = _signals(400)
+  def run(low_hz):
+    sp = SplitPath()
+    return [sp.update(a[i], r[i], v[i], 0.5, low_hz) for i in range(len(a))]
+  assert run(5.0) == run(LOW_HZ_MAX)
+  assert run(float("nan")) == run(0.0) == run(-1.0)
+
+
+def test_switching_on_mid_drive_has_no_step_with_the_low_band():
+  _, a, r, v = _signals()
+  sp = SplitPath()
+  for i in range(300):
+    sp.update(a[i], r[i], v[i], 0.0, 0.15)
+  assert sp.update(a[300], r[300], v[300], 0.5, 0.15) == pytest.approx(a[300], abs=0.02)
