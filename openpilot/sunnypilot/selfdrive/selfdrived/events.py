@@ -73,6 +73,16 @@ def speed_limit_pre_active_alert(CP: car.CarParams, CS: car.CarState, sm: messag
     Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleLow, .1)
 
 
+def corner_speed_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+  safe_speed = sm['longitudinalPlanSP'].cornerSpeedWarning.safeSpeed
+  speed = int(safe_speed * (CV.MS_TO_KPH if metric else CV.MS_TO_MPH))
+  return Alert(
+    "Corner Too Fast for Steering",
+    f'Slow to {speed} {"km/h" if metric else "mph"}',
+    AlertStatus.userPrompt, AlertSize.mid,
+    Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 1.)
+
+
 class EventsSP(EventsBase):
   def __init__(self):
     super().__init__()
@@ -251,6 +261,10 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       "",
       AlertStatus.userPrompt, AlertSize.small,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 0.1),
+  },
+
+  EventNameSP.cornerSpeed: {
+    ET.PERMANENT: corner_speed_alert,
   },
 
   EventNameSP.bigModelReady: {

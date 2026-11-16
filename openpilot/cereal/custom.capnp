@@ -203,6 +203,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   aTarget @5 :Float32;
   events @6 :List(OnroadEventSP.Event);
   e2eAlerts @7 :E2eAlerts;
+  cornerSpeedWarning @8 :CornerSpeedWarning;
 
   deprecated :group {
     dec @0 :DynamicExperimentalControlDEPRECATED;
@@ -309,6 +310,16 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     greenLightAlert @0 :Bool;
     leadDepartAlert @1 :Bool;
   }
+
+  # corner_speed_warning.py (LatCornerSpeedWarnAccel): the model plan's largest curvature over the next
+  # 3 s times the current speed squared (m/s^2), the limit in use (0 = off), and while the alert is on
+  # the speed the steering can hold (m/s).
+  struct CornerSpeedWarning {
+    active @0 :Bool;
+    previewLateralAccel @1 :Float32;
+    limit @2 :Float32;
+    safeSpeed @3 :Float32;
+  }
 }
 
 struct OnroadEventSP @0xda96579883444c35 {
@@ -357,6 +368,7 @@ struct OnroadEventSP @0xda96579883444c35 {
     e2eChime @23;
     laneChangeRoadEdge @24;
     bigModelReady @25;
+    cornerSpeed @26;
   }
 }
 
