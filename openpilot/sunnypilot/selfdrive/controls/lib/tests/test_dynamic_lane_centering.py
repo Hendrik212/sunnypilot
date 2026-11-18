@@ -461,14 +461,14 @@ def _narrow_model(cam, follow, wiggle=0.0, left=-1.17, right=1.28):
   return m
 
 
-def _narrow_run(follow, seconds=40.0, guard=None):
-  d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1, LaneCenteringDwell=0.0)
+def _narrow_run(follow, seconds=40.0, guard=None, wiggle_amp=0.12, **kw):
+  d = _dyn(LaneCenterOffset=0.25, LaneCenteringOffsetMode=1, LaneCenteringDwell=0.0, **kw)
   cam, track = 0.0, []
   for i in range(int(round(seconds / DT_CTRL))):
     upd = i % 5 == 0
     if upd:
       cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)  # modeld rate limit
-    wiggle = 0.12 * np.sin(2 * np.pi * i * DT_CTRL / 8.0)  # left and right bends, 8 s apart
+    wiggle = wiggle_amp * np.sin(2 * np.pi * i * DT_CTRL / 8.0)  # left and right bends, 8 s apart
     d.update(0.0, _narrow_model(cam, follow, wiggle), upd, True, V, True, False, False, cam)
     track.append(wiggle - follow * cam)
   return d, np.array(track)
@@ -742,3 +742,61 @@ def test_double_line_zone_keeps_the_lane_offset_instead_of_pushing_off_the_old_l
   # the same lane below 60 km/h keeps the normal margin and is pushed right
   d = _zone_run(15.0)
   assert d.offset > 0.1 and d.limit_cause == dlc.LimitCause.LEFT_LINE
+
+
+def test_plan_slack_lane_bounds_ignore_the_plan():
+  # lines at +-1.75 (model frame), camera offset -0.25 (car right): the lane-centre bounds are the
+  # lane's half width minus body and margin, wherever the plan runs
+  for model_y in (0.0, 0.4, -0.3):
+    sl = dlc.plan_slack(_model(lane_right=False, model_y=model_y), V, -0.25, 0.94, 0.25)
+    assert sl.lane_right == pytest.approx(1.75 - 0.94 - 0.25)
+    assert sl.lane_left == pytest.approx(1.75 - 0.94 - 0.25)
+  # the left side's oncoming margin counts there as well
+  sl = dlc.plan_slack(_model(lane_left=False, lane_right=False), 20.0, 0.0, 0.94, 0.15, left_margin=0.35)
+  assert sl.lane_left == pytest.approx(1.75 - 0.94 - 0.35) and sl.lane_right == pytest.approx(1.75 - 0.94 - 0.15)
+  # one weak line: no lane centre, no lane bounds
+  m = _model(lane_right=False)
+  m.laneLineProbs = [0.0, 0.95, 0.2, 0.0]
+  sl = dlc.plan_slack(m, V, 0.0, 0.94, 0.25)
+  assert sl.lane_right is None and sl.lane_left is None and sl.left is not None
+
+
+def test_narrow_mode_1_splits_the_lane_window():
+  g = dlc.ClearanceGuard()
+  g.narrow_from_lane = True
+  # the plan looks pinched 0.3/0.2, the lane is 0.1 short on both sides: oncoming splits the lane window
+  assert _pinched(g, -0.3, -0.2, oncoming=True, lane_right=-0.1, lane_left=-0.1) == (pytest.approx(0.0), dlc.LimitCause.NARROW)
+  # the lane has room, only the plan is pinched (a cut bend): the target is clipped into the lane window
+  g = dlc.ClearanceGuard()
+  g.narrow_from_lane = True
+  assert _pinched(g, -0.3, -0.2, oncoming=True, lane_right=0.2, lane_left=0.3) == (pytest.approx(0.2), dlc.LimitCause.NARROW)
+  # a lane with room and a plan with room: the plan window clips as before
+  g = dlc.ClearanceGuard()
+  g.narrow_from_lane = True
+  assert _pinched(g, 0.12, 0.5, lane_right=0.4, lane_left=0.4) == (pytest.approx(0.12), dlc.LimitCause.RIGHT_LINE)
+  # mode 0 (default) ignores the lane bounds
+  assert _pinched(dlc.ClearanceGuard(), -0.3, -0.2, oncoming=True, lane_right=-0.1, lane_left=-0.1) == \
+    (pytest.approx(-0.05), dlc.LimitCause.NARROW)
+
+
+def test_narrow_mode_param():
+  assert not _dyn().guard.narrow_from_lane
+  assert _dyn(LaneCenteringNarrowMode=1.0).guard.narrow_from_lane
+  assert not _dyn(LaneCenteringNarrowMode="bad").guard.narrow_from_lane
+
+
+def test_narrow_mode_1_does_not_chase_the_plan():
+  # routes 27f/280: in a narrow lane the plan-based middle is offset_used + slack and the plan follows
+  # half a shift, so with bend-to-bend drift the target swung; measured from the lane centre it holds
+  ptp = {}
+  for mode in (0.0, 1.0):
+    d, _ = _narrow_run(0.5, wiggle_amp=0.25, LaneCenteringNarrowMode=mode, LaneCenteringOncomingClearance=0.35)
+    tgt = []
+    for i in range(int(round(16.0 / DT_CTRL))):
+      upd = i % 5 == 0
+      wiggle = 0.25 * np.sin(2 * np.pi * i * DT_CTRL / 8.0)
+      d.update(0.0, _narrow_model(-d.offset, 0.5, wiggle), upd, True, V, True, False, False, -d.offset)
+      tgt.append(d.offset_target)
+    ptp[mode] = np.ptp(tgt)
+  assert ptp[1.0] < 0.02
+  assert ptp[0.0] > ptp[1.0] + 0.05

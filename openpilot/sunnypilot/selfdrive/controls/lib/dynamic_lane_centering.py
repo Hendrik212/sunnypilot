@@ -124,6 +124,19 @@ positions are weak evidence; the offsets are not. Routes 275-277, worst body gap
 line in left bends (R 40-80 / 80-120 / 120-250 m): -0.05/-0.06/-0.17 before, -0.12/-0.15/-0.30
 with this change alone, +0.10/+0.01/-0.12 with the trim at 1.0 (+0.03/-0.01/-0.15 at 0.5): without
 the trim the left bends lose what the rule gave.
+Routes 27f/280 (2026-11-18, the same kind of road, lanes 2.2-2.6 m, NARROW 63-69%): the offset target
+swung -0.30..+0.30 m (-0.50 by a guardrail), 8 reversals a minute, the body over a line 8-15% of the
+time, the driver steering against it 17-28%. The narrow middle is offset_used + half the plan's slack
+difference, and the plan follows only part of a shift and seconds late (target follows the car's
+position 0.5-1 s later with the opposite sign, the car follows the target 3.5-9.5 s later), so the
+middle keeps adding up and the ramp runs it from cap to cap. LaneCenteringNarrowMode 1 measures both
+sides from the lane centre between the two confident lines instead (lane_right/lane_left, no
+offset_used): an empty window there is split with the same priorities, and when only the plan is
+pinched (a cut bend) the target is clipped into the lane window. Closed-loop replay of 27f/280:
+offset p5/p95 -0.30/+0.30 -> 0.00/+0.22, travel 3.0 -> 1.3 m/min; but the right-line gap p5 -0.05 ->
+-0.30 m, since nothing follows the model's own drift any more (it rides right of centre there). The
+positions replay the driver's hands (94% of the time), aimed at the old behaviour, so they cannot
+decide it: mode 0 (the old window) is the default until a drive compares them.
 Not addressed: the driver holding the car to one side moves the plan with it, and the window, so
 the offset follows the hand (driver_override is not used in camera mode).
 
@@ -160,7 +173,7 @@ LaneCenteringSwitchDist, LaneCenteringE2EAuthority,
 LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk,
 LaneCenteringMinClearance, LaneCenteringCarWidth, LaneCenteringWallClearance,
 LaneCenteringMiddleBias, LaneCenteringWallInsideCap, LaneCenteringOncomingClearance,
-LaneCenteringOncomingCap. Frame: model y positive to the RIGHT.
+LaneCenteringOncomingCap, LaneCenteringNarrowMode. Frame: model y positive to the RIGHT.
 """
 from dataclasses import dataclass
 from enum import IntEnum
@@ -365,6 +378,10 @@ class Slack:
   mid_err: float | None = None  # plan to the middle of two near walls, or of a lone near wall and the line opposite (m, + = right)
   barrier_right: bool = False  # that line got BARRIER_LINE_MARGIN (narrow lane, barrier just behind it)
   barrier_left: bool = False
+  # the same per-side bounds measured from the lane centre instead of the plan (m, an offset bound
+  # directly, no offset_used), None unless both lane lines are confident
+  lane_right: float | None = None
+  lane_left: float | None = None
 
 
 def _wall_near(gap: float, line_gap: float | None) -> bool:
@@ -399,6 +416,9 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
     right: list[tuple[float, LimitCause]] = []
     left: list[tuple[float, LimitCause]] = []
     line_gap = [None, None]  # body to a confident lane line (right, left)
+    bounds_r: list[tuple[np.ndarray, float]] = []  # boundary y (real frame) and its margin, for the lane-centre bounds
+    bounds_l: list[tuple[np.ndarray, float]] = []
+    centre = None
     # model boundaries are in the shifted frame: real = model + camera offset
     wl, wr = walls
     if len(lines) >= 3 and len(probs) >= 3:
@@ -412,20 +432,29 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
       if probs[2] >= LINE_MIN_PROB:
         line_gap[0] = float(np.min(line_r - track) - half_width)
         right.append((line_gap[0] - (BARRIER_LINE_MARGIN if out.barrier_right else margin), LimitCause.RIGHT_LINE))
+        bounds_r.append((line_r, BARRIER_LINE_MARGIN if out.barrier_right else margin))
       if probs[1] >= LINE_MIN_PROB:
         line_gap[1] = float(np.min(track - line_l) - half_width)
         left.append((line_gap[1] - (BARRIER_LINE_MARGIN if out.barrier_left else line_margin_l), LimitCause.LEFT_LINE))
+        bounds_l.append((line_l, BARRIER_LINE_MARGIN if out.barrier_left else line_margin_l))
+      if probs[1] >= LINE_MIN_PROB and probs[2] >= LINE_MIN_PROB:
+        centre = 0.5 * (line_l + line_r)
     if len(edges) >= 2 and len(edge_stds) >= 2:
       if edge_stds[1] <= EDGE_MAX_STD:
-        right.append((np.min(_interp(x, edges[1]) + camera_offset - track) - half_width - margin - EDGE_EXTRA, LimitCause.RIGHT_EDGE))
+        edge_r = _interp(x, edges[1]) + camera_offset
+        right.append((np.min(edge_r - track) - half_width - margin - EDGE_EXTRA, LimitCause.RIGHT_EDGE))
+        bounds_r.append((edge_r, margin + EDGE_EXTRA))
       if edge_stds[0] <= EDGE_MAX_STD:
-        left.append((np.min(track - _interp(x, edges[0]) - camera_offset) - half_width - margin - EDGE_EXTRA, LimitCause.LEFT_EDGE))
+        edge_l = _interp(x, edges[0]) + camera_offset
+        left.append((np.min(track - edge_l) - half_width - margin - EDGE_EXTRA, LimitCause.LEFT_EDGE))
+        bounds_l.append((edge_l, margin + EDGE_EXTRA))
     # radar walls are in the real frame already; the car is at y = 0 now
     if wr is not None:
       out.wall_right = True
       gap = float(np.min(wr.at(x) - track)) - half_width
       out.wall_slack_right = gap - wall_margin
       right.append((out.wall_slack_right, LimitCause.RIGHT_WALL))
+      bounds_r.append((wr.at(x), wall_margin))
       gap = min(gap, float(wr.at(0.0)) - half_width)
       out.wall_near_right = _wall_near(gap, line_gap[0])
       out.wall_inside_right = out.wall_near_right and line_gap[0] is not None and gap < line_gap[0]
@@ -434,6 +463,7 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
       gap = float(np.min(track - wl.at(x))) - half_width
       out.wall_slack_left = gap - wall_margin
       left.append((out.wall_slack_left, LimitCause.LEFT_WALL))
+      bounds_l.append((wl.at(x), wall_margin))
       gap = min(gap, -float(wl.at(0.0)) - half_width)
       out.wall_near_left = _wall_near(gap, line_gap[1])
       out.wall_inside_left = out.wall_near_left and line_gap[1] is not None and gap < line_gap[1]
@@ -447,6 +477,12 @@ def plan_slack(model_v2, v_ego: float, camera_offset: float, half_width: float, 
         out.mid_err = float(np.mean(0.5 * (wl.at(x) + _interp(x, lines[2]) + camera_offset) - track))
       elif right_wall_middle and wr is not None and wl is None and out.wall_near_right and probs[1] >= LINE_MIN_PROB:
         out.mid_err = float(np.mean(0.5 * (wr.at(x) + _interp(x, lines[1]) + camera_offset) - track))
+    if centre is not None:
+      lr = [float(np.min(y - centre)) - half_width - m for y, m in bounds_r]
+      ll = [float(np.min(centre - y)) - half_width - m for y, m in bounds_l]
+      lr, ll = [v for v in lr if np.isfinite(v)], [v for v in ll if np.isfinite(v)]
+      if lr and ll:
+        out.lane_right, out.lane_left = min(lr), min(ll)
     right = [r for r in right if np.isfinite(r[0])]
     left = [lf for lf in left if np.isfinite(lf[0])]
     if right:
@@ -496,12 +532,14 @@ class ClearanceGuard:
   def __init__(self):
     self._b = [_Bound(BOUND_HOLD), _Bound(BOUND_HOLD)]  # any boundary (right, left)
     self._w = [_Bound(WALL_HOLD), _Bound(WALL_HOLD)]  # radar walls only
+    self._l = [_Bound(BOUND_HOLD), _Bound(BOUND_HOLD)]  # any boundary, from the lane centre (right, left)
     self.inside_cap = WALL_INSIDE_CAP  # live: LaneCenteringWallInsideCap
     self.oncoming_cap = ONCOMING_CAP  # live: LaneCenteringOncomingCap
+    self.narrow_from_lane = False  # live: LaneCenteringNarrowMode 1
     self.reset()
 
   def reset(self) -> None:
-    for b in self._b + self._w:
+    for b in self._b + self._w + self._l:
       b.reset()
     self.slack = Slack()
     self._causes = [LimitCause.NONE, LimitCause.NONE]
@@ -523,6 +561,12 @@ class ClearanceGuard:
     v = self._b[1].value
     return None if v is None else -v
 
+  @property
+  def lane_window(self) -> tuple[float, float] | None:
+    """(lo, hi) offset window measured from the lane centre, None unless both sides are known."""
+    hi, lo = self._l[0].value, self._l[1].value
+    return None if hi is None or lo is None else (-lo, hi)
+
   def set_slack(self, slack: Slack, offset_used: float = 0.0, dt: float = DT_MDL) -> None:
     """offset_used: the offset (m, + = right) the model frame behind `slack` was run with."""
     self.slack = slack
@@ -531,6 +575,7 @@ class ClearanceGuard:
                                     (1, -1.0, slack.left, slack.wall_slack_left, slack.left_cause)):
       self._b[i].update(None if sl is None else sign * offset_used + sl, dt)
       self._w[i].update(None if wsl is None else sign * offset_used + wsl, dt)
+      self._l[i].update(slack.lane_right if i == 0 else slack.lane_left, dt)
       if sl is not None:
         self._causes[i] = cause
     # the middle is relative to the plan, which follows only part of a shift: adding it to the
@@ -590,7 +635,20 @@ class ClearanceGuard:
     onc = self.oncoming and not near[1] and not self.blindspot[0]
     wall_hi = self._w[0].value
     out, cause = target, LimitCause.NONE
-    if hi is not None and lo is not None and lo > hi:  # too close on both sides
+    lane = self.lane_window
+    narrow_plan = hi is not None and lo is not None and lo > hi
+    in_lane = False
+    if self.narrow_from_lane and lane is not None and (narrow_plan or lane[0] > lane[1]):
+      # the narrow window from the lane centre: the plan-based one is offset_used + slack, and the
+      # plan follows only part of a shift and seconds late, so its middle kept adding up and swung
+      # the offset +-0.3 m (routes 27f/280)
+      lo_l, hi_l = lane
+      if lo_l <= hi_l:  # the lane has room, only the plan is pinched (a cut bend): stay in the lane window
+        out, cause = float(np.clip(target, lo_l, hi_l)), LimitCause.NARROW
+        narrow_plan, in_lane = False, True
+      else:
+        lo, hi, narrow_plan = lo_l, hi_l, True
+    if narrow_plan:  # too close on both sides
       cause = LimitCause.NARROW
       if near[1] and not near[0]:
         prio = 1
@@ -608,6 +666,8 @@ class ClearanceGuard:
         out = lo_g - 0.5 * max(lo_g - hi, 0.0) if lo_g > hi else hi
       else:
         out = 0.5 * (lo + hi + NARROW_BIAS)
+    elif in_lane:
+      pass
     elif hi is not None and target > hi:
       out, cause = hi, self._causes[0]
     elif lo is not None and target < lo:
@@ -689,6 +749,7 @@ class DynamicLaneCentering:
     self.guard.inside_cap = _get_float(params, "LaneCenteringWallInsideCap", WALL_INSIDE_CAP, 0.3, 1.5)
     self.oncoming_margin = _get_float(params, "LaneCenteringOncomingClearance", DEFAULT_ONCOMING_CLEARANCE, 0.0, 0.6)
     self.guard.oncoming_cap = _get_float(params, "LaneCenteringOncomingCap", ONCOMING_CAP, 0.0, 0.6)
+    self.guard.narrow_from_lane = _get_float(params, "LaneCenteringNarrowMode", 0.0, 0.0, 1.0) >= 0.5
     self.half_width = _get_float(params, "LaneCenteringCarWidth", DEFAULT_CAR_WIDTH, 1.0, 3.0) / 2
 
   def reset(self) -> None:

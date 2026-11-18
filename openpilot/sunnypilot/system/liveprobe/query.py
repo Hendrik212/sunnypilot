@@ -29,6 +29,7 @@ WHITELIST: dict[str, tuple[float, float]] = {
   "LaneCenteringWallInsideCap": (0.3, 1.5),
   "LaneCenteringOncomingClearance": (0.0, 0.6),
   "LaneCenteringOncomingCap": (0.0, 0.6),
+  "LaneCenteringNarrowMode": (0.0, 1.0),
   "LaneCenteringMinClearance": (0.0, 0.5),
   "LaneCenterOffset": (0.0, 0.3),
   "LaneCenteringMiddleBias": (-0.2, 0.2),
