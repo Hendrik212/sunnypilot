@@ -32,7 +32,16 @@ to the centre line in left bends -0.14/-0.14/-0.52 -> +0.11/+0.11/-0.17 m, to th
 own: 0.4-1.0), peak correction 0.35-0.65 m/s^2. Gain 0.5 gives about half of both, 1.5 hits the cap.
 The replay is linear around the logged drive with the measured spring as the model: no torque limits.
 
-Not covered: bends below R 40 m, bends without confident lines, torque-limited corners.
+Not covered: bends below R 40 m, torque-limited corners.
+
+Line dropouts (LatBendTrimDropout, default 0 = off): at night on the Allner hill (route 283) both lines
+were confident in only 35 % of the bend time, so the trim was on 35 % instead of 50 % (281, daylight).
+With dropout on, one confident line (> SINGLE_PROB) gives the centre as that line -/+ half the last
+confident lane width, and with no confident line the weight holds for HOLD_S while the observer runs
+on gyro and the last road curvature alone. Replay (opsim/lc/sim5.py, Allner hill, trim 1.0): trim on
+in bends 35 -> 69 % (283), over the right line 4.6 -> 3.1 %, over the centre line 3.4 -> 2.9 %, worst
+centre-line gap -0.72 -> -0.46 m; 281: 1.5 -> 1.2 % / 1.9 -> 1.7 %. Cost: jerk 0.32 -> 0.50 m/s^3 (283).
+Scored on the logged lines, which are the weak ones there.
 The target is the real lane centre: the camera offset modeld applies (static CameraOffset plus the
 lane-centering one) is taken out of the measured offset, as in the replay. So in bends the trim works
 against a lane-centering offset and roughly halves it (KP against the model's 0.49 m/s^2 per m);
@@ -58,6 +67,11 @@ PROB_ON, PROB_OFF = 0.6, 0.4
 SPEED_BP = [8.0, 10.0, 22.0, 25.0]  # m/s: the replay covers 29-90 km/h; above that the split path takes over
 SPEED_W = [0.0, 1.0, 1.0, 0.0]
 XS = np.arange(0.0, 82.5, 2.5)  # m, grid of the fits
+HOLD_S = 1.5  # s, dropout: weight held and observer dead-reckoned with no confident line
+SINGLE_PROB = 0.6  # dropout: one line above this stands in for both
+WIDTH_DEFAULT = 3.0  # m, lane width until both lines were seen
+WIDTH_RANGE = (2.2, 4.5)  # m, plausible widths for the memory
+WIDTH_ALPHA = 0.05  # per frame, lane width memory
 
 
 def _curvature(center: np.ndarray, mask: np.ndarray) -> float:
@@ -76,36 +90,59 @@ class BendTrim:
     self.weight = 0.0  # applied share (0..1), for the log
     self.correction = 0.0  # applied correction (m/s^2), for the log
     self.lines_ok = False
+    self.lost_s = 0.0
+    self.width = WIDTH_DEFAULT
+    self.k_last = 0.0
 
   def update(self, lat_accel: float, x_idxs: np.ndarray, left_y: np.ndarray, right_y: np.ndarray, left_prob: float, right_prob: float,
-             yaw_rate_measured: float | None, v_ego: float, gain: float, active: bool = True, camera_offset: float = 0.0) -> float:
+             yaw_rate_measured: float | None, v_ego: float, gain: float, active: bool = True, camera_offset: float = 0.0,
+             dropout: bool = False) -> float:
     """lat_accel plus the trim. Call once per model frame, also at gain 0, so that the observer is
     settled when the live param switches it on. active = lateral control on and no lane change.
-    camera_offset = modelDataV2SP.cameraOffset (m, positive = model centre left)."""
+    camera_offset = modelDataV2SP.cameraOffset (m, positive = model centre left).
+    dropout = keep trimming through line dropouts (single line, then HOLD_S of dead reckoning)."""
     values = (lat_accel, v_ego, left_prob, right_prob, camera_offset, yaw_rate_measured if yaw_rate_measured is not None else np.nan)
     if not active or not all(np.isfinite(values)) or not (np.all(np.isfinite(left_y)) and np.all(np.isfinite(right_y))):
       self.reset()
       return lat_accel
     v = max(v_ego, 1.0)
-    center = 0.5 * (np.interp(XS, x_idxs, left_y) + np.interp(XS, x_idxs, right_y))
+    ly, ry = np.interp(XS, x_idxs, left_y), np.interp(XS, x_idxs, right_y)
+    both = min(left_prob, right_prob) > (PROB_OFF if self.lines_ok else PROB_ON)
+    single = dropout and not both and max(left_prob, right_prob) > SINGLE_PROB
+    if both and WIDTH_RANGE[0] < ry[0] - ly[0] < WIDTH_RANGE[1]:
+      self.width += WIDTH_ALPHA * (float(ry[0] - ly[0]) - self.width)
+    if single:
+      center = ly + 0.5 * self.width if left_prob >= right_prob else ry - 0.5 * self.width
+    else:
+      center = 0.5 * (ly + ry)
     measured = -float(center[0]) - camera_offset
 
     look = v * LOOKAHEAD_S
     near = np.abs(XS - look) <= FIT_HALF
     k_look = _curvature(center, near if near.sum() >= 4 else XS <= 2 * FIT_HALF)
     k_far = _curvature(center, (XS >= v * 0.5) & (XS <= max(v * 2.5, 30.0)))
+    seen = both or single
+    self.lost_s = 0.0 if seen else self.lost_s + DT
+    holding = dropout and not seen and self.lines_ok and self.lost_s <= HOLD_S  # only right after lines (or a hold)
+    if seen:
+      self.k_last = k_look
+    elif holding:  # the lines' shape is not trusted: keep the last road curvature
+      k_look = k_far = self.k_last
     self.road.append(k_look)
     k_road = self.road.pop(0)
 
-    if self.offset is None or abs(measured - self.offset) > OBS_RESET:
+    if not holding and (self.offset is None or abs(measured - self.offset) > OBS_RESET):
       self.offset, self.rate = measured, 0.0
     self.offset += self.rate * DT
     self.rate += (v * float(yaw_rate_measured) - v * v * k_road) * DT
-    innovation = measured - self.offset
-    self.offset += 2.0 * OBS_W0 * DT * innovation
-    self.rate += OBS_W0 * OBS_W0 * DT * innovation
+    if holding:
+      measured = self.offset
+    else:
+      innovation = measured - self.offset
+      self.offset += 2.0 * OBS_W0 * DT * innovation
+      self.rate += OBS_W0 * OBS_W0 * DT * innovation
 
-    self.lines_ok = min(left_prob, right_prob) > (PROB_OFF if self.lines_ok else PROB_ON)
+    self.lines_ok = seen or holding
     previewed = max(abs(k_look), abs(k_far)) * v * v
     self.bend = max(float(np.interp(previewed, BEND_BP, [0.0, 1.0])), self.bend - DT / BEND_HOLD_S)
     on = gain > 0.0 and np.isfinite(gain)

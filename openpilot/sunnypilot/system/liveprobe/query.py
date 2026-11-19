@@ -47,6 +47,7 @@ WHITELIST: dict[str, tuple[float, float]] = {
   "LatHighwayFrictionScale": (0.0, 1.5),  # 1.0 = unchanged; friction term above 60-72 km/h (ioniq6_starpilot.py)
   "ModelCrawlLatDeadband": (0.0, 0.1),
   "LatBendTrimGain": (0.0, 1.5),  # 0 = off; 1.0 = replay setting (bend_trim.py)
+  "LatBendTrimDropout": (0.0, 1.0),  # 0 = off; 1 = trim through line dropouts (single line + 1.5 s hold)
   "LatCornerSpeedWarnAccel": (0.0, 4.0),  # 0 = off; 2.8 = replay setting (corner_speed_warning.py)
   "LatSplitPathHz": (0.0, 0.6),  # 0 = off; 0.35-0.6 = scene low-pass cutoff (split_path.py)
   "LatSplitPathLowHz": (0.0, 0.3),  # 0 = off; 0.15 = sim setting: the split leaves the lane band below this alone

@@ -136,6 +136,7 @@ class ModelState(ModelStateBase):
     self.SPLIT_PATH_LOW_HZ: float = 0.15  # LatSplitPathLowHz param
     self.split_path: SplitPath | None = SplitPath() if _split_path_model(chestnut) else None
     self.BEND_TRIM_GAIN: float = 0.0  # LatBendTrimGain param, see bend_trim.py
+    self.BEND_TRIM_DROPOUT: bool = False  # LatBendTrimDropout param
     self.bend_trim = BendTrim()
     self.chestnut = chestnut
 
@@ -287,7 +288,8 @@ class ModelState(ModelStateBase):
       v2 = (max(1.0, v_ego))**2
       lines, probs = model_output['lane_lines'][0], model_output['lane_lines_prob'][0, 1::2]
       self.bend_trim.update(float(desired_curvature) * v2, self.constants.X_IDXS, lines[1, :, 0], lines[2, :, 0],
-                            float(probs[1]), float(probs[2]), yaw_rate_measured, v_ego, self.BEND_TRIM_GAIN, trim_active, camera_offset)
+                            float(probs[1]), float(probs[2]), yaw_rate_measured, v_ego, self.BEND_TRIM_GAIN, trim_active, camera_offset,
+                            self.BEND_TRIM_DROPOUT)
       desired_curvature += self.bend_trim.correction / v2  # 0.0 while off: the request stays bit-identical
 
     stop = v_ego < 0.3 and desired_accel < 0.1
@@ -498,6 +500,11 @@ def main(demo=False):
       except (TypeError, ValueError):
         trim_gain = 0.0
       model.BEND_TRIM_GAIN = min(max(trim_gain, 0.0), BEND_TRIM_GAIN_MAX) if np.isfinite(trim_gain) else 0.0
+      try:
+        trim_dropout = float(params.get("LatBendTrimDropout", return_default=True))
+      except (TypeError, ValueError):
+        trim_dropout = 0.0
+      model.BEND_TRIM_DROPOUT = bool(np.isfinite(trim_dropout) and trim_dropout >= 0.5)
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["lateralTuneStateSP"]:

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from openpilot.sunnypilot.modeld_v2.bend_trim import BEND_BP, DT, KP, MAX_CORRECTION, OBS_RESET, BendTrim
+from openpilot.sunnypilot.modeld_v2.bend_trim import BEND_BP, DT, HOLD_S, KP, MAX_CORRECTION, OBS_RESET, BendTrim
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants
 
 X = np.array(ModelConstants.X_IDXS)
@@ -14,13 +14,15 @@ def _lines(offset, curvature, heading=0.0):
   return center - 1.75, center + 1.75
 
 
-def _run(n, offset, lat_accel, gain, prob=0.9, v=V, active=True, camera_offset=0.0, trim=None, drift=0.0):
+def _run(n, offset, lat_accel, gain, prob=0.9, v=V, active=True, camera_offset=0.0, trim=None, drift=0.0, prob_r=None, dropout=False,
+         right_shift=0.0):
   trim = trim or BendTrim()
   k = lat_accel / v**2
   out = []
   for i in range(n):
     left, right = _lines(offset + drift * i * DT, k, heading=drift / v)
-    out.append(trim.update(lat_accel, X, left, right, prob, prob, k * v, v, gain, active, camera_offset))
+    out.append(trim.update(lat_accel, X, left, right + right_shift, prob, prob if prob_r is None else prob_r, k * v, v, gain, active,
+                           camera_offset, dropout))
   return trim, np.array(out)
 
 
@@ -108,7 +110,8 @@ def test_modeld_applies_it_on_both_request_paths():
   from openpilot.sunnypilot.modeld_v2 import modeld
 
   def run(gain, active=True):
-    me = SimpleNamespace(CRAWL_LAT_DEADBAND=0.04, SPLIT_PATH_HZ=0.0, SPLIT_PATH_LOW_HZ=0.0, split_path=None, BEND_TRIM_GAIN=gain, bend_trim=BendTrim(),
+    me = SimpleNamespace(CRAWL_LAT_DEADBAND=0.04, SPLIT_PATH_HZ=0.0, SPLIT_PATH_LOW_HZ=0.0, split_path=None, BEND_TRIM_GAIN=gain,
+                         BEND_TRIM_DROPOUT=False, bend_trim=BendTrim(),
                          constants=ModelConstants,
                          LONG_SMOOTH_SECONDS=0.0, LAT_SMOOTH_SECONDS=0.0, MIN_LAT_CONTROL_SPEED=0.3, generation=None)
     left, right = _lines(0.4, 2.0 / V**2)
@@ -124,3 +127,34 @@ def test_modeld_applies_it_on_both_request_paths():
   assert run(0.0) == pytest.approx(2.0, abs=1e-5)
   assert run(1.0) == pytest.approx(2.0 - KP * 0.4, abs=0.02)
   assert run(1.0, active=False) == pytest.approx(2.0, abs=1e-5)
+
+
+def test_dropout_off_ignores_a_single_line():
+  trim, out = _run(200, 0.4, 2.0, 1.0)
+  _run(100, 0.4, 2.0, 1.0, prob_r=0.1, trim=trim)
+  assert trim.weight == 0.0 and trim.correction == 0.0
+
+
+def test_dropout_single_line_keeps_the_trim_with_the_remembered_width():
+  # right line lost and garbage (1 m off): the centre comes from the left line + half the remembered 3.5 m
+  trim, _ = _run(200, 0.4, 2.0, 1.0, dropout=True)
+  _, out = _run(100, 0.4, 2.0, 1.0, prob_r=0.1, right_shift=1.0, trim=trim, dropout=True)
+  assert trim.weight == pytest.approx(1.0) and trim.width == pytest.approx(3.5, abs=0.01)
+  assert out[-1] - 2.0 == pytest.approx(-KP * 0.4, abs=0.02)
+
+
+def test_dropout_holds_without_lines_then_fades():
+  trim, _ = _run(200, 0.4, 2.0, 1.0, dropout=True)
+  c0 = trim.correction
+  _run(int(HOLD_S / DT) - 2, 5.0, 2.0, 1.0, prob=0.1, trim=trim, dropout=True)  # lines lost and garbage
+  assert trim.weight == pytest.approx(1.0) and trim.correction == pytest.approx(c0, abs=0.05)  # dead reckoning, no jump
+  _run(40, 5.0, 2.0, 1.0, prob=0.1, trim=trim, dropout=True)
+  assert trim.weight == 0.0 and trim.correction == 0.0
+  # lines back: the observer restarts on them
+  _run(100, 0.2, 2.0, 1.0, trim=trim, dropout=True)
+  assert trim.offset == pytest.approx(0.2, abs=0.02) and trim.weight == pytest.approx(1.0)
+
+
+def test_dropout_without_any_lines_from_the_start_stays_off():
+  trim, out = _run(200, 0.4, 2.0, 1.0, prob=0.1, dropout=True)
+  assert trim.weight == 0.0 and np.all(out == 2.0)
