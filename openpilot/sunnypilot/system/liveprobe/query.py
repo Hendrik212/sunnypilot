@@ -4,6 +4,7 @@
   python -m openpilot.sunnypilot.system.liveprobe.query table [seconds=20] [step=1]
   python -m openpilot.sunnypilot.system.liveprobe.query mark [seconds=180] [note...]
   python -m openpilot.sunnypilot.system.liveprobe.query steer [seconds=60] [window=20]
+  python -m openpilot.sunnypilot.system.liveprobe.query bookmarks [context_seconds=0]
   python -m openpilot.sunnypilot.system.liveprobe.query get KEY | set KEY VALUE | undo | whitelist
 
 Param writes go only to WHITELIST keys inside their range, each logged with the old value to
@@ -73,6 +74,10 @@ SUMMARY = [
   ("gap_edge_r", "body to right edge m", 1, "{:.2f}"),
   ("off", "offset m (+ right)", 1, "{:+.2f}"),
   ("off_target", "offset target m", 1, "{:+.2f}"),
+  ("cam", "camera shift applied m (+ left)", 1, "{:+.2f}"),
+  ("bt_w", "bend trim weight", 1, "{:.2f}"),
+  ("bt_corr", "bend trim correction m/s2 (+ right)", 1, "{:+.2f}"),
+  ("bt_off", "bend trim observer offset m (+ right)", 1, "{:+.2f}"),
   ("plan10", "plan @10 m (model frame)", 1, "{:+.2f}"),
   ("model_curv", "model curvature e-3", 1e3, "{:+.1f}"),
   ("des_curv", "desired curvature e-3", 1e3, "{:+.1f}"),
@@ -83,7 +88,8 @@ SUMMARY = [
 ]
 TABLE = [("v_kph", "kmh", 1, "{:3.0f}"), ("gap_wall_l", "wallL", 1, "{:5.2f}"), ("gap_line_l", "lineL", 1, "{:+5.2f}"),
          ("gap_line_r", "lineR", 1, "{:+5.2f}"), ("gap_wall_r", "wallR", 1, "{:5.2f}"), ("lane_w", "width", 1, "{:4.2f}"),
-         ("off", "off", 1, "{:+5.2f}"), ("off_target", "tgt", 1, "{:+5.2f}"), ("des_curv", "dcur", 1e3, "{:+6.1f}"),
+         ("off", "off", 1, "{:+5.2f}"), ("off_target", "tgt", 1, "{:+5.2f}"), ("cam", "cam", 1, "{:+5.2f}"),
+         ("bt_w", "btw", 1, "{:4.2f}"), ("bt_corr", "btc", 1, "{:+5.2f}"), ("des_curv", "dcur", 1e3, "{:+6.1f}"),
          ("act_curv", "acur", 1e3, "{:+6.1f}"), ("tq_out", "tq", 1, "{:+5.2f}"), ("drv_tq", "drv", 1, "{:+4.0f}")]
 
 
@@ -109,6 +115,37 @@ def fetch_steer(seconds: float, path: str = SOCKET_PATH) -> dict:
     data += chunk
   s.close()
   return json.loads(data)
+
+
+def fetch_bookmarks(path: str = SOCKET_PATH) -> dict:
+  s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+  s.settimeout(3.0)
+  s.connect(path)
+  s.sendall(b"bookmarks")
+  data = b""
+  while chunk := s.recv(65536):
+    data += chunk
+  s.close()
+  return json.loads(data)
+
+
+def bookmarks(data: dict, rows: list[dict] | None = None, context: float = 0.0) -> str:
+  """Bookmarks pressed this drive (probe uptime), newest last; with rows, a short table around each one."""
+  bms = data.get("bookmarks") or []
+  if not bms:
+    return "no bookmarks since the probe started"
+  now = data["now"]
+  out = [f"{len(bms)} bookmark(s):"]
+  for b in bms:
+    ago = now - b["t"]
+    stamp = datetime.fromtimestamp(b["utc"], UTC).strftime("%H:%M:%S")
+    out.append(f"  {ago:5.0f} s ago ({stamp} UTC)")
+    if rows and context > 0:
+      w = [r for r in rows if b["t"] - context <= r["t"] <= b["t"] + context / 3]
+      if w:
+        t_lines = table(w).splitlines()
+        out += ["    " + line for line in t_lines]
+  return "\n".join(out)
 
 
 STEER_MIN_SPEED = 15.0  # m/s
@@ -247,6 +284,13 @@ def summary(rows: list[dict]) -> str:
   tq = _vals(rows, "tq_out")
   if tq.size:
     out.append(f"  torque output at >=1.5 (650 clip): {np.mean(np.abs(tq) >= 1.5):.0%}")
+  btw = _vals(rows, "bt_w")
+  if btw.size:
+    out.append(f"  bend trim active (weight >0.5): {np.mean(btw > 0.5):.0%} of the time")
+  bm = [r for r in rows if r.get("bookmark")]
+  if bm:
+    rel = ", ".join(f"{r['t'] - rows[-1]['t']:+.0f} s" for r in bm)
+    out.append(f"  bookmarks: {rel}")
   alerts = sorted({r["alert"] for r in rows if r.get("alert")})
   if alerts:
     out.append(f"  alerts: {'; '.join(alerts)}")
@@ -277,11 +321,11 @@ def table(rows: list[dict], step: float = 1.0) -> str:
   return "\n".join(lines)
 
 
-def mark(rows: list[dict], note: str, steer_data: dict | None = None) -> str:
+def mark(rows: list[dict], note: str, steer_data: dict | None = None, bookmark_data: dict | None = None) -> str:
   os.makedirs(MARK_DIR, exist_ok=True)
   path = os.path.join(MARK_DIR, time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + ".json")
   with open(path, "w") as f:
-    json.dump({"note": note, "rows": rows, "steer": steer_data}, f)
+    json.dump({"note": note, "rows": rows, "steer": steer_data, "bookmarks": bookmark_data}, f)
   n = len((steer_data or {}).get("rows") or [])
   return f"saved {len(rows)} rows and {n} steering rows to {path}"
 
@@ -343,7 +387,14 @@ def main(argv: list[str]) -> str:
       sd = fetch_steer(sec)
     except (OSError, ValueError):
       sd = None
-    return mark(fetch(sec), " ".join(argv[2:]), sd)
+    try:
+      bd = fetch_bookmarks()
+    except (OSError, ValueError):
+      bd = None
+    return mark(fetch(sec), " ".join(argv[2:]), sd, bd)
+  if cmd == "bookmarks":
+    ctx = float(argv[1]) if len(argv) > 1 else 0.0
+    return bookmarks(fetch_bookmarks(), fetch(180.0) if ctx > 0 else None, ctx)
   if cmd == "steer":
     return steer(fetch_steer(float(argv[1]) if len(argv) > 1 else 60.0), float(argv[2]) if len(argv) > 2 else 20.0)
   params = Params()

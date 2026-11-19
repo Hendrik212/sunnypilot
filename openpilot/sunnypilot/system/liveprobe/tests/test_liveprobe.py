@@ -19,7 +19,8 @@ def _msgs(cam=0.0, wall_l=-1.6, wall_valid=True):
   return {
     "carState": NS(carState=NS(vEgo=20.0, steeringPressed=False, steeringTorque=-87.0, leftBlinker=False, rightBlinker=False,
                                leftBlindspot=False, rightBlindspot=True)),
-    "modelDataV2SP": NS(modelDataV2SP=NS(cameraOffset=cam)),
+    "modelDataV2SP": NS(modelDataV2SP=NS(cameraOffset=cam, bendTrimCorrection=0.12, bendTrimWeight=0.8, bendTrimOffset=-0.25,
+                                         splitPathReaction=0.0, splitPathWeight=0.0)),
     "modelV2": NS(modelV2=NS(laneLines=[_line(-5.0), _line(-1.6 - cam), _line(1.2 - cam), _line(5.0)],
                              laneLineProbs=[0.1, 0.3, 0.95, 0.2], roadEdges=[_line(-3.0 - cam), _line(2.5 - cam)],
                              position=_line(0.1), action=NS(desiredCurvature=0.002))),
@@ -27,7 +28,8 @@ def _msgs(cam=0.0, wall_l=-1.6, wall_valid=True):
     "lateralTuneStateSP": NS(lateralTuneStateSP=NS(laneCentreActive=True, laneCentrePosition=4, laneCentreStatus=11,
                                                    laneCentreOffset=0.0, laneCentreOffsetTarget=0.0, laneCentreLimitCause=8,
                                                    laneCentreSlackRight=0.1, laneCentreSlackLeft=0.4,
-                                                   laneCentreWallRight=False, laneCentreWallLeft=True)),
+                                                   laneCentreWallRight=False, laneCentreWallLeft=True,
+                                                   laneCentreCameraOffset=0.0, laneCentreCorrection=0.0)),
     "carControl": NS(carControl=NS(latActive=True, actuators=NS(torque=1.2))),
   }
 
@@ -41,6 +43,7 @@ def test_sample_is_in_the_real_frame_with_body_gaps():
   assert r["gap_wall_l"] == pytest.approx(0.66) and r["gap_wall_r"] is None
   assert r["gap_edge_l"] == pytest.approx(2.06) and r["gap_edge_r"] == pytest.approx(1.56)
   assert r["v_kph"] == pytest.approx(72.0) and r["cause"] == 8 and r["bs_r"] is True
+  assert r["bt_w"] == pytest.approx(0.8) and r["bt_corr"] == pytest.approx(0.12) and r["bt_off"] == pytest.approx(-0.25)
 
 
 def test_missing_services_leave_fields_out():
@@ -151,3 +154,23 @@ def test_steer_buffer_answers_over_the_request_protocol():
   d = __import__("json").loads(p.handle("steer 1"))
   assert d["fields"] == list(lp.STEER_FIELDS) and 100 <= len(d["rows"]) <= 102
   assert q.steer({"fields": d["fields"], "rows": []}).startswith("no steering data")
+
+
+def test_bookmarks_are_kept_once_and_listed_with_context():
+  p = lp.Probe()
+  t0 = 1000.0
+  for i in range(100):
+    r = lp.sample(_msgs(), 0.94)
+    r["t"] = t0 + i * 0.2
+    if i == 60:
+      r["bookmark"] = "userBookmark,bookmarkButton"
+    p.add(r)
+  p.add_bookmark(t0 + 12.0, 1.7e9, "userBookmark,bookmarkButton")
+  d = __import__("json").loads(p.handle("bookmarks"))
+  assert len(d["bookmarks"]) == 1 and d["bookmarks"][0]["t"] == t0 + 12.0
+  d["now"] = t0 + 20.0
+  text = q.bookmarks(d, p.last(180.0), 5.0)
+  assert "8 s ago" in text and "btw" in text
+  assert "bookmarks: -8 s" in q.summary(p.last(180.0))
+  assert "bend trim active (weight >0.5): 100%" in q.summary(p.last(180.0))
+  assert q.bookmarks({"now": 0.0, "bookmarks": []}).startswith("no bookmarks")

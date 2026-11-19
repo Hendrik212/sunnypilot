@@ -13,6 +13,9 @@ Steering chain at full rate: the EPS ping-pong (route 282) is a 0.5-4 Hz reversa
 with the wheel moving ~0.1 deg, invisible at SAMPLE_HZ and in the lane position. A second thread
 reads every carState (100 Hz, not conflated) with the newest carOutput / controlsState torque state
 and keeps STEER_SECONDS of compact rows (STEER_FIELDS) for query.py steer.
+
+Bookmarks: userBookmark / bookmarkButton are single events, so they bypass the staleness cache: each one
+is stored once (BOOKMARK_KEEP) with its monotonic and UTC time and flags the row it lands in.
 """
 import json
 import os
@@ -44,6 +47,8 @@ STEER_FIELDS = ("t", "v", "ang", "ang_rate", "eps_tq", "drv_tq", "pressed", "lat
 
 SERVICES = ("modelV2", "modelDataV2SP", "radarWallsSP", "lateralTuneStateSP", "carState", "controlsState",
             "carControl", "carOutput", "liveLocationKalman", "gpsLocationExternal", "selfdriveState")
+BOOKMARK_SERVICES = ("userBookmark", "bookmarkButton")
+BOOKMARK_KEEP = 50
 
 
 def _at(line, x: float) -> float:
@@ -66,7 +71,11 @@ def sample(msgs: dict, half_width: float) -> dict:
                blinker=-1 if c.leftBlinker else 1 if c.rightBlinker else 0, bs_l=c.leftBlindspot, bs_r=c.rightBlindspot)
   sp = msgs.get("modelDataV2SP")
   cam = sp.modelDataV2SP.cameraOffset if sp is not None else 0.0
-  row["cam"] = cam
+  row["cam"] = cam  # applied by modeld, + = model centre LEFT
+  if sp is not None:
+    d = sp.modelDataV2SP
+    row.update(bt_corr=d.bendTrimCorrection, bt_w=d.bendTrimWeight, bt_off=d.bendTrimOffset,
+               sp_react=d.splitPathReaction, sp_w=d.splitPathWeight)
   mv = msgs.get("modelV2")
   if mv is not None:
     m = mv.modelV2
@@ -93,7 +102,8 @@ def sample(msgs: dict, half_width: float) -> dict:
     row.update(lc_active=s.laneCentreActive, lc_pos=s.laneCentrePosition, lc_status=s.laneCentreStatus,
                off=s.laneCentreOffset, off_target=s.laneCentreOffsetTarget, cause=s.laneCentreLimitCause,
                slack_r=s.laneCentreSlackRight, slack_l=s.laneCentreSlackLeft,
-               lc_wall_r=s.laneCentreWallRight, lc_wall_l=s.laneCentreWallLeft)
+               lc_wall_r=s.laneCentreWallRight, lc_wall_l=s.laneCentreWallLeft,
+               lc_cam=s.laneCentreCameraOffset, lc_corr=s.laneCentreCorrection)
   ct = msgs.get("controlsState")
   if ct is not None:
     row.update(des_curv=ct.controlsState.desiredCurvature, curv=ct.controlsState.curvature)
@@ -124,7 +134,12 @@ class Probe:
   def __init__(self, buffer_seconds: float = BUFFER_SECONDS, hz: float = SAMPLE_HZ):
     self.rows: deque = deque(maxlen=int(buffer_seconds * hz))
     self.steer: deque = deque(maxlen=int(STEER_SECONDS * STEER_HZ))
+    self.bookmarks: deque = deque(maxlen=BOOKMARK_KEEP)
     self.lock = threading.Lock()
+
+  def add_bookmark(self, t: float, utc: float, kind: str) -> None:
+    with self.lock:
+      self.bookmarks.append({"t": t, "utc": utc, "kind": kind})
 
   def add_steer(self, row: tuple) -> None:
     self.steer.append(row)  # deque.append is atomic; one writer
@@ -152,6 +167,9 @@ class Probe:
     if parts and parts[0] == "steer":
       seconds = float(parts[1]) if len(parts) > 1 else 60.0
       return json.dumps({"fields": STEER_FIELDS, "rows": [[round(x, 5) for x in r] for r in self.last_steer(seconds)]})
+    if parts and parts[0] == "bookmarks":
+      with self.lock:
+        return json.dumps({"now": time.monotonic(), "bookmarks": list(self.bookmarks)})
     if not parts or parts[0] != "rows":
       return json.dumps({"error": f"unknown request {request!r}"})
     seconds = float(parts[1]) if len(parts) > 1 else 20.0
@@ -220,6 +238,7 @@ def main() -> None:
   except (TypeError, ValueError):
     half_width = 0.94
   socks = {s: messaging.sub_sock(s, conflate=True) for s in SERVICES}
+  bm_socks = {s: messaging.sub_sock(s, conflate=False) for s in BOOKMARK_SERVICES}
   probe, end = Probe(), threading.Event()
   threading.Thread(target=serve, args=(probe, end), daemon=True).start()
   threading.Thread(target=steer_loop, args=(probe, end), daemon=True).start()
@@ -231,8 +250,17 @@ def main() -> None:
         msg = messaging.recv_one_or_none(sock)
         if msg is not None:
           latest[s] = (msg, t)
+      marked = []
+      for s, sock in bm_socks.items():
+        if messaging.drain_sock(sock):
+          marked.append(s)
+      if marked:  # the UI sends one press on both services: store it once
+        probe.add_bookmark(t, datetime.now(UTC).timestamp(), ",".join(marked))
       try:
-        probe.add(sample({s: m for s, (m, ts) in latest.items() if t - ts < STALE_SECONDS}, half_width))
+        row = sample({s: m for s, (m, ts) in latest.items() if t - ts < STALE_SECONDS}, half_width)
+        if marked:
+          row["bookmark"] = ",".join(marked)
+        probe.add(row)
       except Exception:
         cloudlog.exception("liveprobe sample failed")
       time.sleep(max(0.0, 1.0 / SAMPLE_HZ - (time.monotonic() - t)))
