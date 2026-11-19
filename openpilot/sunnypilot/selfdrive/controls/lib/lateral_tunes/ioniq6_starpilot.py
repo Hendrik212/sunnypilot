@@ -72,6 +72,21 @@ KP_INTERP = [250, 120, 65, 30, 11.5, 5.5, 3.5, 2.0, KP]
 HIGHWAY_KP_FADE = (20.0, 25.0)  # m/s, 72-90 km/h
 HIGHWAY_KP_SCALE_RANGE = (0.2, 1.5)
 
+# Live LatHighwayFrictionScale (default 1.0 = unchanged) multiplies the friction term above
+# HIGHWAY_FRICTION_FADE[1], fading in from HIGHWAY_FRICTION_FADE[0]. Route 282 (2026-11-19, 75-90
+# km/h, hands off): the integrator (+0.20) cancels the camber/friction feedforward (-0.16), so the
+# net command sits near zero (21% of the time within +-0.01) and small wiggles flip the motor: 1.2
+# torque sign reversals per second (median of segments; 1.8-2.4 where the command sits near zero 33-39%
+# of the time, also on routes 275/276) while the wheel moves only 0.1-0.3 deg at ~0.5 Hz.
+# The friction term is the largest oscillating part of the command (0.045 at 0.3-0.8 Hz vs p 0.042,
+# corr 0.98 with the output) and acts like a switch around zero. Not replayed: A/B on the road.
+HIGHWAY_FRICTION_FADE = (16.7, 20.0)  # m/s, 60-72 km/h
+HIGHWAY_FRICTION_SCALE_RANGE = (0.0, 1.5)
+
+
+def highway_friction_scale(v_ego: float, scale: float) -> float:
+  return float(np.interp(v_ego, HIGHWAY_FRICTION_FADE, [1.0, scale]))
+
 
 def kp_table(scale: float) -> list[list[float]]:
   """KP_INTERP with the scale faded in over HIGHWAY_KP_FADE (two knots added on the table's
@@ -174,6 +189,12 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     except (TypeError, ValueError):
       k = 1.0
     self.highway_kp_scale = min(max(k, HIGHWAY_KP_SCALE_RANGE[0]), HIGHWAY_KP_SCALE_RANGE[1]) if math.isfinite(k) else 1.0
+    try:
+      fs = float(params.get("LatHighwayFrictionScale", return_default=True))
+    except (TypeError, ValueError):
+      fs = 1.0
+    lo, hi = HIGHWAY_FRICTION_SCALE_RANGE
+    self.highway_friction_scale = min(max(fs, lo), hi) if math.isfinite(fs) else 1.0
 
   def _apply_kp_scale(self, ctl) -> None:
     if self.highway_kp_scale != self._kp_scale_applied:
@@ -248,6 +269,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     self.highway_center_damping = 0.0
     self.ripple_notch_q = rn.RIPPLE_NOTCH_Q
     self.highway_kp_scale = self._kp_scale_applied = 1.0
+    self.highway_friction_scale = 1.0
     # The controller owns the StarPilot baseline rather than inheriting it from CP. CP is
     # written once at fingerprint time, so on a live switch from upstream it still holds the
     # UPSTREAM factor -- multiplying that by 1.22 would give a gain that is neither tune.
@@ -402,6 +424,7 @@ class Ioniq6StarPilotProfile(LateralTuneProfile):
     friction_scale = i6.get_ioniq_6_friction_scale(CS.vEgo, setpoint, desired_lateral_jerk)
     friction_scale = 1.0 + ((friction_scale - 1.0) * center_taper)
     friction_scale *= i6.get_ioniq_6_friction_center_fade_scale(setpoint, CS.vEgo)
+    friction_scale *= highway_friction_scale(CS.vEgo, self.highway_friction_scale)
     friction_jerk_deadzone = get_center_chatter_friction_jerk_deadzone(
       CS.vEgo, setpoint, i6.IONIQ_6_FRICTION_JERK_DEADZONE)
     friction_jerk = math.copysign(max(abs(desired_lateral_jerk) - friction_jerk_deadzone, 0.0),

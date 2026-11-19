@@ -3,6 +3,7 @@
   python -m openpilot.sunnypilot.system.liveprobe.query summary [seconds=20]
   python -m openpilot.sunnypilot.system.liveprobe.query table [seconds=20] [step=1]
   python -m openpilot.sunnypilot.system.liveprobe.query mark [seconds=180] [note...]
+  python -m openpilot.sunnypilot.system.liveprobe.query steer [seconds=60] [window=20]
   python -m openpilot.sunnypilot.system.liveprobe.query get KEY | set KEY VALUE | undo | whitelist
 
 Param writes go only to WHITELIST keys inside their range, each logged with the old value to
@@ -42,6 +43,7 @@ WHITELIST: dict[str, tuple[float, float]] = {
   "RippleNotchQ": (0.0, 8.0),
   "ModelYawRateBlend": (0.0, 0.7),
   "LatHighwayKpScale": (0.3, 1.0),
+  "LatHighwayFrictionScale": (0.0, 1.5),  # 1.0 = unchanged; friction term above 60-72 km/h (ioniq6_starpilot.py)
   "ModelCrawlLatDeadband": (0.0, 0.1),
   "LatBendTrimGain": (0.0, 1.5),  # 0 = off; 1.0 = replay setting (bend_trim.py)
   "LatCornerSpeedWarnAccel": (0.0, 4.0),  # 0 = off; 2.8 = replay setting (corner_speed_warning.py)
@@ -95,6 +97,120 @@ def fetch(seconds: float, path: str = SOCKET_PATH) -> list[dict]:
     data += chunk
   s.close()
   return json.loads(data)
+
+
+def fetch_steer(seconds: float, path: str = SOCKET_PATH) -> dict:
+  s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+  s.settimeout(5.0)
+  s.connect(path)
+  s.sendall(f"steer {seconds}".encode())
+  data = b""
+  while chunk := s.recv(1 << 20):
+    data += chunk
+  s.close()
+  return json.loads(data)
+
+
+STEER_MIN_SPEED = 15.0  # m/s
+STEER_FS = 100.0
+
+
+def _band(x: np.ndarray, lo: float, hi: float, fs: float = STEER_FS) -> np.ndarray:
+  """Zero-phase FFT band-pass of a detrended series."""
+  n = len(x)
+  if n < 16:
+    return np.zeros(n)
+  t = np.arange(n)
+  x = x - np.polyval(np.polyfit(t, x, 1), t)
+  spec = np.fft.rfft(x)
+  f = np.fft.rfftfreq(n, 1 / fs)
+  spec[(f < lo) | (f >= hi)] = 0
+  return np.fft.irfft(spec, n)
+
+
+def _reversals(x: np.ndarray, ok: np.ndarray, hyst: float = 0.0) -> float:
+  """Sign changes per second of x over the ok samples (with a +-hyst band that must be crossed)."""
+  n, last, secs = 0, 0, ok.sum() / STEER_FS
+  for v, k in zip(x, ok, strict=True):
+    if not k:
+      continue
+    sgn = 1 if v > hyst else -1 if v < -hyst else 0
+    if sgn and last and sgn != last:
+      n += 1
+    if sgn:
+      last = sgn
+  return n / secs if secs > 0 else float("nan")
+
+
+def steer_stats(d: dict[str, np.ndarray]) -> dict:
+  ok = (d["lat"] > 0.5) & (d["pressed"] < 0.5) & (d["v"] > STEER_MIN_SPEED)
+  r: dict = {"seconds": ok.sum() / STEER_FS}
+  if ok.sum() < 5 * STEER_FS:
+    return r
+  ang, out = d["ang"], d["out"]
+
+  def b(x: np.ndarray, lo: float, hi: float) -> float:
+    return float(np.std(_band(x, lo, hi)[ok]))
+
+  a = _band(ang, 0.2, 3.0)
+  spec = np.abs(np.fft.rfft(a)) ** 2
+  f = np.fft.rfftfreq(len(a), 1 / STEER_FS)
+  sel = (f >= 0.2) & (f < 3.0)
+  r.update(
+    kph=float(np.median(d["v"][ok]) * 3.6),
+    ang_lo=b(ang, 0.2, 0.8), ang_hi=b(ang, 0.8, 4.0), ang_peak_hz=float(f[sel][np.argmax(spec[sel])]),
+    out_mean=float(np.mean(out[ok])), out_lo=b(out, 0.3, 0.8), out_hi=b(out, 0.8, 4.0),
+    out_rev=_reversals(out, ok), out_rev_h=_reversals(out, ok, 0.005), near_zero=float(np.mean(np.abs(out[ok]) < 0.01)),
+    eps_mean=float(np.mean(d["eps_tq"][ok])), eps_lo=b(d["eps_tq"], 0.3, 0.8), eps_hi=b(d["eps_tq"], 0.8, 4.0),
+    eps_rev_h=_reversals(_band(d["eps_tq"], 0.05, 4.0) + np.mean(d["eps_tq"][ok]), ok, 0.3),
+    drv_lo=b(d["drv_tq"], 0.3, 0.8),
+    p_mean=float(np.mean(d["p"][ok])), i_mean=float(np.mean(d["i"][ok])), f_mean=float(np.mean(d["f"][ok])),
+    p_lo=b(d["p"], 0.3, 0.8), f_lo=b(d["f"], 0.3, 0.8), p_hi=b(d["p"], 0.8, 4.0), f_hi=b(d["f"], 0.8, 4.0),
+  )
+  return r
+
+
+STEER_HELP = """reference, whole highway segments 70-145 km/h, hands off (routes 275/276/282): torque reversals median
+  1.0-1.3/s (beyond +-0.005: 0.7-0.9), near zero 17-21%; worst segments 1.8-2.4/s with near zero 33-39%."""
+
+
+def steer(data: dict, window: float = 20.0) -> str:
+  rows = data.get("rows") or []
+  if not rows:
+    return "no steering data (probe not running or not onroad)"
+  arr = np.asarray(rows, dtype=float)
+  d = {k: arr[:, j] for j, k in enumerate(data["fields"])}
+  t = d["t"] - d["t"][-1]
+  hz = (len(t) - 1) / max(t[-1] - t[0], 1e-3)
+  st = steer_stats(d)
+  out = [f"last {-t[0]:.0f} s, {len(t)} rows ({hz:.0f} Hz), hands-off engaged above {STEER_MIN_SPEED * 3.6:.0f} km/h: {st['seconds']:.0f} s"]
+  if "kph" not in st:
+    out.append("  too little hands-off engaged time above the speed limit")
+    return "\n".join(out)
+  torque = (f"  TORQUE command: reversals {st['out_rev']:.1f}/s (beyond +-0.005: {st['out_rev_h']:.1f}/s), "
+            + f"near zero (|out|<0.01) {st['near_zero']:.0%}, mean {st['out_mean']:+.3f}, "
+            + f"swing 0.3-0.8 Hz {st['out_lo']:.4f} / 0.8-4 Hz {st['out_hi']:.4f}")
+  terms = (f"  terms: p mean {st['p_mean']:+.3f} swing {st['p_lo']:.3f}/{st['p_hi']:.3f} | i mean {st['i_mean']:+.3f} | "
+           + f"f mean {st['f_mean']:+.3f} swing {st['f_lo']:.3f}/{st['f_hi']:.3f} (slow/fast)")
+  eps = (f"  EPS motor torque: mean {st['eps_mean']:+.2f}, swing 0.3-0.8 Hz {st['eps_lo']:.2f} / 0.8-4 Hz {st['eps_hi']:.2f}, "
+         + f"reversals {st['eps_rev_h']:.1f}/s | column (driver) torque 0.3-0.8 Hz {st['drv_lo']:.1f}")
+  out += [
+    f"  speed {st['kph']:.0f} km/h",
+    torque,
+    terms,
+    f"  WHEEL angle: 0.2-0.8 Hz {st['ang_lo']:.3f} deg, 0.8-4 Hz {st['ang_hi']:.3f} deg, peak {st['ang_peak_hz']:.2f} Hz",
+    eps,
+    "  " + STEER_HELP,
+  ]
+  if window > 0 and -t[0] > 1.5 * window:
+    out.append(f"  per {window:.0f} s:  t   km/h  rev/s  near0  out_mean  out_lo  ang_lo  ang_hi  f_mean  i_mean")
+    for t0 in np.arange(t[0], 0.0, window):
+      m = (t >= t0) & (t < t0 + window)
+      w = steer_stats({k: v[m] for k, v in d.items()})
+      if "kph" in w:
+        out.append(f"           {t0:+5.0f}  {w['kph']:4.0f}  {w['out_rev']:5.1f}  {w['near_zero']:5.0%}  {w['out_mean']:+.3f}  "
+                   + f"{w['out_lo']:.4f}  {w['ang_lo']:.3f}  {w['ang_hi']:.3f}  {w['f_mean']:+.3f}  {w['i_mean']:+.3f}")
+  return "\n".join(out)
 
 
 def _vals(rows: list[dict], key: str) -> np.ndarray:
@@ -161,12 +277,13 @@ def table(rows: list[dict], step: float = 1.0) -> str:
   return "\n".join(lines)
 
 
-def mark(rows: list[dict], note: str) -> str:
+def mark(rows: list[dict], note: str, steer_data: dict | None = None) -> str:
   os.makedirs(MARK_DIR, exist_ok=True)
   path = os.path.join(MARK_DIR, time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + ".json")
   with open(path, "w") as f:
-    json.dump({"note": note, "rows": rows}, f)
-  return f"saved {len(rows)} rows to {path}"
+    json.dump({"note": note, "rows": rows, "steer": steer_data}, f)
+  n = len((steer_data or {}).get("rows") or [])
+  return f"saved {len(rows)} rows and {n} steering rows to {path}"
 
 
 def _typed(params: Params, key: str, value: float):
@@ -221,7 +338,14 @@ def main(argv: list[str]) -> str:
   if cmd == "table":
     return table(fetch(float(argv[1]) if len(argv) > 1 else 20.0), float(argv[2]) if len(argv) > 2 else 1.0)
   if cmd == "mark":
-    return mark(fetch(float(argv[1]) if len(argv) > 1 else 180.0), " ".join(argv[2:]))
+    sec = float(argv[1]) if len(argv) > 1 else 180.0
+    try:
+      sd = fetch_steer(sec)
+    except (OSError, ValueError):
+      sd = None
+    return mark(fetch(sec), " ".join(argv[2:]), sd)
+  if cmd == "steer":
+    return steer(fetch_steer(float(argv[1]) if len(argv) > 1 else 60.0), float(argv[2]) if len(argv) > 2 else 20.0)
   params = Params()
   if cmd == "get" and len(argv) == 2:
     return f"{argv[1]}: {params.get(argv[1], return_default=True)}"

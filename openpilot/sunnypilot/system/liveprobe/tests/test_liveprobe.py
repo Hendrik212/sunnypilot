@@ -115,3 +115,39 @@ def test_set_is_whitelisted_ranged_typed_and_undo_walks_back(tmp_path):
   assert q.undo(p, log).startswith("LaneCenteringWallClearance: 0.8 -> 0.6")
   assert q.undo(p, log) == "nothing to undo"
   assert p.d == {"LaneCenteringWallClearance": 0.6, "SteerDriverAllowanceLow": 75}
+
+
+def _steer_rows(seconds=60.0, out_bias=0.0, amp=0.02, f_hz=0.5):
+  t = np.arange(0.0, seconds, 0.01)
+  out = out_bias + amp * np.sin(2 * np.pi * f_hz * t)
+  ang = 0.1 * np.sin(2 * np.pi * f_hz * t - 1.0)
+  rows = []
+  for k in range(len(t)):
+    r = {"t": t[k], "v": 23.0, "ang": ang[k], "ang_rate": 0.0, "eps_tq": 10 * out[k], "drv_tq": 0.0, "pressed": 0.0, "lat": 1.0,
+         "out": out[k], "p": 0.0, "i": 0.2, "f": -0.2, "des_la": 0.0, "act_la": 0.0}
+    rows.append([r[f] for f in lp.STEER_FIELDS])
+  return {"fields": list(lp.STEER_FIELDS), "rows": rows}
+
+
+def test_steer_counts_torque_reversals_and_wheel_swing():
+  d = _steer_rows()
+  arr = np.asarray(d["rows"])
+  st = q.steer_stats({k: arr[:, j] for j, k in enumerate(d["fields"])})
+  assert st["out_rev"] == pytest.approx(1.0, abs=0.05)  # 0.5 Hz sine around zero: 2 sign changes per cycle
+  assert st["ang_peak_hz"] == pytest.approx(0.5, abs=0.05)
+  assert st["ang_lo"] == pytest.approx(0.1 / np.sqrt(2), rel=0.05)
+  # the same swing on a torque bias never reverses
+  d2 = _steer_rows(out_bias=0.05)
+  arr2 = np.asarray(d2["rows"])
+  assert q.steer_stats({k: arr2[:, j] for j, k in enumerate(d2["fields"])})["out_rev"] == 0.0
+  text = q.steer(d)
+  assert "TORQUE command: reversals 1.0/s" in text and "WHEEL angle" in text and "EPS motor torque" in text
+
+
+def test_steer_buffer_answers_over_the_request_protocol():
+  p = lp.Probe()
+  for k in range(300):
+    p.add_steer(tuple([k * 0.01] + [0.0] * (len(lp.STEER_FIELDS) - 1)))
+  d = __import__("json").loads(p.handle("steer 1"))
+  assert d["fields"] == list(lp.STEER_FIELDS) and 100 <= len(d["rows"]) <= 102
+  assert q.steer({"fields": d["fields"], "rows": []}).startswith("no steering data")

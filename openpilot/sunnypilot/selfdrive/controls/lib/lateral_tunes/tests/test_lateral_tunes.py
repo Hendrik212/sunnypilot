@@ -383,7 +383,8 @@ class TestLateralTuneProfiles(OpenpilotTestCase):
         self.v = v
 
       def get(self, key, return_default=False):
-        assert key in ("LatAccelFactorCap", "SteerHeadroomCan", "IoniqHighwayCenterDamping", "RippleNotchQ", "LatHighwayKpScale")
+        assert key in ("LatAccelFactorCap", "SteerHeadroomCan", "IoniqHighwayCenterDamping", "RippleNotchQ", "LatHighwayKpScale",
+                       "LatHighwayFrictionScale")
         return self.v
 
     from opendbc.sunnypilot.car.hyundai.lateral_limits import DEFAULT_HEADROOM_CAN
@@ -974,3 +975,38 @@ def test_ripple_notch_q_width_and_off_switch():
     return -np.degrees(ph)
 
   assert 0 < lag_deg(4.0) < lag_deg(2.0)
+
+
+def test_highway_friction_scale_fades_in_above_60_kmh():
+  from openpilot.sunnypilot.selfdrive.controls.lib.lateral_tunes import ioniq6_starpilot as sp
+  lo, hi = sp.HIGHWAY_FRICTION_FADE
+  for v in (0.0, 10.0, lo):
+    assert sp.highway_friction_scale(v, 0.3) == pytest.approx(1.0)
+  for v in (hi, 30.0):
+    assert sp.highway_friction_scale(v, 0.3) == pytest.approx(0.3)
+  assert 0.3 < sp.highway_friction_scale(0.5 * (lo + hi), 0.3) < 1.0
+  for v in (5.0, 18.0, 30.0):
+    assert sp.highway_friction_scale(v, 1.0) == 1.0  # default: unchanged everywhere
+
+
+def test_highway_friction_scale_is_a_clamped_live_param_and_only_scales_friction():
+  ctl, VM, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+  p = ctl.profile
+  assert p.highway_friction_scale == 1.0
+  params = Params()
+  for v, expected in ((0.5, 0.5), (5.0, 1.5), (-1.0, 0.0), (float("nan"), 1.0)):
+    params.put("LatHighwayFrictionScale", v, block=True)
+    p.get_params(params)
+    assert p.highway_friction_scale == pytest.approx(expected)
+
+  def f_term(scale, v):
+    c, vm, _ = _make_controller(HYUNDAI.HYUNDAI_IONIQ_6, starpilot=True)
+    c.profile.highway_friction_scale = scale
+    for _ in range(50):
+      _, _, log_ = _run(c, vm, v_ego=v, curvature=0.0005)
+    return log_.f
+
+  # highway: friction off removes part of the feedforward; at city speed nothing changes
+  assert f_term(0.0, 25.0) != pytest.approx(f_term(1.0, 25.0), abs=1e-6)
+  assert f_term(0.0, 10.0) == pytest.approx(f_term(1.0, 10.0), abs=1e-9)
+  params.put("LatHighwayFrictionScale", 1.0, block=True)

@@ -278,6 +278,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LaneCenteringOncomingCap", {PERSISTENT | BACKUP, FLOAT, "0.30"}},
     {"LaneCenteringNarrowMode", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"LatHighwayKpScale", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    {"LatHighwayFrictionScale", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"LatBendTrimGain", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"LatCornerSpeedWarnAccel", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"LatSplitPathHz", {PERSISTENT | BACKUP, FLOAT, "0.0"}},

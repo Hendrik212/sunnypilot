@@ -8,6 +8,11 @@ Load: core 4 is saturated when engaged (controlsd, card, selfdrived), so the pro
 to the little cores at low priority and reads conflated sockets -- only the newest message of
 each service is decoded, SAMPLE_HZ times a second. Runs onroad while the LiveProbe param is set;
 selfdrived ignores it in processNotRunning, so a probe crash never reaches the driver.
+
+Steering chain at full rate: the EPS ping-pong (route 282) is a 0.5-4 Hz reversal of the motor torque
+with the wheel moving ~0.1 deg, invisible at SAMPLE_HZ and in the lane position. A second thread
+reads every carState (100 Hz, not conflated) with the newest carOutput / controlsState torque state
+and keeps STEER_SECONDS of compact rows (STEER_FIELDS) for query.py steer.
 """
 import json
 import os
@@ -30,6 +35,12 @@ CORES = {0, 1, 2, 3}
 NICE = 10
 SAMPLE_X = 10.0  # m ahead for the plan
 STALE_SECONDS = 1.0  # a service silent for longer drops out of the row
+
+STEER_SECONDS = 180
+STEER_HZ = 100
+# t, speed m/s, wheel angle deg, angle rate deg/s, EPS motor torque, driver torque, pressed, lat active,
+# torque output (normalized), PID p / i / f (lat accel units), desired / actual lat accel
+STEER_FIELDS = ("t", "v", "ang", "ang_rate", "eps_tq", "drv_tq", "pressed", "lat", "out", "p", "i", "f", "des_la", "act_la")
 
 SERVICES = ("modelV2", "modelDataV2SP", "radarWallsSP", "lateralTuneStateSP", "carState", "controlsState",
             "carControl", "carOutput", "liveLocationKalman", "gpsLocationExternal", "selfdriveState")
@@ -112,7 +123,18 @@ def sample(msgs: dict, half_width: float) -> dict:
 class Probe:
   def __init__(self, buffer_seconds: float = BUFFER_SECONDS, hz: float = SAMPLE_HZ):
     self.rows: deque = deque(maxlen=int(buffer_seconds * hz))
+    self.steer: deque = deque(maxlen=int(STEER_SECONDS * STEER_HZ))
     self.lock = threading.Lock()
+
+  def add_steer(self, row: tuple) -> None:
+    self.steer.append(row)  # deque.append is atomic; one writer
+
+  def last_steer(self, seconds: float) -> list[tuple]:
+    rows = list(self.steer)
+    if not rows:
+      return []
+    t_end = rows[-1][0]
+    return [r for r in rows if r[0] >= t_end - seconds]
 
   def add(self, row: dict) -> None:
     with self.lock:
@@ -127,10 +149,41 @@ class Probe:
 
   def handle(self, request: str) -> str:
     parts = request.split()
+    if parts and parts[0] == "steer":
+      seconds = float(parts[1]) if len(parts) > 1 else 60.0
+      return json.dumps({"fields": STEER_FIELDS, "rows": [[round(x, 5) for x in r] for r in self.last_steer(seconds)]})
     if not parts or parts[0] != "rows":
       return json.dumps({"error": f"unknown request {request!r}"})
     seconds = float(parts[1]) if len(parts) > 1 else 20.0
     return json.dumps(self.last(seconds))
+
+
+def steer_loop(probe: Probe, end: threading.Event) -> None:
+  """Every carState with the newest carOutput / controlsState / carControl values."""
+  sm_socks = {s: messaging.sub_sock(s, conflate=(s != "carState")) for s in ("carState", "carOutput", "controlsState", "carControl")}
+  poller = messaging.Poller()
+  poller.registerSocket(sm_socks["carState"])
+  out = p = i = f = des = act = 0.0
+  lat = False
+  while not end.is_set():
+    for _ in poller.poll(1000):
+      for name in ("carOutput", "controlsState", "carControl"):
+        m = messaging.recv_one_or_none(sm_socks[name])
+        if m is None:
+          continue
+        if name == "carOutput":
+          out = m.carOutput.actuatorsOutput.torque
+        elif name == "carControl":
+          lat = m.carControl.latActive
+        else:
+          lcs = m.controlsState.lateralControlState
+          if lcs.which() == "torqueState":
+            ts = lcs.torqueState
+            p, i, f, des, act = ts.p, ts.i, ts.f, ts.desiredLateralAccel, ts.actualLateralAccel
+      for m in messaging.drain_sock(sm_socks["carState"]):
+        c = m.carState
+        probe.add_steer((m.logMonoTime * 1e-9, c.vEgo, c.steeringAngleDeg, c.steeringRateDeg, c.steeringTorqueEps, c.steeringTorque,
+                         float(c.steeringPressed), float(lat), out, p, i, f, des, act))
 
 
 def serve(probe: Probe, end: threading.Event, path: str = SOCKET_PATH) -> None:
@@ -169,6 +222,7 @@ def main() -> None:
   socks = {s: messaging.sub_sock(s, conflate=True) for s in SERVICES}
   probe, end = Probe(), threading.Event()
   threading.Thread(target=serve, args=(probe, end), daemon=True).start()
+  threading.Thread(target=steer_loop, args=(probe, end), daemon=True).start()
   latest: dict = {}
   try:
     while True:
