@@ -80,7 +80,7 @@ def corner_speed_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMas
     "Corner Too Fast for Steering",
     f'Slow to {speed} {"km/h" if metric else "mph"}',
     AlertStatus.userPrompt, AlertSize.mid,
-    Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 1.)
+    Priority.LOW, VisualAlert.none, AudibleAlert.none, 1.)  # silent: display only (user, Nov 19)
 
 
 class EventsSP(EventsBase):
