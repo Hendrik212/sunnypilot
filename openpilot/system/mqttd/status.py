@@ -33,6 +33,37 @@ def should_probe_cable(mqtt_connected, onroad, connector_connected, car_voltage,
           and car_voltage >= CABLE_PROBE_MIN_VOLTAGE and now - last_probe >= CABLE_PROBE_INTERVAL_S)
 
 
+# Charging seen from the 12 V rail. Parked, the panda sits in power save and only delivers CAN in the hourly wake window,
+# so a charge that starts between two probes shows up as "idle, 0 kW". While AC charging the DC-DC converter holds the
+# 12 V rail at 14.3-14.5 V (Nov 20: 14.3-14.5 V during a 2.5 kW charge), a parked car on its own sits at 12-12.8 V.
+CHARGE_12V_ON = 13.8   # filtered volts: charging once above this for CHARGE_12V_HOLD_S
+CHARGE_12V_OFF = 13.4  # and not any more below this (hysteresis)
+CHARGE_12V_HOLD_S = 30.
+
+
+class ChargeFrom12V:
+  """Charging inferred from the filtered 12 V rail while parked with no live BMS frames. Power and current stay
+  unknown: only the fact that the DC-DC converter is running. A 12 V top-up of a low battery looks the same."""
+  def __init__(self):
+    self.active = False
+    self.above_since = None
+
+  def update(self, now, offroad, awake, car_voltage_filtered):
+    if not offroad or awake or car_voltage_filtered is None:
+      self.active, self.above_since = False, None
+      return False
+    if car_voltage_filtered >= CHARGE_12V_ON:
+      if self.above_since is None:
+        self.above_since = now
+      if now - self.above_since >= CHARGE_12V_HOLD_S:
+        self.active = True
+    else:
+      self.above_since = None
+      if car_voltage_filtered < CHARGE_12V_OFF:
+        self.active = False
+    return self.active
+
+
 #f = open("mqtt_status_log.txt", "w")
 
 def live_or(value, awake, idle):
@@ -206,6 +237,13 @@ def publish_binary_sensor_discovery(pm, sensor_name, device_info, config_prefix)
       "value_template": "{{ 'ON' if value_json.connector_connected == true else ('OFF' if value_json.connector_connected == false else 'None') }}",
       "device_class": "plug",
     },
+    "charging_inferred": {
+      "name": "Charging Inferred From 12V",
+      "state_topic": "openpilot/car_status",
+      # parked, no BMS frames: the 12 V rail at DC-DC level says the car is charging, power unknown (reads 0)
+      "value_template": "{{ 'ON' if value_json.charging_inferred == true else 'OFF' }}",
+      "icon": "mdi:ev-station",
+    },
   }
 
   if sensor_name not in binary_sensors:
@@ -272,6 +310,7 @@ def publish_ha_discovery(pm, count, config_prefix):
 
   binary_sensors = [
     "connector_connected",
+    "charging_inferred",
   ]
 
   buttons = [
@@ -323,6 +362,7 @@ def status_thread():
   sleeptimer = time.monotonic()
   params = Params()
   car_cache = CarStatusCache(params)
+  charge_12v = ChargeFrom12V()
   last_probe = -CABLE_PROBE_INTERVAL_S  # first probe as soon as the conditions hold
   car_voltage_instant = None
   car_voltage_filtered = None
@@ -410,6 +450,7 @@ def status_thread():
       # asleep (no BMS frame for a minute) = not charging: a charging car keeps its buses awake. -1 here read as
       # -1 kW in HA's household-demand template once the cached SoC keeps the source on mqtt.
       awake = car_cache.awake(cur_time)
+      charging_inferred = charge_12v.update(cur_time, not onroad, awake, car_voltage_filtered)
       time_remaining = mqtt.charging_time_remaining_out if awake else -1
       content = {"battery_level": car_cache.get(mqtt, "soc_out"),
                  "range": car_cache.get(mqtt, "range_out"),
@@ -418,7 +459,9 @@ def status_thread():
                  "charging_power": live_or(mqtt.charging_power_out, awake, 0.0),
                  "charging_time_remaining_minutes": time_remaining,
                  "charging_time_remaining": format_time(time_remaining),
-                 "charging_status": mqtt.charging_status_out if awake and mqtt.charging_status_out != "unknown" else "idle",
+                 "charging_status": (mqtt.charging_status_out if awake and mqtt.charging_status_out != "unknown" else
+                                     ("active" if charging_inferred else "idle")),
+                 "charging_inferred": charging_inferred,
                  "connector_connected": mqtt.connector_connected_out,
                  "charge_limit_ac": car_cache.get(mqtt, "charge_limit_ac_out"),
                  "charge_limit_dc": car_cache.get(mqtt, "charge_limit_dc_out"),
