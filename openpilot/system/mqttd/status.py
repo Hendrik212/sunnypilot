@@ -26,6 +26,19 @@ CABLE_PROBE_INTERVAL_S = 3600.
 CABLE_PROBE_MIN_VOLTAGE = 12.0  # above the comma's own 11.8 V cutoff: never drain a weak 12 V battery
 
 
+CAN_LISTEN_DEFAULT_S = 600
+CAN_LISTEN_RANGE_S = (10, 900)  # pandad clamps to the same range
+
+
+def listen_seconds(payload) -> int:
+  """Listen window from the MQTT payload: a number of seconds, anything else = the default."""
+  try:
+    secs = int(float(payload))
+  except (TypeError, ValueError):
+    secs = CAN_LISTEN_DEFAULT_S
+  return min(max(secs, CAN_LISTEN_RANGE_S[0]), CAN_LISTEN_RANGE_S[1])
+
+
 def should_probe_cable(mqtt_connected, onroad, connector_connected, car_voltage, last_probe, now):
   """Wake the parked car to read the plug state: only with the broker reachable (car at home), offroad, when the
   cable is not known to be plugged in (unplugged, or unknown after a reboot), at most hourly, on a healthy 12 V."""
@@ -272,6 +285,12 @@ def publish_button_discovery(pm, button_name, device_info, config_prefix):
       "payload_press": "PRESS",
       "icon": "mdi:car-electric",
     },
+    "listen_can_bus": {
+      "name": "Listen CAN Bus (10 min, receive only)",
+      "command_topic": "openpilot/command/listen",
+      "payload_press": "600",
+      "icon": "mdi:ear-hearing",
+    },
   }
 
   if button_name not in buttons:
@@ -315,6 +334,7 @@ def publish_ha_discovery(pm, count, config_prefix):
 
   buttons = [
     "wake_can_bus",
+    "listen_can_bus",
   ]
 
   for sensor in sensors:
@@ -403,6 +423,7 @@ def status_thread():
       # mqtt message receiver - subscribe to both command topics
       mqttd.subscribe(pm, "openpilot/command")
       mqttd.subscribe(pm, "openpilot/command/wake")
+      mqttd.subscribe(pm, "openpilot/command/listen")
       sm.update(1)
       if count == 10:
         count = 0
@@ -417,8 +438,15 @@ def status_thread():
         with open("/tmp/mqtt_wake.log", "a") as f:
           f.write(f"{datetime.datetime.now()} - Received: {topic} = {payload}\n")
 
+        # receive-only CAN capture (CanListen in pandad.cc): payload = seconds, checked first because the wake
+        # branch below also fires on any 'PRESS'
+        if topic.endswith('/listen'):
+          secs = listen_seconds(payload)
+          print(f"[MQTT] CAN listen requested for {secs} s", flush=True)
+          params.put("CanListenRequest", secs)
+          last_probe = cur_time  # no cable probe (it transmits) right after
         # Handle wake CAN bus button press
-        if 'wake' in topic or payload == 'PRESS':
+        elif 'wake' in topic or payload == 'PRESS':
           print("[MQTT] Wake CAN bus button pressed - triggering wake", flush=True)
           with open("/tmp/mqtt_wake.log", "a") as f:
             f.write(f"{datetime.datetime.now()} - WAKE TRIGGERED\n")

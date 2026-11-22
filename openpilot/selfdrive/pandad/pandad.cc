@@ -1,12 +1,18 @@
 #include "selfdrive/pandad/pandad.h"
 
+#include <algorithm>
 #include <array>
 #include <bitset>
 #include <cassert>
 #include <cerrno>
+#include <cinttypes>
+#include <cstdio>
+#include <ctime>
 #include <memory>
 #include <thread>
 #include <utility>
+
+#include <sys/stat.h>
 
 #include "openpilot/cereal/gen/cpp/car.capnp.h"
 #include "openpilot/cereal/messaging/messaging.h"
@@ -98,11 +104,118 @@ void can_send_thread(Panda *panda, bool fake_send) {
   }
 }
 
-void can_recv(Panda *panda, PubMaster *pm) {
+// Receive-only CAN capture for a parked car (2026-11-23, Bluelink stop/start charging test). On CanListenRequest =
+// seconds (default 600, 10..900; offroad, ignition off) leave power save for that window with safety NO_OUTPUT, so
+// nothing is transmitted, and append every received frame on all buses to /data/can_listen/<local time>.csv
+// (mono_ns,wall_ns,bus,address,data). Timestamps are per USB batch (pandad reads at 100 Hz). CanWake requests are
+// refused while it runs (they transmit UDS). Ends early if the car starts; CanListenLast = "<path> <frames>".
+class CanListen {
+public:
+  bool active() const { return active_; }
+
+  bool update(Panda *panda, uint64_t frame, bool is_onroad, bool ignition) {
+    if (active_) {
+      if (is_onroad || ignition) {
+        stop(panda, "car started");
+      } else if (nanos_since_boot() >= end_ns_) {
+        stop(panda, "done");
+      }
+      return active_;
+    }
+    if (frame % 100 != 0) {
+      return false;
+    }
+    const std::string req = params_.get("CanListenRequest");
+    if (req.empty()) {
+      return false;
+    }
+    params_.remove("CanListenRequest");
+    if (is_onroad || ignition) {
+      LOGW("can listen: request ignored, car is on");
+      return false;
+    }
+    int secs = DEFAULT_S;
+    try {
+      secs = std::stoi(req);
+    } catch (...) {
+      secs = DEFAULT_S;
+    }
+    secs = std::clamp(secs, MIN_S, MAX_S);
+
+    mkdir(DIR, 0775);
+    char ts[32];
+    const time_t now = time(nullptr);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &lt);
+    path_ = std::string(DIR) + "/" + ts + ".csv";
+    file_ = fopen(path_.c_str(), "w");
+    if (file_ == nullptr) {
+      LOGE("can listen: cannot open %s", path_.c_str());
+      return false;
+    }
+    fprintf(file_, "mono_ns,wall_ns,bus,address,data\n");
+    panda->set_safety_model(cereal::CarParams::SafetyModel::NO_OUTPUT);
+    panda->set_power_saving(false);
+    active_ = true;
+    frames_ = 0;
+    end_ns_ = nanos_since_boot() + uint64_t(secs) * 1000000000ULL;
+    LOGW("can listen: start %d s -> %s", secs, path_.c_str());
+    return true;
+  }
+
+  void log(const std::vector<can_frame> &frames) {
+    if (!active_ || file_ == nullptr || frames.empty()) {
+      return;
+    }
+    const uint64_t mono = nanos_since_boot();
+    struct timespec w;
+    clock_gettime(CLOCK_REALTIME, &w);
+    const uint64_t wall = uint64_t(w.tv_sec) * 1000000000ULL + uint64_t(w.tv_nsec);
+    for (const auto &f : frames) {
+      fprintf(file_, "%" PRIu64 ",%" PRIu64 ",%ld,%ld,", mono, wall, f.src, f.address);
+      for (unsigned char c : f.dat) {
+        fprintf(file_, "%02x", c);
+      }
+      fputc('\n', file_);
+    }
+    frames_ += frames.size();
+  }
+
+private:
+  static constexpr const char *DIR = "/data/can_listen";
+  static constexpr int DEFAULT_S = 600;
+  static constexpr int MIN_S = 10;
+  static constexpr int MAX_S = 900;
+
+  void stop(Panda *panda, const char *why) {
+    active_ = false;
+    if (file_ != nullptr) {
+      fclose(file_);
+      file_ = nullptr;
+    }
+    panda->set_safety_model(cereal::CarParams::SafetyModel::NO_OUTPUT);
+    panda->set_power_saving(true);
+    params_.put("CanListenLast", path_ + " " + std::to_string(frames_));
+    LOGW("can listen: %s, %" PRIu64 " frames -> %s", why, frames_, path_.c_str());
+  }
+
+  Params params_;
+  bool active_ = false;
+  FILE *file_ = nullptr;
+  std::string path_;
+  uint64_t frames_ = 0;
+  uint64_t end_ns_ = 0;
+};
+
+void can_recv(Panda *panda, PubMaster *pm, CanListen *listen = nullptr) {
   static std::vector<can_frame> raw_can_data;
   {
     raw_can_data.clear();
     bool comms_healthy = panda->can_receive(raw_can_data);
+    if (listen != nullptr) {
+      listen->log(raw_can_data);
+    }
 
     MessageBuilder msg;
     auto evt = msg.initEvent();
@@ -301,7 +414,7 @@ std::optional<bool> process_panda_state(Panda *panda, PubMaster *pm, bool engage
 class CanWake {
 public:
   // true while a wake window is active
-  bool update(Panda *panda, uint64_t frame, bool is_onroad, bool ignition) {
+  bool update(Panda *panda, uint64_t frame, bool is_onroad, bool ignition, bool listening = false) {
     if (active_) {
       if (is_onroad || ignition) {
         active_ = false;
@@ -324,6 +437,10 @@ public:
       return false;
     }
     params_.remove("CanWakeRequest");
+    if (listening) {
+      LOGW("can wake: request ignored, a receive-only CAN listen is running");
+      return false;
+    }
     if (is_onroad || ignition) {
       LOGW("can wake: request ignored, car is on");
       return false;
@@ -464,10 +581,11 @@ void pandad_run(Panda *panda) {
   bool ignition = false;
   bool can_wake_active = false;
   CanWake can_wake;
+  CanListen can_listen;
 
   // Main loop: receive CAN first, then process lower priority panda and peripheral state.
   while (!do_exit && check_connected(panda)) {
-    can_recv(panda, &pm);
+    can_recv(panda, &pm, &can_listen);
 
     // Process peripheral state at 20 Hz
     if (rk.frame() % 5 == 0) {
@@ -483,13 +601,14 @@ void pandad_run(Panda *panda) {
       }
       engaged_mads = process_mads_heartbeat(&sm);
       always_offroad = panda_safety.getOffroadMode();
-      if (auto ign = process_panda_state(panda, &pm, engaged, engaged_mads, is_onroad, spoofing_started, always_offroad, can_wake_active)) {
+      if (auto ign = process_panda_state(panda, &pm, engaged, engaged_mads, is_onroad, spoofing_started, always_offroad, can_wake_active || can_listen.active())) {
         ignition = *ign;
       }
       panda_safety.configureSafetyMode(is_onroad);
     }
 
-    can_wake_active = can_wake.update(panda, rk.frame(), is_onroad, ignition);
+    can_wake_active = can_wake.update(panda, rk.frame(), is_onroad, ignition, can_listen.active());
+    can_listen.update(panda, rk.frame(), is_onroad, ignition);
 
     // Send out peripheralState at 2Hz
     if (rk.frame() % 50 == 0) {
