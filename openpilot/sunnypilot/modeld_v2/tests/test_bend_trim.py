@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from openpilot.sunnypilot.modeld_v2.bend_trim import BEND_BP, DT, HOLD_S, KP, MAX_CORRECTION, OBS_RESET, BendTrim
+from openpilot.sunnypilot.modeld_v2.bend_trim import BEND_BP, DT, HOLD_S, KD, KP, MAX_CORRECTION, OBS_RESET, BendTrim
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants
 
 X = np.array(ModelConstants.X_IDXS)
@@ -45,12 +45,14 @@ def test_pushes_back_toward_the_centre_in_a_bend():
   assert half[-1] - 2.0 == pytest.approx(-0.5 * KP * 0.4, abs=0.01)
 
 
-def test_opposes_a_drift_to_the_inside():
-  # same position, but moving to the inside at 0.3 m/s: the rate term adds to the push-back
+def test_correction_ignores_the_offset_rate():
+  # same position, but moving to the inside at 0.3 m/s: the observer sees the rate, the correction does not
+  # (KD = 0 since routes 28c/28e, Nov 22: the rate term drove a 0.4-0.5 Hz swing in bends)
   still, _ = _run(60, 0.2, 2.0, 1.0)
   moving, _ = _run(60, 0.2 - 0.3 * 59 * DT, 2.0, 1.0, drift=0.3)
+  assert KD == 0.0
   assert moving.rate > 0.15
-  assert moving.correction < still.correction - 0.1
+  assert moving.correction == pytest.approx(still.correction, abs=0.02)
 
 
 def test_no_correction_on_a_straight_or_without_confident_lines():

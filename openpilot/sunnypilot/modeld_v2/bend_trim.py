@@ -10,7 +10,7 @@ Country roads, Cheddar, routes 00000275/276/277 (76 corners with confident lines
   request, 0.32 above 2.5 (open loop on the recorded video with the view shifted 0.3 m), settled in
   0.2 s. So a correction of a few tenths of a m/s^2 moves the car without a fight.
 
-request += gain * (-KP * offset - KD * offset rate), in bends with confident lane lines.
+request += gain * (-KP * offset - KD * offset rate), in bends with confident lane lines (KD = 0 since Nov 22, below).
 
 What did NOT work in the closed-loop replay on the logged lines (do not retry without new data):
 - Replacing the request by a lane-following one (lane-centre curvature as feed-forward): overshoots to
@@ -34,6 +34,16 @@ The replay is linear around the logged drive with the measured spring as the mod
 
 Not covered: bends below R 40 m, torque-limited corners.
 
+KD = 0 since Nov 22 (routes 28c/28e, four bookmarks, all 0.4-0.5 Hz swings in country bends at 62-77 km/h):
+the replay above was linear with no steering delay. In the full closed loop (opsim closedloop3 with this
+module, an EPS refitted at 67 km/h and the measured vehicle gain) the trim at gain 1.0 reproduces the
+bookmarks; without it there is no swing. The rate term pushes hardest at 0.3-0.8 Hz, where the lane loop
+has its crossover and ~2-3 dB of gain margin. Cheddar, 246 s of engaged country bends on five other
+windows (inside offset p50/p90 | request swing 0.3-0.8 Hz p90 | wheel p90 | request jerk p95):
+off 35/89 cm | 0.064 m/s^2 | 0.63 deg | 0.40 m/s^3; KD 1.0: 21/61 | 0.226 | 1.94 | 0.68;
+KD 0: 14/62 | 0.077 | 0.76 | 0.42. A 0.15 Hz low-pass on the correction (KD 1) stopped the swing as well
+but kept less of the apex (21/63). The observer still estimates the rate (logged, not applied).
+
 Line dropouts (LatBendTrimDropout, default 0 = off): at night on the Allner hill (route 283) both lines
 were confident in only 35 % of the bend time, so the trim was on 35 % instead of 50 % (281, daylight).
 With dropout on, one confident line (> SINGLE_PROB) gives the centre as that line -/+ half the last
@@ -52,7 +62,7 @@ import numpy as np
 
 DT = 0.05  # s, model rate
 KP = 0.5  # m/s^2 per m of offset
-KD = 1.0  # m/s^2 per m/s of offset rate
+KD = 0.0  # m/s^2 per m/s of offset rate; 1.0 until Nov 22 (drove a 0.4-0.5 Hz swing in bends, see the docstring)
 GAIN_MAX = 1.5
 MAX_CORRECTION = 1.0  # m/s^2
 OBS_W0 = 3.0  # rad/s, observer bandwidth
