@@ -17,14 +17,14 @@ def _path(y, y_std=0.1):
   return SimpleNamespace(x=_XS.copy(), y=np.full_like(_XS, float(y)), yStd=np.full_like(_XS, float(y_std)))
 
 
-def _model(lane_left=True, lane_right=True, shoulder_right=False, lane_change=0, inner_prob=0.95, model_y=0.0):
-  """Lane lines at -5.3/-1.75/1.75/5.3. A neighbour lane = confident outer line + far edge.
+def _model(lane_left=True, lane_right=True, shoulder_right=False, lane_change=0, inner_prob=0.95, model_y=0.0, half=1.75):
+  """Lane lines at -5.3/-half/half/5.3 (default 3.5 m lane). A neighbour lane = confident outer line + far edge.
   No lane = outer prob ~0 and the edge close (shoulder on the right: edge ~3 m out)."""
   probs = [0.85 if lane_left else 0.01, inner_prob, inner_prob, 0.85 if lane_right else 0.01]
   edge_l = -7.5 if lane_left else -2.5
   edge_r = 7.5 if lane_right else (4.8 if shoulder_right else 2.5)
   return SimpleNamespace(
-    laneLines=[_path(-5.3), _path(-1.75), _path(1.75), _path(5.3)],
+    laneLines=[_path(-5.3), _path(-half), _path(half), _path(5.3)],
     laneLineProbs=probs,
     laneLineStds=[0.1, 0.1, 0.1, 0.1],
     roadEdges=[_path(edge_l), _path(edge_r)],
@@ -146,6 +146,54 @@ def test_middle_lane_bias_is_left_of_the_centre(bias, expected):
   d = _dyn(LaneCenteringMiddleBias=bias)
   _run(d, _model(lane_left=True, lane_right=True), 10.0)
   assert d.offset_target == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("mode", [0, 1])
+@pytest.mark.parametrize("width,share", [(2.5, 0.0), (2.8, 0.0), (3.0, 0.5), (3.2, 1.0), (3.5, 1.0)])
+def test_offset_fades_in_narrow_lanes(mode, width, share):
+  # routes 289-28b: 2.5 m country lanes, the +0.15 m right offset put the car on the right line
+  d = _dyn(LaneCenteringOffsetMode=mode)
+  _run(d, _model(lane_right=False, half=width / 2), 15.0)
+  assert d.position == LanePosition.RIGHT
+  assert d.offset_target == pytest.approx(0.15 * share, abs=1e-3)
+
+
+def test_left_and_middle_offsets_do_not_fade():
+  # multi-lane narrow lanes are construction zones with their own tuning (route 269)
+  d = _dyn(LaneCenteringMiddleBias=0.1)
+  _run(d, _model(lane_left=True, lane_right=True, half=1.3), 15.0)
+  assert d.position == LanePosition.MIDDLE and d.offset_target == pytest.approx(-0.1)
+  d = _dyn()
+  _run(d, _model(lane_left=False, lane_right=True, half=1.3), 15.0)
+  assert d.position == LanePosition.LEFT and d.offset_target == pytest.approx(-0.15)
+
+
+@pytest.mark.parametrize("mode", [0, 1])
+def test_offset_fades_once_the_lines_are_gone(mode):
+  # routes 289-28b: 10 of 41 corrections came with no lines seen and the +0.15 m still applied
+  d = _dyn(LaneCenteringOffsetMode=mode)
+  _run(d, _model(lane_right=False), 15.0)
+  held = d.offset
+  assert held == pytest.approx(0.15)
+  _run(d, _model(lane_right=False, inner_prob=0.4), dlc.NO_LINES_HOLD - 0.2)  # brief dropout: kept
+  assert d.offset_target == pytest.approx(0.15) and d.offset == pytest.approx(held)
+  _run(d, _model(lane_right=False, inner_prob=0.4), 0.4)
+  assert d.offset_target == 0.0
+  _run(d, _model(lane_right=False, inner_prob=0.4), 1.0)  # ramps out, never steps
+  assert 0.0 < d.offset < held
+  _run(d, _model(lane_right=False, inner_prob=0.4), 5.0)
+  assert d.offset == pytest.approx(0.0, abs=1e-9)
+  _run(d, _model(lane_right=False), 10.0)  # lines back: the offset returns
+  assert d.offset == pytest.approx(0.15)
+
+
+def test_one_weak_line_keeps_the_offset():
+  d = _dyn(LaneCenteringOffsetMode=1)
+  _run(d, _model(lane_right=False), 15.0)
+  m = _model(lane_right=False)
+  m.laneLineProbs = [m.laneLineProbs[0], 0.95, 0.3, m.laneLineProbs[3]]
+  _run(d, m, 5.0)
+  assert d.offset_target == pytest.approx(0.15)
 
 
 def test_offset_is_rate_limited():

@@ -235,6 +235,13 @@ CAMERA_STATUS_SETTLED = 0.01  # m between applied and target offset
 CAMERA_STATUS_CENTRED = 0.02  # m
 
 DEFAULT_OFFSET = 0.15
+# The RIGHT/SINGLE lane offset fades out in narrow lanes: routes 289-28b (Nov 21),
+# country lanes ~2.5 m wide leave the 1.88 m car ~0.31 m per side when centred, and the +0.15 m right
+# offset put it on the right line in most of the 41 driver corrections.
+OFFSET_ZERO_WIDTH = 2.8  # m lane width (line centres at SAMPLE_X): no offset at or below
+OFFSET_FULL_WIDTH = 3.2  # m: the full offset from here up
+WIDTH_TAU = 1.0  # s low-pass on the measured lane width
+NO_LINES_HOLD = 1.0  # s with neither inner line seen before the offset target fades to 0
 DEFAULT_DWELL = 3.0
 DEFAULT_SWITCH_DIST = 400.0
 
@@ -707,6 +714,8 @@ class DynamicLaneCentering:
     self.camera_offset = 0.0  # handed to modeld, m, CameraOffset convention (+ = left)
     self._camera_status = LaneCenteringStatus.OFF
     self._lines_ok = False
+    self.lane_width: float | None = None  # low-passed inner line-to-line width, m
+    self._no_lines_time = 0.0
     self.guard = ClearanceGuard()
     self.margin = DEFAULT_MIN_CLEARANCE
     self.wall_margin = DEFAULT_WALL_CLEARANCE
@@ -759,6 +768,37 @@ class DynamicLaneCentering:
     self.offset = self.offset_target = self.correction = self.camera_offset = 0.0
     self.active = self.limited = self.oncoming = False
     self.limit_cause = LimitCause.NONE
+    self.lane_width = None
+    self._no_lines_time = 0.0
+
+  def _update_width(self, model_v2) -> None:
+    """Per NEW modelV2 frame: low-pass the inner lane width (both inner lines confident; held
+    otherwise) and time how long BOTH inner lines are gone."""
+    try:
+      probs = model_v2.laneLineProbs
+      none_seen = max(probs[1], probs[2]) < CAMERA_STATUS_MIN_PROB
+    except (AttributeError, IndexError, TypeError):
+      none_seen = True
+    self._no_lines_time = self._no_lines_time + DT_MDL if none_seen else 0.0
+    if not self._lines_ok:
+      return
+    try:
+      width = _sample(model_v2.laneLines[2]) - _sample(model_v2.laneLines[1])
+    except (AttributeError, IndexError, TypeError, ValueError):
+      return
+    if not (np.isfinite(width) and 1.5 < width < 6.0):
+      return
+    if self.lane_width is None:
+      self.lane_width = width
+    else:
+      self.lane_width += (width - self.lane_width) * DT_MDL / (WIDTH_TAU + DT_MDL)
+
+  def width_scale(self) -> float:
+    """0..1 share of the RIGHT/SINGLE lane offset allowed: 0 in narrow lanes and once no inner
+    line has been seen for NO_LINES_HOLD."""
+    if self.lane_width is None or self._no_lines_time > NO_LINES_HOLD:
+      return 0.0
+    return float(np.clip((self.lane_width - OFFSET_ZERO_WIDTH) / (OFFSET_FULL_WIDTH - OFFSET_ZERO_WIDTH), 0.0, 1.0))
 
   def _ramp_offset(self, rate: float = OFFSET_RAMP_RATE) -> None:
     step = rate * DT_CTRL
@@ -790,10 +830,14 @@ class DynamicLaneCentering:
         self._lines_ok = len(probs) >= 3 and min(probs[1], probs[2]) >= CAMERA_STATUS_MIN_PROB
       except (AttributeError, TypeError):
         self._lines_ok = False
+      self._update_width(model_v2)
     if self.classifier.position == LanePosition.MIDDLE:
       nominal = -self.middle_bias
     else:
       nominal = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
+      if self.classifier.position in (LanePosition.RIGHT, LanePosition.SINGLE):
+        # country roads: no right offset in narrow lanes or blind (LEFT/MIDDLE: construction-zone tuning)
+        nominal *= self.width_scale()
 
     if self.mode == OffsetMode.CAMERA:
       pos = self.classifier.position
@@ -840,7 +884,7 @@ class DynamicLaneCentering:
       elif self.limited:
         self._camera_status = St.LIMITED
       elif not self._lines_ok:
-        self._camera_status = St.NO_LINES  # informational: the offset is kept
+        self._camera_status = St.NO_LINES  # the offset is kept for NO_LINES_HOLD, then fades out
       elif abs(self.offset_target - self.offset) > CAMERA_STATUS_SETTLED:
         self._camera_status = St.SHIFT_RIGHT if self.offset_target > self.offset else St.SHIFT_LEFT
       elif abs(self.offset) < CAMERA_STATUS_CENTRED:
