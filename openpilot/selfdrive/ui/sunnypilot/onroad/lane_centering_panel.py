@@ -26,12 +26,13 @@ from openpilot.common.params import Params
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_centering import LaneCenteringStatus as St
 from openpilot.sunnypilot.selfdrive.controls.lib.dynamic_lane_centering import LimitCause as Lc
 from openpilot.selfdrive.ui.onroad.alert_renderer import ALERT_HEIGHTS, ALERT_MARGIN
-from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui import get_bottom_dev_ui_offset
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
+
+HUD_BORDER_SIZE = 30  # upstream dropped UIConfig.border_size (A New Dawn); same value as before
 
 POSITION_NAMES = {0: "--", 1: "SINGLE", 2: "RIGHT", 3: "MIDDLE", 4: "LEFT"}
 
@@ -177,7 +178,7 @@ class LaneCenteringPanel(Widget):
     """Lowest y the panel may reach: above the bottom developer bar, and above a small or mid
     alert while one shows (alerts are drawn over the HUD)."""
     screen_bottom = hud_rect.y + hud_rect.height
-    bottom = screen_bottom - UI_CONFIG.border_size - get_bottom_dev_ui_offset()
+    bottom = screen_bottom - HUD_BORDER_SIZE - get_bottom_dev_ui_offset()
     sm = ui_state.sm
     size = sm['selfdriveState'].alertSize.raw
     if size in ALERT_HEIGHTS and sm.recv_frame['selfdriveState'] >= ui_state.started_frame:
@@ -190,7 +191,7 @@ class LaneCenteringPanel(Widget):
     return "  ".join(t for t, on in (("WALL L", st.laneCentreWallLeft), ("WALL R", st.laneCentreWallRight)) if on)
 
   def layout_rect(self, hud_rect: rl.Rectangle) -> rl.Rectangle:
-    right = hud_rect.x + hud_rect.width - UI_CONFIG.border_size
+    right = hud_rect.x + hud_rect.width - HUD_BORDER_SIZE
     bottom = self._bottom(hud_rect)
     if not self._expanded:
       _, text, _ = self._status()
