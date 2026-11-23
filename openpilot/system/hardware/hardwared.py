@@ -45,9 +45,10 @@ PANDA_STATES_TIMEOUT = round(1000 / SERVICE_LIST['pandaStates'].frequency * 1.5)
 ONROAD_CYCLE_TIME = 1  # seconds to wait offroad after requesting an onroad cycle
 
 class Chestnut:
-  # flash offroad, modeld ignores chestnut until the product string matches
+  # flash before going onroad, modeld ignores chestnut until the product string matches
   MAX_ATTEMPTS = 3
   RETRY_INTERVAL = 20.
+  STARTUP_TIMEOUT = 30.
 
   def __init__(self):
     self.thread: threading.Thread | None = None
@@ -55,6 +56,10 @@ class Chestnut:
     self.last_attempt = 0.
     self.flashed = False
     self.mismatch = False
+
+  @property
+  def flashing(self) -> bool:
+    return self.thread is not None and self.thread.is_alive() and time.monotonic() - self.last_attempt < self.STARTUP_TIMEOUT
 
   @property
   def failed(self) -> bool:
@@ -77,7 +82,7 @@ class Chestnut:
       return
     if self.thread is not None and self.thread.is_alive():
       return
-    if time.monotonic() - self.last_attempt < self.RETRY_INTERVAL:
+    if self.attempts > 0 and time.monotonic() - self.last_attempt < self.RETRY_INTERVAL:
       return
 
     self.attempts += 1
@@ -237,7 +242,7 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
     network_strength=NetworkStrength.unknown,
     network_stats={'wwanTx': -1, 'wwanRx': -1},
     modem_temps=[],
-    usb_state=[],
+    usb_state=get_usb_state(),
   )
 
   all_temp_filter = FirstOrderFilter(0., TEMP_TAU, DT_HW, initialized=False)
@@ -267,6 +272,12 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
   branch = get_short_branch()
 
   watchdog.arm()
+  build_metadata = get_build_metadata()
+  is_unsupported_combo = COMMA_HARDWARE and HARDWARE.get_device_type() == "tici" and build_metadata.channel_type != "tici"
+  startup_conditions["not_tici"] = not is_unsupported_combo
+  onroad_conditions["not_tici"] = not is_unsupported_combo
+  set_offroad_alert_if_changed("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
+
   while not end_event.is_set():
     watchdog.stage('panda_receive')
     sm.update(PANDA_STATES_TIMEOUT)
@@ -345,7 +356,7 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
     chestnut_state = sm["chestnutState"]
     chestnut_valid = sm.alive["chestnutState"] and sm.valid["chestnutState"]
     watchdog.stage('chestnut_status')
-    chestnut_status.update(started_ts is None, branch, last_hw_state.usb_state, chestnut.failed,
+    chestnut_status.update(started_ts is None or not onroad_conditions["ignition"], branch, last_hw_state.usb_state, chestnut.failed,
                            params.get_bool("ChestnutLoading"), params.get("ChestnutActive"),
                            chestnut_state if chestnut_valid else None, set_offroad_alert_if_changed)
     # this subset is only used for offroad
@@ -394,6 +405,8 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
     # must be at an engageable thermal band to go onroad
     startup_conditions["device_temp_engageable"] = thermal_status < ThermalStatus.overheated
 
+    startup_conditions["not_flashing_chestnut"] = not chestnut.flashing
+
     # ensure device is fully booted
     watchdog.stage('hardware_booted')
     startup_conditions["device_booted"] = startup_conditions.get("device_booted", False) or HARDWARE.booted()
@@ -403,18 +416,6 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
     offroad_mode = params.get_bool("OffroadMode")
     startup_conditions["not_always_offroad"] = not offroad_mode
     onroad_conditions["not_always_offroad"] = not offroad_mode
-
-    # if an unsupported device and branch is detected, going onroad is blocked
-    # only allow going onroad when:
-    # - TIZI, or
-    # - TICI and channel_type is "tici"
-    watchdog.stage('build_metadata')
-    build_metadata = get_build_metadata()
-    is_unsupported_combo = COMMA_HARDWARE and HARDWARE.get_device_type() == "tici" and build_metadata.channel_type != "tici"
-    startup_conditions["not_tici"] = not is_unsupported_combo
-    onroad_conditions["not_tici"] = not is_unsupported_combo
-    watchdog.stage('tici_support_alert')
-    set_offroad_alert_if_changed("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
 
     # if the temperature enters the danger zone, go offroad to cool down
     onroad_conditions["device_temp_good"] = thermal_status < ThermalStatus.critical
@@ -478,11 +479,6 @@ def hardware_thread(end_event, hw_queue, watchdog: HardwareWatchdog) -> None:
 
     # Offroad power monitoring
     voltage = None if peripheralState.pandaType == log.PandaState.PandaType.unknown else peripheralState.voltage
-
-    # GitHub runner auto off: 9V is used as the threshold because most desktop runners
-    # will rarely exceed 5V so 9V is set as our buffer between desk use and car use.
-    watchdog.stage('runner_voltage_param')
-    put_bool_if_changed(params, "GithubRunnerSufficientVoltage", bool((voltage or 0) and voltage > 9000))
 
     watchdog.stage('power_monitor_calculate')
     power_monitor.calculate(voltage, onroad_conditions["ignition"])

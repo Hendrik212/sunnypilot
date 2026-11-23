@@ -5,10 +5,8 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 import json
-import math
 import platform
 
-from openpilot.cereal import log
 from openpilot.common.params import Params
 from openpilot.sunnypilot.mapd.live_map_data.base_map_data import BaseMapData
 from openpilot.sunnypilot.navd.helpers import Coordinate
@@ -20,12 +18,12 @@ class OsmMapData(BaseMapData):
     self.mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else self.params
 
   def update_location(self) -> None:
-    location = self.sm['liveLocationKalman']
-    self.localizer_valid = (location.status == log.LiveLocationKalman.Status.valid) and location.positionGeodetic.valid
+    location = self.sm['gpsLocationSP']
+    self.localizer_valid = self.sm.valid['gpsLocationSP'] and location.hasFix
 
     if self.localizer_valid:
-      self.last_bearing = math.degrees(location.calibratedOrientationNED.value[2])
-      self.last_position = Coordinate(location.positionGeodetic.value[0], location.positionGeodetic.value[1])
+      self.last_bearing = location.bearingDeg
+      self.last_position = Coordinate(location.latitude, location.longitude)
 
     if self.last_position is None:
       return
@@ -38,7 +36,10 @@ class OsmMapData(BaseMapData):
     if self.last_bearing is not None:
       params['bearing'] = self.last_bearing
 
-    self.mem_params.put("LastGPSPosition", json.dumps(params), block=True)
+    # mapd reads its position from the memory params as JSON, so write it for the mapd binary.
+    # LastGPSPosition is registered as BYTES (ubloxd owns the persistent copy for pigeond),
+    # so the JSON payload has to be encoded here.
+    self.mem_params.put("LastGPSPosition", json.dumps(params).encode(), block=True)
 
   def get_current_speed_limit(self) -> float:
     return float(self.mem_params.get("MapSpeedLimit") or 0.0)

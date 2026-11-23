@@ -168,7 +168,7 @@ jobs:
           echo "Building locationd..."
           # -j1: parallel rednose generators OOM the device
           scons -j1 cache_dir="$SCONS_CACHE" --minimal \
-            openpilot/selfdrive/locationd openpilot/sunnypilot/selfdrive/locationd
+            openpilot/selfdrive/locationd
           echo "Building rest of sunnypilot"
           sudo rm -rf /tmp/* || true
           mkdir -p "$BUILD_DIR/tmp"
@@ -594,8 +594,14 @@ jobs:
       - name: Publish chestnut branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           CHESTNUT_BRANCH="${{ needs.prepare_strategy.outputs.new_branch }}-chestnut"
+          cp .lfsconfig "${{ env.OUTPUT_DIR }}/"
+          echo 'openpilot/selfdrive/modeld/models/big_*_tinygrad.pkl filter=lfs diff=lfs merge=lfs -text' > "${{ env.OUTPUT_DIR }}/.gitattributes"
+          git lfs install
+          git config --global credential.helper store
+          echo "https://user:${HF_TOKEN}@huggingface.co" > ~/.git-credentials
 
           ${{ env.CI_DIR }}/publish.sh \
             "${{ github.workspace }}" \

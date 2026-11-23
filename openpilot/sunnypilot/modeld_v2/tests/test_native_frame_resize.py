@@ -28,7 +28,7 @@ def native_jits():
   specs = {'new_img': ((2, 6, 4, 8), '|u1', 'CPU'), 'desire': ((8,), '<f4', 'CPU'), 'traffic_convention': ((1, 2), '<f4', 'CPU'),
            'state_feat_q': ((4, 1, 8), '<f4', 'CPU')}
   slices = base64.b64encode(pickle.dumps({'plan': slice(0, 4)})).decode()
-  return {'input_specs': specs, 'run': Mock(),
+  return {'input_specs': specs, 'run': Mock(input_names=[]),  # no split frame inputs: the resize copies into the packed buffer
           'metadata': {'metadata': {'output_slices': slices}, 'output_shapes': {'outputs': (1, 4), 'next_state_feat_q': (4, 1, 8)}},
           'output_specs': {'outputs': ((1, 4), '<f4', 'CPU'), 'next_state_feat_q': ((4, 1, 8), '<f4', 'CPU')}}
 

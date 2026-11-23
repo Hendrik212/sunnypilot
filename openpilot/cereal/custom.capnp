@@ -138,6 +138,9 @@ struct ModelManagerSP @0xaedffd8f31e7b55d {
     status @0 :DownloadStatus;
     progress @1 :Float32;
     eta @2 :UInt32;
+    speed @3 :Float32;
+    canceling @4 :Bool;
+    resuming @5 :Bool;
   }
 
   struct Chunk {
@@ -356,7 +359,7 @@ struct OnroadEventSP @0xda96579883444c35 {
     silentParkBrake @11;
     controlsMismatchLateral @12;
     hyundaiRadarTracksConfirmed @13;
-    experimentalModeSwitched @14;
+    experimentalModeSwitchedDEPRECATED @14;
     wrongCarModeAlertOnly @15;
     pedalPressedAlertOnly @16;
     laneTurnLeft @17;
@@ -491,6 +494,14 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   bendTrimCorrection @6 :Float32;
   bendTrimWeight @7 :Float32;
   bendTrimOffset @8 :Float32;
+  # blendful (upstream #2073), renumbered after our fields (upstream has them at @3-@9)
+  blendfulCurvature @9 :Float32;
+  blendfulTrust @10 :Float32;
+  modelCurvature @11 :Float32;
+  blendfulGoingAround @12 :Bool;
+  blendfulLeftProb @13 :Float32;
+  blendfulRightProb @14 :Float32;
+  blendfulLaneWidth @15 :Float32;
 
   enum TurnDirection {
     none @0;
@@ -549,6 +560,19 @@ struct LateralTuneStateSP @0xcb9fd56c7057593a {
   laneCentreWallLeft @19 :Bool;
 }
 
+# upstream #2112; takes reserved struct 12's id because LateralTuneStateSP holds 11's
+struct GpsLocationSP @0x9ccdc8676701b412 {
+  latitude @0 :Float64;
+  longitude @1 :Float64;
+  speed @2 :Float32;
+  bearingDeg @3 :Float32;
+  horizontalAccuracy @4 :Float32;  # m
+  bearingAccuracyDeg @5 :Float32;
+  hasFix @6 :Bool;
+  gpsOK @7 :Bool;  # a raw fix arrived in the last 2 s
+  fused @8 :Bool;  # false while passing the raw fix through
+}
+
 # Ground-stationary radar points fitted to a line per side (walls, guardrails, stopped
 # cars), sunnypilot/selfdrive/controls/lib/radar_walls.py; published by radard. Model frame:
 # x forward from the camera, y positive RIGHT; y(x) = y + slope*x + curvature*x^2/2. A wall
@@ -565,9 +589,6 @@ struct RadarWallsSP @0xc2243c65e0340384 {
     residual @4 :Float32;
     points @5 :UInt8;
   }
-}
-
-struct CustomReserved12 @0x9ccdc8676701b412 {
 }
 
 struct CustomReserved13 @0xcd96dafb67a082d0 {

@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 from collections.abc import Callable
+from functools import partial
 import gc
 import os
 os.environ['GMMU'] = '0'
@@ -39,6 +40,7 @@ from openpilot.selfdrive.modeld.modeld import ChestnutGpuState
 
 from openpilot.sunnypilot.modeld_v2.fill_model_msg import fill_model_msg, fill_pose_msg, PublishState, get_curvature_from_output
 from openpilot.sunnypilot.modeld_v2.parse_model_outputs import Parser
+from openpilot.sunnypilot.modeld_v2.blendful import Blendful
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
 from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper, LaneCentreCameraOffset, LANE_CENTRE_STALE_S
@@ -266,7 +268,8 @@ class ModelState(ModelStateBase):
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                             lat_action_t: float, long_action_t: float, v_ego: float,
                             yaw_rate_measured: float | None = None, trim_active: bool = False,
-                            camera_offset: float = 0.0) -> log.ModelDataV2.Action:
+                            camera_offset: float = 0.0,
+                            blendful: Callable[[float], float] | None = None) -> log.ModelDataV2.Action:
     if 'action' not in model_output:
       plan = model_output['plan'][0]
       desired_accel = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0], self.constants.T_IDXS,
@@ -282,15 +285,17 @@ class ModelState(ModelStateBase):
       lat_accel = crawl_deadband(float(model_output['action'][0, 0]), v_ego, self.CRAWL_LAT_DEADBAND)
       if self.split_path is not None:
         lat_accel = self.split_path.update(lat_accel, yaw_rate_measured, v_ego, self.SPLIT_PATH_HZ, self.SPLIT_PATH_LOW_HZ)
-      desired_curvature = lat_accel / (max(1.0, v_ego))**2
+      desired_curvature = lat_accel / (max(2.5, v_ego))**2
 
     if 'lane_lines' in model_output and 'lane_lines_prob' in model_output:
-      v2 = (max(1.0, v_ego))**2
+      v2 = (max(2.5, v_ego))**2
       lines, probs = model_output['lane_lines'][0], model_output['lane_lines_prob'][0, 1::2]
       self.bend_trim.update(float(desired_curvature) * v2, self.constants.X_IDXS, lines[1, :, 0], lines[2, :, 0],
                             float(probs[1]), float(probs[2]), yaw_rate_measured, v_ego, self.BEND_TRIM_GAIN, trim_active, camera_offset,
                             self.BEND_TRIM_DROPOUT)
       desired_curvature += self.bend_trim.correction / v2  # 0.0 while off: the request stays bit-identical
+    if blendful is not None:
+      desired_curvature += blendful(desired_curvature)
 
     stop = v_ego < 0.3 and desired_accel < 0.1
     desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
@@ -423,6 +428,8 @@ def main(demo=False):
   DH = DesireHelper()
   meta_constants = load_meta_constants()
   RELC = RoadEdgeLaneChangeController()
+  blendful = Blendful()
+  blendful_enabled = False
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -506,6 +513,7 @@ def main(demo=False):
         trim_dropout = 0.0
       model.BEND_TRIM_DROPOUT = bool(np.isfinite(trim_dropout) and trim_dropout >= 0.5)
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
+      blendful_enabled = params.get_bool("Blendful")
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["lateralTuneStateSP"]:
       lane_centre_seen_t = time.monotonic()
@@ -594,8 +602,10 @@ def main(demo=False):
                            and dm.angularVelocityDevice.valid else None)
       trim_active = (sm['carControl'].latActive and DH.lane_change_state == log.LaneChangeState.off
                      and not (sm['carState'].leftBlinker or sm['carState'].rightBlinker))
+      blendful_active = desire == log.Desire.none and DH.lane_change_state == log.LaneChangeState.off
       action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego, yaw_rate_measured, trim_active,
-                                           float(camera_offset_helper.applied_offset))
+                                           float(camera_offset_helper.applied_offset),
+                                           blendful=partial(blendful.update, model_output, v_ego, blendful_active, enabled=blendful_enabled))
       prev_action = action
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
@@ -619,6 +629,13 @@ def main(demo=False):
       mdv2sp_send.modelDataV2SP.bendTrimCorrection = float(model.bend_trim.correction)
       mdv2sp_send.modelDataV2SP.bendTrimWeight = float(model.bend_trim.weight)
       mdv2sp_send.modelDataV2SP.bendTrimOffset = float(model.bend_trim.offset or 0.0)
+      mdv2sp_send.modelDataV2SP.blendfulCurvature = blendful.curvature
+      mdv2sp_send.modelDataV2SP.blendfulTrust = float(blendful.trust)
+      mdv2sp_send.modelDataV2SP.modelCurvature = float(blendful.model_curvature)
+      mdv2sp_send.modelDataV2SP.blendfulGoingAround = bool(blendful.going_around)
+      mdv2sp_send.modelDataV2SP.blendfulLeftProb = blendful.l_prob
+      mdv2sp_send.modelDataV2SP.blendfulRightProb = blendful.r_prob
+      mdv2sp_send.modelDataV2SP.blendfulLaneWidth = float(blendful.lane_width.x)
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state
       drivingdata_send.drivingModelData.meta.laneChangeDirection = DH.lane_change_direction
 
