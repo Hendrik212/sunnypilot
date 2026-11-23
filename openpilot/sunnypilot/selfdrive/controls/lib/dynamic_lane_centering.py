@@ -139,6 +139,21 @@ positions replay the driver's hands (94% of the time), aimed at the old behaviou
 decide it: mode 0 (the old window) is the default until a drive compares them.
 Not addressed: the driver holding the car to one side moves the plan with it, and the window, so
 the offset follows the hand (driver_override is not used in camera mode).
+Route 28f (2026-11-23, highway, offset 0.15 back on): the offset moved 0.55 m/min above 80 km/h
+(0.08 on 28e), all of it the guard (right line in gentle bends 33 %, median wall 25 %, narrow 24 %),
+and the wheel swung 1.4-2.8 deg in those windows (0.5 deg otherwise). Closed-loop replay (opsim
+lc/sim6.py, logged offset reproduced to 4 mm):
+- in a construction zone with yellow lines and a barrier on the left the wall-line middle, integrated
+  against a plan that kept pointing 0.2-0.3 m right, ran the offset to -0.65 m toward the barrier and
+  then +0.48 m, the driver steering against both. The middle is now clipped into the lane-centre
+  window (lines and walls with their margins); clearance from the line opposite stays the guard's
+  job. Zone offset p5 -0.43 -> -0.17 m; route 272 (A560 zone) and the country routes unchanged.
+- right after a lane change the new lane's plan is still swinging in and the freshly reset bounds
+  clamped on it (4 of the 20 largest moves): for LC_SETTLE a line or road-edge bound only acts when
+  the plan is SETTLE_URGENT inside its margin. Offset-follow accel -7 %, no clearance cost.
+Slower guard moves, longer bound holds and lane-centre bounds on the highway took another ~20 % off
+but let the body 7 cm nearer the right line (p1): not done. The rest is the guard reading a plan
+that cuts bends and follows a shift late.
 
 Each side's slack becomes a bound on the offset (hi = offset_used + right slack, lo =
 offset_used - left slack). A bound tightens at once, holds BOUND_RELAX_HOLD, then relaxes over
@@ -208,6 +223,8 @@ GUARD_RELEASE_RATE = 0.2  # m/s
 BOUND_RELAX_HOLD = 1.0  # s a tightened bound holds before it relaxes
 BOUND_RELAX_TAU = 3.0  # s, then it relaxes over this (it tightens at once)
 FAST_SLACK = 0.05  # m inside a margin before the offset moves at GUARD_RELEASE_RATE
+LC_SETTLE = 4.0  # s after a lane change a line or road-edge bound only acts when urgent (route 28f)
+SETTLE_URGENT = 0.15  # m inside the margin: urgent
 BOUND_HOLD = 2.0  # s a side keeps its bound after its boundary was last seen
 WALL_HOLD = 3.0  # s a near wall keeps its bound and the offset frozen after it was last seen
 MID_TAU = 3.0  # s low-pass on the middle target between walls (route 272: raw it swung 0.33 m in 0.5 s)
@@ -558,6 +575,7 @@ class ClearanceGuard:
     self.single = False  # single-lane road: the left side has the narrow-lane priority
     self.oncoming = False  # below ONCOMING_SPEED in a RIGHT/SINGLE lane: the left side is oncoming traffic
     self.blindspot = (False, False)  # (right, left) car seen by the blind-spot monitor
+    self.settling = False  # within LC_SETTLE of a lane change
 
   @property
   def hi(self) -> float | None:
@@ -636,6 +654,12 @@ class ClearanceGuard:
     inside = self.mid is not None or any(t < WALL_HOLD for t in self._inside_t)
     cap = self.inside_cap if inside else WALL_CAP if any(near) else OFFSET_CAP
     hi, lo = self.hi, self.lo
+    if self.settling:  # the new lane's plan is still swinging in: lines and edges only when urgent
+      line_edge = (LimitCause.RIGHT_LINE, LimitCause.LEFT_LINE, LimitCause.RIGHT_EDGE, LimitCause.LEFT_EDGE)
+      if self._causes[0] in line_edge and (self.slack.right is None or self.slack.right > -SETTLE_URGENT):
+        hi = None
+      if self._causes[1] in line_edge and (self.slack.left is None or self.slack.left > -SETTLE_URGENT):
+        lo = None
     # oncoming traffic on the left (no wall there): a guardrail on the right does not take the
     # priority or the no-shift rule (route 275: it pushed the car onto the centre line); an empty
     # window is split evenly (routes 278-27a: left first put the body over the right line)
@@ -724,6 +748,7 @@ class DynamicLaneCentering:
     self.half_width = DEFAULT_CAR_WIDTH / 2
     self.limited = False
     self.limit_cause = LimitCause.NONE
+    self._since_lane_change = LC_SETTLE
 
   @property
   def position(self) -> LanePosition:
@@ -770,6 +795,7 @@ class DynamicLaneCentering:
     self.limit_cause = LimitCause.NONE
     self.lane_width = None
     self._no_lines_time = 0.0
+    self._since_lane_change = LC_SETTLE
 
   def _update_width(self, model_v2) -> None:
     """Per NEW modelV2 frame: low-pass the inner lane width (both inner lines confident; held
@@ -852,6 +878,7 @@ class DynamicLaneCentering:
           lane_change = False
         if lane_change:  # the lines are about to belong to another lane: start over there
           self.guard.reset()
+          self._since_lane_change = 0.0
         else:
           cam = applied_camera_offset if applied_camera_offset is not None else self.camera_offset
           multi_lane = pos in (LanePosition.MIDDLE, LanePosition.LEFT)
@@ -859,12 +886,17 @@ class DynamicLaneCentering:
           left_margin = self.oncoming_margin if self.oncoming and not self.guard.near[1] else None
           self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin,
                                           multi_lane, left_margin, not self.oncoming), -cam)
+      self._since_lane_change = min(self._since_lane_change + DT_CTRL, LC_SETTLE)
+      self.guard.settling = self._since_lane_change < LC_SETTLE
       self.guard.single = pos == LanePosition.SINGLE
       self.guard.oncoming = self.oncoming
       self.guard.blindspot = (bool(blindspot[1]), bool(blindspot[0]))
       self.guard.update()
       if self.guard.mid is not None:
-        nominal = self.guard.mid
+        # the middle is integrated against the plan; it stays inside the window the lane centre
+        # leaves (lines and walls with their margins) -- route 28f ran it to -0.65 m toward a barrier
+        lane = self.guard.lane_window
+        nominal = self.guard.mid if lane is None or lane[0] > lane[1] else float(np.clip(self.guard.mid, lane[0], lane[1]))
       self.offset_target, cause = self.guard.apply(nominal)
       self.limited = abs(self.offset_target - nominal) > CAMERA_STATUS_SETTLED
       self.limit_cause = cause if self.limited else LimitCause.NONE

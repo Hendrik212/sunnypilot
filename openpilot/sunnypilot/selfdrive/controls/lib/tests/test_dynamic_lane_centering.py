@@ -362,6 +362,22 @@ def test_guard_opens_on_lane_change():
   assert d.guard.hi is None
 
 
+def test_guard_settles_after_a_lane_change():
+  # the new lane's plan rides 0.09 m inside the right margin: no limit for LC_SETTLE, then the usual cut
+  d = _dyn(LaneCenterOffset=0.0, LaneCenteringOffsetMode=1)
+  _cam_run(d, _model(lane_right=False, lane_change=2), 0.1)
+  _cam_run(d, _model(lane_right=False, model_y=0.65), dlc.LC_SETTLE - 0.5)
+  assert d.offset == 0.0 and not d.limited
+  _cam_run(d, _model(lane_right=False, model_y=0.65), 3.0)
+  assert d.limited and d.offset < -0.05
+  # urgent (0.19 m inside): the guard acts at once, also while settling, until the plan is back at SETTLE_URGENT
+  d = _dyn(LaneCenterOffset=0.0, LaneCenteringOffsetMode=1)
+  _cam_run(d, _model(lane_right=False, lane_change=2), 0.1)
+  _cam_run(d, _model(lane_right=False, model_y=0.75), 1.0)
+  assert d.guard.settling and d.offset < -0.03
+  assert d.guard.slack.right == pytest.approx(-dlc.SETTLE_URGENT, abs=0.02)
+
+
 def _pinched(g, right, left, single=False, oncoming=False, blindspot=(False, False), n=50, **kw):
   g.single, g.oncoming, g.blindspot = single, oncoming, blindspot
   for _ in range(n):
@@ -618,7 +634,9 @@ def test_a_flickering_wall_does_not_swing_the_middle():
 def test_a_wall_and_the_line_opposite_the_target_is_their_middle(follow):
   # route 266 back: wall 1.0 m from the body, the model rides 0.2 m right of its centre and 0.15 m
   # from the right line; the middle between the wall and that line is 0.39 m further left. The
-  # plan follows only `follow` of a shift, so the offset keeps going until the plan is there
+  # plan follows only `follow` of a shift, so the offset keeps going until the plan is there --
+  # but only inside the lane-centre window (route 28f: up to -0.65 m toward a barrier, the driver
+  # steering away). Margin 0 here: the window's left end (the left line) is the limit
   d = _dyn(LaneCenterOffset=0.2, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0, LaneCenteringMinClearance=0.0,
            LaneCenteringWallClearance=0.3)
   wall = (Wall(y=-1.94, slope=0.0, curvature=0.0, residual=0.02, points=12), None)
@@ -630,8 +648,27 @@ def test_a_wall_and_the_line_opposite_the_target_is_their_middle(follow):
     if upd:
       cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)
     d.update(0.0, _narrow_model(cam, follow, left=-1.6, right=1.09), upd, True, V, True, False, False, cam, wall)
-  assert follow * d.offset == pytest.approx(-0.425, abs=0.01)  # the plan, real frame
+  # window's left end from the lane centre (-0.255): the left line 1.345 - 0.94 = 0.405 (the wall 1.685 - 0.94 - 0.3 = 0.445)
+  assert d.offset == pytest.approx(max(-0.425 / follow, -0.405), abs=0.01)
   assert d.limit_cause != dlc.LimitCause.WALL_NO_SHIFT_LEFT
+
+
+@pytest.mark.parametrize("follow", [1.0, 0.5])
+def test_the_wall_line_middle_leaves_the_line_clearance_to_the_guard(follow):
+  # route 266 back with the line margin in use: the plan 0.15 m from the right line is 0.1 m inside a
+  # 0.25 m margin; the guard moves the plan off the line (also past the window), the wall keeps 0.3 m
+  d = _dyn(LaneCenterOffset=0.2, LaneCenteringOffsetMode=1, LaneCenteringSwitchDist=0.0, LaneCenteringMinClearance=0.25,
+           LaneCenteringWallClearance=0.3)
+  wall = (Wall(y=-1.94, slope=0.0, curvature=0.0, residual=0.02, points=12), None)
+  cam = 0.0
+  for i in range(int(round(40.0 / DT_CTRL))):
+    upd = i % 5 == 0
+    if upd:
+      cam = max(min(d.camera_offset, cam + 0.1 * DT_MDL), cam - 0.1 * DT_MDL)
+    d.update(0.0, _narrow_model(cam, follow, left=-1.6, right=1.09), upd, True, V, True, False, False, cam, wall)
+  plan = follow * d.offset  # real frame, relative to where the model rode
+  assert 1.09 - 0.94 - plan >= 0.25 - 0.02  # right line clear by the margin
+  assert 1.94 - 0.94 + plan >= 0.3 - 0.02  # and the wall by its clearance
 
 
 def test_the_wall_line_middle_keeps_the_wall_clearance():
@@ -735,7 +772,9 @@ def test_wall_margin_keeps_distance(follow):
     d.update(0.0, _narrow_model(cam, follow, left=-1.75, right=1.75), upd, True, V, True, False, False, cam, (wall, None))
   track = -follow * cam
   assert track + 1.3 - 0.94 == pytest.approx(0.6, abs=0.03)  # pushed right until the wall margin holds
-  assert d.limit_cause == dlc.LimitCause.LEFT_WALL
+  # the wall-line middle is clipped into the lane window (wall margin included) before the guard, so the
+  # guard may have nothing left to limit
+  assert d.limit_cause in (dlc.LimitCause.LEFT_WALL, dlc.LimitCause.NONE)
 
 
 def _zone_model(cam=0.0, follow=0.45, plan=-0.10, lane_left=-1.15, lane_right=1.55, edge_left=-1.9):
