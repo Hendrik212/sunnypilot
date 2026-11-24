@@ -109,6 +109,12 @@ void can_send_thread(Panda *panda, bool fake_send) {
 // nothing is transmitted, and append every received frame on all buses to /data/can_listen/<local time>.csv
 // (mono_ns,wall_ns,bus,address,data). Timestamps are per USB batch (pandad reads at 100 Hz). CanWake requests are
 // refused while it runs (they transmit UDS). Ends early if the car starts; CanListenLast = "<path> <frames>".
+//
+// Charge listen (2026-11-24): while CanChargeListen is set (mqttd: parked and charging) the same receive-only window
+// stays open with no recording and no end time, so the BMS/OBC frames on the ECAN reach mqttd for the whole charge.
+// In power save the panda masks the bus-1 receive interrupt (power_saving.h), so a charging car was only seen by
+// accident after a panda boot (harness re-init re-enables the IRQ without re-applying power save) until the first
+// power-save toggle. Ends when the param is cleared or the car starts.
 class CanListen {
 public:
   bool active() const { return active_; }
@@ -119,11 +125,23 @@ public:
         stop(panda, "car started");
       } else if (nanos_since_boot() >= end_ns_) {
         stop(panda, "done");
+      } else if (charge_ && frame % 100 == 0 && !params_.getBool("CanChargeListen")) {
+        stop(panda, "charge listen cleared");
       }
       return active_;
     }
     if (frame % 100 != 0) {
       return false;
+    }
+    if (!is_onroad && !ignition && params_.getBool("CanChargeListen")) {
+      panda->set_safety_model(cereal::CarParams::SafetyModel::NO_OUTPUT);
+      panda->set_power_saving(false);
+      active_ = true;
+      charge_ = true;
+      frames_ = 0;
+      end_ns_ = UINT64_MAX;
+      LOGW("can listen: charge listen start");
+      return true;
     }
     const std::string req = params_.get("CanListenRequest");
     if (req.empty()) {
@@ -196,12 +214,18 @@ private:
     }
     panda->set_safety_model(cereal::CarParams::SafetyModel::NO_OUTPUT);
     panda->set_power_saving(true);
+    if (charge_) {
+      charge_ = false;
+      LOGW("can listen: charge listen %s", why);
+      return;
+    }
     params_.put("CanListenLast", path_ + " " + std::to_string(frames_));
     LOGW("can listen: %s, %" PRIu64 " frames -> %s", why, frames_, path_.c_str());
   }
 
   Params params_;
   bool active_ = false;
+  bool charge_ = false;  // charge listen: no file, no end time
   FILE *file_ = nullptr;
   std::string path_;
   uint64_t frames_ = 0;

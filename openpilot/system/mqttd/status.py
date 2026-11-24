@@ -39,10 +39,11 @@ def listen_seconds(payload) -> int:
   return min(max(secs, CAN_LISTEN_RANGE_S[0]), CAN_LISTEN_RANGE_S[1])
 
 
-def should_probe_cable(mqtt_connected, onroad, connector_connected, car_voltage, last_probe, now):
+def should_probe_cable(mqtt_connected, onroad, connector_connected, car_voltage, last_probe, now, charge_listen=False):
   """Wake the parked car to read the plug state: only with the broker reachable (car at home), offroad, when the
-  cable is not known to be plugged in (unplugged, or unknown after a reboot), at most hourly, on a healthy 12 V."""
-  return (mqtt_connected and not onroad and connector_connected is not True and car_voltage is not None
+  cable is not known to be plugged in (unplugged, or unknown after a reboot), at most hourly, on a healthy 12 V.
+  Never during a charge listen: the wake transmits and pandad refuses it then anyway."""
+  return (mqtt_connected and not onroad and not charge_listen and connector_connected is not True and car_voltage is not None
           and car_voltage >= CABLE_PROBE_MIN_VOLTAGE and now - last_probe >= CABLE_PROBE_INTERVAL_S)
 
 
@@ -74,6 +75,33 @@ class ChargeFrom12V:
       self.above_since = None
       if car_voltage_filtered < CHARGE_12V_OFF:
         self.active = False
+    return self.active
+
+
+class ChargeListen:
+  """Whether pandad should hold a receive-only CAN window open (CanChargeListen, see CanListen in pandad.cc): parked and
+  charging. Charging = the 12 V rail held up by the DC-DC converter (same thresholds as ChargeFrom12V, but independent
+  of the live frames this window brings, else it would switch itself off), or live frames saying the cable is plugged
+  in (keeps it through a charge at a lower DC-DC voltage). A stale plugged state from a sleeping car does not count."""
+  def __init__(self):
+    self.active = False
+    self.v_charging = False
+    self.above_since = None
+
+  def update(self, now, offroad, awake, connector_connected, car_voltage_filtered):
+    if not offroad:
+      self.active, self.v_charging, self.above_since = False, False, None
+      return False
+    if car_voltage_filtered is not None and car_voltage_filtered >= CHARGE_12V_ON:
+      if self.above_since is None:
+        self.above_since = now
+      if now - self.above_since >= CHARGE_12V_HOLD_S:
+        self.v_charging = True
+    else:
+      self.above_since = None
+      if car_voltage_filtered is None or car_voltage_filtered < CHARGE_12V_OFF:
+        self.v_charging = False
+    self.active = self.v_charging or (awake and connector_connected is True)
     return self.active
 
 
@@ -383,6 +411,8 @@ def status_thread():
   params = Params()
   car_cache = CarStatusCache(params)
   charge_12v = ChargeFrom12V()
+  charge_listen = ChargeListen()
+  charge_listen_prev = None
   last_probe = -CABLE_PROBE_INTERVAL_S  # first probe as soon as the conditions hold
   car_voltage_instant = None
   car_voltage_filtered = None
@@ -462,8 +492,14 @@ def status_thread():
       location_prev = location if location else location_prev
 
       onroad = device_prev is not None and device_prev.deviceState.started
+      listen_on = charge_listen.update(cur_time, not onroad, car_cache.awake(cur_time), mqtt.connector_connected_out,
+                                       car_voltage_filtered)
+      if listen_on != charge_listen_prev:
+        print(f"[MQTT] charge listen {'on' if listen_on else 'off'}", flush=True)
+        params.put_bool("CanChargeListen", listen_on)
+        charge_listen_prev = listen_on
       if should_probe_cable(params.get_bool("MqttConnected"), onroad, mqtt.connector_connected_out, car_voltage_filtered,
-                            last_probe, cur_time):
+                            last_probe, cur_time, listen_on):
         print("[MQTT] cable state not known plugged in, requesting a CAN wake", flush=True)
         params.put_bool("CanWakeRequest", True)
         last_probe = cur_time
@@ -490,6 +526,7 @@ def status_thread():
                  "charging_status": (mqtt.charging_status_out if awake and mqtt.charging_status_out != "unknown" else
                                      ("active" if charging_inferred else "idle")),
                  "charging_inferred": charging_inferred,
+                 "charge_listen": listen_on,
                  "connector_connected": mqtt.connector_connected_out,
                  "charge_limit_ac": car_cache.get(mqtt, "charge_limit_ac_out"),
                  "charge_limit_dc": car_cache.get(mqtt, "charge_limit_dc_out"),

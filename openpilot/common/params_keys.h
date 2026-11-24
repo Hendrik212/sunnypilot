@@ -20,6 +20,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CameraDebugExpGain", {CLEAR_ON_MANAGER_START, STRING}},
     {"CanWakeRequest", {CLEAR_ON_MANAGER_START, BOOL}},
     {"CanListenRequest", {CLEAR_ON_MANAGER_START, INT}},
+    {"CanChargeListen", {CLEAR_ON_MANAGER_START, BOOL}},
     {"CanListenLast", {PERSISTENT, STRING}},
     {"CameraDebugExpTime", {CLEAR_ON_MANAGER_START, STRING}},
     {"CarBatteryCapacity", {PERSISTENT, INT}},
