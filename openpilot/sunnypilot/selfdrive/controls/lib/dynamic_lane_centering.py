@@ -4,7 +4,7 @@ lane offset chosen by which lane the car is in.
 
   RIGHT / SINGLE lane -> +offset (right of the lane centre)
   MIDDLE lane         -> -LaneCenteringMiddleBias (left of the centre, cancels the model's right bias)
-  LEFT lane           -> -offset (left of the lane centre)
+  LEFT lane           -> -LaneCenterOffsetLeft, or -offset while it is negative (left of the lane centre)
   UNKNOWN             ->  0
 
 Lane position comes from the model's OUTER lane lines and road edges, per side:
@@ -182,7 +182,8 @@ A near wall holds the offset toward it at 0 (moving away stays allowed) for WALL
 was last seen; the hold and the rate-limited ramp keep a flickering wall from stepping the
 target (route 23b, 36:56-37:41 stepped 0.25 <-> 0 every 1-2 s with no hold and no line filter).
 
-Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenteringOffsetMode, LaneCenterOffset, LaneCenteringGain,
+Params (all live, PARAMS_UPDATE_PERIOD): LaneCentering, LaneCenteringOffsetMode, LaneCenterOffset, LaneCenterOffsetLeft,
+LaneCenteringGain,
 LaneCenteringPauseOnSignal, LaneCenteringSmoothTau, LaneCenteringDeadband, LaneCenteringDwell,
 LaneCenteringSwitchDist, LaneCenteringE2EAuthority,
 LaneCenteringReleaseHold, LaneCenteringReleaseTau, LaneCenteringReleaseJerk,
@@ -252,6 +253,11 @@ CAMERA_STATUS_SETTLED = 0.01  # m between applied and target offset
 CAMERA_STATUS_CENTRED = 0.02  # m
 
 DEFAULT_OFFSET = 0.15
+# LEFT lane offset magnitude; negative = use LaneCenterOffset. Routes 28f/296 (Nov 22/24, offset 0.15): the
+# model gives back most of a left camera shift (model-frame position ~0 cm, real -14/-16 cm, 70-72 cm wheel
+# to left line) while it keeps the right one (real +26/+29 cm, 53-55 cm to the right line).
+DEFAULT_OFFSET_LEFT = -1.0
+OFFSET_LEFT_MAX = 0.40
 # The RIGHT/SINGLE lane offset fades out in narrow lanes: routes 289-28b (Nov 21),
 # country lanes ~2.5 m wide leave the 1.88 m car ~0.31 m per side when centred, and the +0.15 m right
 # offset put it on the right line in most of the 41 driver corrections.
@@ -725,6 +731,7 @@ class DynamicLaneCentering:
   def __init__(self):
     self.enabled = False
     self.offset_mag = DEFAULT_OFFSET
+    self.offset_mag_left: float | None = None  # None = offset_mag
     self.middle_bias = DEFAULT_MIDDLE_BIAS
     self.pause_on_signal = True
     self.e2e_authority = 1.0
@@ -767,6 +774,8 @@ class DynamicLaneCentering:
     except (TypeError, ValueError):
       self.mode = OffsetMode.CAMERA
     self.offset_mag = _get_float(params, "LaneCenterOffset", DEFAULT_OFFSET, 0.0, 0.3)
+    left = _get_float(params, "LaneCenterOffsetLeft", DEFAULT_OFFSET_LEFT, DEFAULT_OFFSET_LEFT, OFFSET_LEFT_MAX)
+    self.offset_mag_left = left if left >= 0.0 else None
     self.middle_bias = _get_float(params, "LaneCenteringMiddleBias", DEFAULT_MIDDLE_BIAS, -0.2, 0.2)
     self.pause_on_signal = params.get_bool("LaneCenteringPauseOnSignal")
     self.e2e_authority = _get_float(params, "LaneCenteringE2EAuthority", 1.0, 0.0, 1.0)
@@ -860,7 +869,10 @@ class DynamicLaneCentering:
     if self.classifier.position == LanePosition.MIDDLE:
       nominal = -self.middle_bias
     else:
-      nominal = OFFSET_SIGN.get(self.classifier.position, 0.0) * self.offset_mag
+      mag = self.offset_mag
+      if self.classifier.position == LanePosition.LEFT and self.offset_mag_left is not None:
+        mag = self.offset_mag_left
+      nominal = OFFSET_SIGN.get(self.classifier.position, 0.0) * mag
       if self.classifier.position in (LanePosition.RIGHT, LanePosition.SINGLE):
         # country roads: no right offset in narrow lanes or blind (LEFT/MIDDLE: construction-zone tuning)
         nominal *= self.width_scale()

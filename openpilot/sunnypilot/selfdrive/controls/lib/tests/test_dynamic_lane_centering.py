@@ -140,6 +140,33 @@ def test_offset_target_by_lane(left, right, expected):
   assert d.offset == pytest.approx(expected)
 
 
+@pytest.mark.parametrize("mode", [0, 1])
+@pytest.mark.parametrize("left_mag,left_expected,right_expected", [
+  (None, -0.15, 0.15),    # unset: LaneCenterOffset both ways
+  (-1.0, -0.15, 0.15),    # sentinel: same
+  (0.25, -0.25, 0.15),    # left only
+  (0.0, 0.0, 0.15),       # left off, right kept
+])
+def test_left_lane_offset_has_its_own_magnitude(mode, left_mag, left_expected, right_expected):
+  # routes 28f/296: the model gives back most of a left shift, keeps the right one
+  kw = {} if left_mag is None else {"LaneCenterOffsetLeft": left_mag}
+  d = _dyn(LaneCenteringOffsetMode=mode, **kw)
+  _run(d, _model(lane_left=False, lane_right=True), 15.0)
+  assert d.position == LanePosition.LEFT and d.offset_target == pytest.approx(left_expected)
+  d = _dyn(LaneCenteringOffsetMode=mode, **kw)
+  _run(d, _model(lane_left=True, lane_right=False), 15.0)
+  assert d.position == LanePosition.RIGHT and d.offset_target == pytest.approx(right_expected)
+
+
+def test_left_lane_offset_leaves_middle_and_single_alone():
+  d = _dyn(LaneCenterOffsetLeft=0.3, LaneCenteringMiddleBias=0.1)
+  _run(d, _model(lane_left=True, lane_right=True), 10.0)
+  assert d.position == LanePosition.MIDDLE and d.offset_target == pytest.approx(-0.1)
+  d = _dyn(LaneCenterOffsetLeft=0.3)
+  _run(d, _model(lane_left=False, lane_right=False), 10.0)
+  assert d.position == LanePosition.SINGLE and d.offset_target == pytest.approx(0.15)
+
+
 @pytest.mark.parametrize("bias,expected", [(0.0, 0.0), (0.06, -0.06), (-0.05, 0.05), (1.0, -0.2)])
 def test_middle_lane_bias_is_left_of_the_centre(bias, expected):
   # route 25b: the model alone sits ~0.08 m right of the centre in the middle lane
@@ -219,6 +246,11 @@ def test_params_defaults_and_clipping():
   d = DynamicLaneCentering()
   d.get_params(_P(LaneCentering=True, LaneCenterOffset=1.0, LaneCenteringGain=None))
   assert d.offset_mag == 0.3
+  assert d.offset_mag_left is None
+  d.get_params(_P(LaneCentering=True, LaneCenterOffsetLeft=9.0))
+  assert d.offset_mag_left == dlc.OFFSET_LEFT_MAX
+  d.get_params(_P(LaneCentering=True, LaneCenterOffsetLeft=-5.0))
+  assert d.offset_mag_left is None
   assert d.controller.gain == 0.30
 
 
