@@ -11,7 +11,10 @@ opened; beside the pill the title and the steering delay setting, LagdToggleDela
 bottom up, the status line, an on/off button with a live
 readout from lateralTuneStateSP (lane position, applied offset, spare clearance per side,
 walls) and -/+ rows for LaneCenterOffset and LaneCenteringGain (trim mode) or
-LaneCenteringMinClearance (camera mode). The buttons only write Params -- controlsd picks
+LaneCenteringMinClearance (camera mode), and the traffic-jam row: a button cycling
+LaneCenteringJamMode (AUTO -> RIGHT -> LEFT -> OFF; RIGHT/LEFT force the side for the current jam,
+controlsd puts it back to AUTO when the jam ends) with -/+ for LaneCenteringJamClearance (body to
+the line on the shift side, negative = over it). The buttons only write Params -- controlsd picks
 them up on its next params read (PARAMS_UPDATE_PERIOD) -- and the readout comes from the
 published telemetry, so the panel shows what is actually applied.
 
@@ -50,8 +53,12 @@ ALERT_GAP = 20  # px kept clear above an alert
 OFFSET_KNOB = ("LaneCenterOffset", "Offset", 0.01, 0.0, 0.30, lambda v: f"{v * 100:.0f} cm")
 GAIN_KNOB = ("LaneCenteringGain", "Gain", 0.05, 0.0, 0.60, lambda v: f"{v:.2f}")
 MARGIN_KNOB = ("LaneCenteringMinClearance", "Margin", 0.05, 0.0, 0.60, lambda v: f"{v * 100:.0f} cm")
-ALL_KNOBS = (OFFSET_KNOB, GAIN_KNOB, MARGIN_KNOB)
+JAM_KNOB = ("LaneCenteringJamClearance", "Jam gap", 0.05, -0.30, 0.50, lambda v: f"{v * 100:+.0f} cm")
+ALL_KNOBS = (OFFSET_KNOB, GAIN_KNOB, MARGIN_KNOB, JAM_KNOB)
 N_KNOBS = 2
+JAM_NAMES = {0: "OFF", 1: "AUTO", 2: "RIGHT", 3: "LEFT"}
+JAM_NEXT = {1: 2, 2: 3, 3: 0, 0: 1}
+JAM_BTN_W = 220
 
 BG = rl.Color(0, 0, 0, 180)
 BTN_BG = rl.Color(255, 255, 255, 40)
@@ -75,11 +82,13 @@ STATUS = {
   St.HOLD_LEFT: ("HOLDING LEFT", GREEN),
   St.HOLD_RIGHT: ("HOLDING RIGHT", GREEN),
   St.LIMITED: ("LIMITED", AMBER),
+  St.JAM_LEFT: ("< JAM LEFT", GREEN),
+  St.JAM_RIGHT: ("JAM RIGHT >", GREEN),
 }
-ARROW_LEFT = (St.NUDGE_LEFT, St.SHIFT_LEFT)
-ARROW_RIGHT = (St.NUDGE_RIGHT, St.SHIFT_RIGHT)
+ARROW_LEFT = (St.NUDGE_LEFT, St.SHIFT_LEFT, St.JAM_LEFT)
+ARROW_RIGHT = (St.NUDGE_RIGHT, St.SHIFT_RIGHT, St.JAM_RIGHT)
 # camera offset mode: no curvature trim, the right-hand readout shows the offset instead
-CAMERA_MODE = (St.SHIFT_LEFT, St.SHIFT_RIGHT, St.HOLD_LEFT, St.HOLD_RIGHT, St.LIMITED)
+CAMERA_MODE = (St.SHIFT_LEFT, St.SHIFT_RIGHT, St.HOLD_LEFT, St.HOLD_RIGHT, St.LIMITED, St.JAM_LEFT, St.JAM_RIGHT)
 
 BOUNDARY = {Lc.RIGHT_LINE: ("RIGHT LINE", 1), Lc.LEFT_LINE: ("LEFT LINE", -1),
             Lc.RIGHT_EDGE: ("RIGHT ROAD EDGE", 1), Lc.LEFT_EDGE: ("LEFT ROAD EDGE", -1),
@@ -91,7 +100,7 @@ def describe(status: St, cause: int, offset: float, walls: tuple[bool, bool] = (
   walls: (left, right) radar wall seen."""
   if status != St.LIMITED:
     name, color = STATUS[status]
-    if status in (St.SHIFT_LEFT, St.SHIFT_RIGHT, St.HOLD_LEFT, St.HOLD_RIGHT):
+    if status in (St.SHIFT_LEFT, St.SHIFT_RIGHT, St.HOLD_LEFT, St.HOLD_RIGHT, St.JAM_LEFT, St.JAM_RIGHT):
       name += f"  {abs(offset) * 100:.0f} cm"
     return name, color
   try:
@@ -108,6 +117,10 @@ def describe(status: St, cause: int, offset: float, walls: tuple[bool, bool] = (
     return "RADAR WALL RIGHT: NO SHIFT", AMBER
   if cause == Lc.WALL_NO_SHIFT_LEFT:
     return "RADAR WALL LEFT: NO SHIFT", AMBER
+  if cause == Lc.BLINDSPOT_RIGHT:
+    return "JAM: CAR IN RIGHT BLIND SPOT", AMBER
+  if cause == Lc.BLINDSPOT_LEFT:
+    return "JAM: CAR IN LEFT BLIND SPOT", AMBER
   if cause == Lc.NARROW:
     # route 272: "NARROW LANE" read as doing nothing while the shift was 0.9 m away from the wall
     if abs(offset) < 0.02:
@@ -129,6 +142,8 @@ class LaneCenteringPanel(Widget):
     self._enabled = False
     self._camera_mode = True
     self._values = {k[0]: k[3] for k in ALL_KNOBS}
+    self._values[JAM_KNOB[0]] = -0.10
+    self._jam_mode = 1
     self._delay: float | None = None
     self._last_refresh = 0.0
     self._hit: dict[str, rl.Rectangle] = {}
@@ -149,6 +164,12 @@ class LaneCenteringPanel(Widget):
         self._values[key] = min(max(float(self._params.get(key, return_default=True)), lo), hi)
       except (TypeError, ValueError):
         pass
+    try:
+      self._jam_mode = int(self._params.get("LaneCenteringJamMode", return_default=True))
+    except (TypeError, ValueError):
+      self._jam_mode = 1
+    if self._jam_mode not in JAM_NAMES:
+      self._jam_mode = 1
     try:
       self._delay = float(self._params.get("LagdToggleDelay", return_default=True))
     except (TypeError, ValueError):
@@ -201,7 +222,7 @@ class LaneCenteringPanel(Widget):
         strip_w += measure_text_cached(self._font_bold, tag, STRIP_FONT).x + PAD
       w = PILL_W + STRIP_GAP + strip_w
       return rl.Rectangle(right - w, bottom - PILL_H, w, PILL_H)
-    height = PAD + (N_KNOBS + 3) * ROW_H + PILL_H
+    height = PAD + (N_KNOBS + 4) * ROW_H + PILL_H
     return rl.Rectangle(right - PANEL_W, bottom - height, PANEL_W, height)
 
   def _handle_mouse_release(self, pos) -> None:
@@ -221,7 +242,11 @@ class LaneCenteringPanel(Widget):
       self._enabled = not self._enabled
       self._params.put_bool("LaneCentering", self._enabled)
       return
-    for key, _, step, lo, hi, _ in self._knobs:
+    if name == "jam":
+      self._jam_mode = JAM_NEXT[self._jam_mode]
+      self._params.put("LaneCenteringJamMode", self._jam_mode)
+      return
+    for key, _, step, lo, hi, _ in self._knobs + (JAM_KNOB,):
       if name in (key + "-", key + "+"):
         v = self._values[key] + (step if name.endswith("+") else -step)
         v = round(min(max(v, lo), hi), 3)
@@ -338,3 +363,20 @@ class LaneCenteringPanel(Widget):
       mid = minus.x + BTN_W + (plus.x - minus.x - BTN_W - sz.x) / 2
       rl.draw_text_ex(self._font_bold, val, rl.Vector2(mid, y + (BTN_H - sz.y) / 2), 44, 0, WHITE)
       y += ROW_H
+    self._render_jam(rect, x0, y)
+
+  def _render_jam(self, rect: rl.Rectangle, x0: float, y: float) -> None:
+    """Traffic-jam row: side button (cycles) and the clearance to the line on that side."""
+    mode = self._jam_mode
+    bg = OFF_BG if mode == 0 else ON_BG if mode == 1 else rl.Color(0xC0, 0x78, 0x10, 230)
+    self._button("jam", rl.Rectangle(x0, y, JAM_BTN_W, BTN_H), f"JAM {JAM_NAMES[mode]}", bg, 44)
+    key, _, _, _, _, fmt = JAM_KNOB
+    w = BTN_W - 34
+    minus = rl.Rectangle(x0 + JAM_BTN_W + 16, y, w, BTN_H)
+    plus = rl.Rectangle(rect.x + rect.width - PAD - w, y, w, BTN_H)
+    self._button(key + "-", minus, "-", BTN_BG)
+    self._button(key + "+", plus, "+", BTN_BG)
+    val = fmt(self._values[key])
+    sz = measure_text_cached(self._font_bold, val, 36)
+    mid = minus.x + w + (plus.x - minus.x - w - sz.x) / 2
+    rl.draw_text_ex(self._font_bold, val, rl.Vector2(mid, y + (BTN_H - sz.y) / 2), 36, 0, WHITE)

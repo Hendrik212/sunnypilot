@@ -268,6 +268,20 @@ NO_LINES_HOLD = 1.0  # s with neither inner line seen before the offset target f
 DEFAULT_DWELL = 3.0
 DEFAULT_SWITCH_DIST = 400.0
 
+# Traffic-jam / emergency-corridor (Rettungsgasse) mode (LaneCenteringJamMode, live; JamShift below)
+JAM_ON_SPEED = 30 / 3.6  # m/s: on below this
+JAM_OFF_SPEED = 40 / 3.6  # m/s: off above this ...
+JAM_OFF_HOLD = 3.0  # s ... held this long
+JAM_RECENT_SPEED = 90 / 3.6  # m/s: AUTO only after driving at least this fast ...
+JAM_RECENT_S = 600.0  # s ... within this long (keeps it out of town traffic)
+JAM_CAP = 1.0  # m, offset cap in the mode (modeld: LANE_CENTRE_MAX_OFFSET)
+LEGACY_CAMERA_CAP = 0.50  # m, camera offset cap outside the mode (modeld's cap before the mode)
+JAM_EDGE_MARGIN = 0.15  # m, car body to the road edge, never less
+JAM_RAMP = 0.10  # m/s toward the side and back after the mode
+JAM_PLAN_MIN_SPEED = 3.0  # m/s: the plan-based guard only acts above this (a standing plan does not follow a shift)
+DEFAULT_JAM_CLEARANCE = -0.10  # m, car body to the line on the shift side (- = over it); LaneCenteringJamClearance
+JAM_CLEARANCE_RANGE = (-0.30, 0.50)
+
 
 class OffsetMode(IntEnum):
   TRIM = 0
@@ -385,6 +399,15 @@ class LimitCause(IntEnum):
   WALL_NO_SHIFT_RIGHT = 7
   WALL_NO_SHIFT_LEFT = 8
   NARROW = 9
+  BLINDSPOT_RIGHT = 10  # jam mode: a car in the blind spot on the shift side holds the offset
+  BLINDSPOT_LEFT = 11
+
+
+class JamMode(IntEnum):
+  OFF = 0
+  AUTO = 1  # left in a clear LEFT lane, right in a clear RIGHT lane, otherwise centred
+  RIGHT = 2  # manual, until the jam ends
+  LEFT = 3
 
 
 
@@ -727,6 +750,150 @@ class ClearanceGuard:
     return out, cause
 
 
+class JamShift:
+  """Traffic-jam / emergency-corridor mode (camera mode only): below JAM_ON_SPEED the car moves to
+  one side of its lane instead of the centre, the body `clearance` from the line on that side
+  (negative = over it), never closer than JAM_EDGE_MARGIN to the road edge.
+
+  Side: LaneCenteringJamMode AUTO shifts left in a LEFT lane and right in a RIGHT lane (the
+  classifier's debounced position; MIDDLE, SINGLE and UNKNOWN stay centred) and only after
+  JAM_RECENT_SPEED within JAM_RECENT_S, so town traffic does not hug the kerb; RIGHT / LEFT force a
+  side until the jam ends (reset_manual asks controlsd to put the param back to AUTO).
+  The line on the shift side may only be crossed with a confident road edge on that side and no
+  lane behind the line (position LEFT/RIGHT on that side, or the edge within EDGE_NO_LANE of the
+  line); otherwise, and always in a MIDDLE lane, the body stops at the line.
+
+  Target: lane-centre geometry (half the low-passed lane width - half the car - clearance), not
+  the plan: a standing car's plan does not follow a camera shift, so offset_used + plan slack
+  would ratchet up to the cap. Above JAM_PLAN_MIN_SPEED the plan's slack to the line, the road
+  edge and radar walls bounds it as well (the plan follows a shift there). A car in the blind spot
+  on the shift side holds the offset where it is."""
+
+  def __init__(self):
+    self.mode = JamMode.AUTO
+    self.clearance = DEFAULT_JAM_CLEARANCE
+    self._since_fast = JAM_RECENT_S
+    self.reset_manual = False
+    self.reset()
+
+  def reset(self) -> None:
+    self.active = False
+    self.side = 0
+    self._off_t = 0.0
+    self._edge = _Bound(BOUND_HOLD)  # toward-side limit from the road edge, from the lane centre
+    self._plan = _Bound(BOUND_HOLD)  # toward-side limit from the plan, offset_used + slack
+    self.target = 0.0  # m, toward the side (>= 0)
+    self.cause = LimitCause.NONE
+    self.limited = False
+
+  def _leave(self) -> None:
+    if self.mode in (JamMode.RIGHT, JamMode.LEFT):
+      self.reset_manual = True
+    self.reset()
+
+  def update_speed(self, v_ego: float, dt: float = DT_CTRL) -> None:
+    v_ego = float(v_ego)
+    self._since_fast = 0.0 if v_ego > JAM_RECENT_SPEED else min(self._since_fast + dt, JAM_RECENT_S)
+    if self.mode == JamMode.OFF:
+      if self.active:
+        self.reset()
+      return
+    if not self.active:
+      if v_ego < JAM_ON_SPEED and (self.mode != JamMode.AUTO or self._since_fast < JAM_RECENT_S):
+        self.active, self._off_t = True, 0.0
+      return
+    self._off_t = self._off_t + dt if v_ego > JAM_OFF_SPEED else 0.0
+    if self._off_t >= JAM_OFF_HOLD:
+      self._leave()
+
+  def choose_side(self, pos: LanePosition) -> int:
+    if not self.active:
+      side = 0
+    elif self.mode == JamMode.RIGHT:
+      side = 1
+    elif self.mode == JamMode.LEFT:
+      side = -1
+    else:
+      side = 1 if pos == LanePosition.RIGHT else -1 if pos == LanePosition.LEFT else 0
+    if side != self.side:
+      self.clear_bounds()
+      self.target = 0.0
+      self.side = side
+    return side
+
+  def clear_bounds(self) -> None:
+    self._edge.reset()
+    self._plan.reset()
+
+  def update_frame(self, model_v2, v_ego: float, cam: float, pos: LanePosition, lane_width: float | None,
+                   half_width: float, offset_used: float, current: float, wall_bound: float | None,
+                   blindspot: bool) -> None:
+    """Once per NEW model frame. cam: camera offset the frame was run with (real = model + cam);
+    offset_used / current: offset (m, + = right) behind the frame / applied now; wall_bound: the
+    guard's radar-wall bound toward the side (offset_used + slack), None without a wall."""
+    s = self.side
+    if s == 0:
+      return
+    cur = max(s * current, 0.0)
+    try:
+      lines, probs = model_v2.laneLines, model_v2.laneLineProbs
+      edges, edge_stds = model_v2.roadEdges, model_v2.roadEdgeStds
+      i_line, i_edge = (2, 1) if s > 0 else (1, 0)
+      line_ok = len(lines) >= 3 and len(probs) >= 3 and probs[i_line] >= LINE_MIN_PROB
+      y1, y2 = _sample(lines[1]) + cam, _sample(lines[2]) + cam
+      if min(probs[1], probs[2]) >= LINE_MIN_PROB:
+        centre = 0.5 * (y1 + y2)
+      elif lane_width is not None and max(probs[1], probs[2]) >= LINE_MIN_PROB:
+        centre = y1 + 0.5 * lane_width if probs[1] >= probs[2] else y2 - 0.5 * lane_width
+      else:
+        centre = None
+      edge_y = _sample(edges[i_edge]) + cam if len(edges) >= 2 and len(edge_stds) >= 2 and edge_stds[i_edge] <= EDGE_MAX_STD else None
+      if edge_y is not None and not np.isfinite(edge_y):
+        edge_y = None
+      self._edge.update(None if centre is None or edge_y is None else s * (edge_y - centre) - half_width - JAM_EDGE_MARGIN, DT_MDL)
+      outer = pos == (LanePosition.RIGHT if s > 0 else LanePosition.LEFT)
+      line_y = y2 if s > 0 else y1
+      no_lane_behind = outer or (edge_y is not None and line_ok and s * (edge_y - line_y) < EDGE_NO_LANE)
+      cross = self._edge.value is not None and pos != LanePosition.MIDDLE and no_lane_behind
+      margin = self.clearance if cross else max(self.clearance, 0.0)
+      # the plan: only while rolling (standing, it does not follow a shift)
+      plan = None
+      if v_ego > JAM_PLAN_MIN_SPEED:
+        px = np.asarray(model_v2.position.x, dtype=float)
+        if px.size >= 2:
+          x = np.clip(np.array(GUARD_HORIZON) * float(v_ego), 3.0, min(40.0, float(px[-1])))
+          track = _interp(x, model_v2.position)
+          sl = []
+          if line_ok:
+            sl.append(float(np.min(s * (_interp(x, lines[i_line]) + cam - track))) - half_width - margin)
+          if edge_y is not None:
+            sl.append(float(np.min(s * (_interp(x, edges[i_edge]) + cam - track))) - half_width - JAM_EDGE_MARGIN)
+          sl = [v for v in sl if np.isfinite(v)]
+          if sl:
+            plan = s * offset_used + min(sl)
+      self._plan.update(plan, DT_MDL)
+    except (AttributeError, IndexError, TypeError, ValueError):
+      return
+
+    if lane_width is None or not np.isfinite(lane_width):
+      target, cause = cur, LimitCause.NONE  # no lane width yet: hold
+    else:
+      target, cause = 0.5 * lane_width - half_width - margin, LimitCause.NONE
+    line_cause = LimitCause.RIGHT_LINE if s > 0 else LimitCause.LEFT_LINE
+    limits = [(self._edge.value, LimitCause.RIGHT_EDGE if s > 0 else LimitCause.LEFT_EDGE),
+              (self._plan.value, line_cause)]
+    if v_ego > JAM_PLAN_MIN_SPEED:
+      limits.append((wall_bound, LimitCause.RIGHT_WALL if s > 0 else LimitCause.LEFT_WALL))
+    for lim, c in limits:
+      if lim is not None and lim < target:
+        target, cause = lim, c
+    if blindspot and target > cur:
+      target, cause = cur, LimitCause.BLINDSPOT_RIGHT if s > 0 else LimitCause.BLINDSPOT_LEFT
+    self.target = float(np.clip(target, 0.0, JAM_CAP))
+    self.cause = cause
+    self.limited = cause != LimitCause.NONE
+
+
 class DynamicLaneCentering:
   def __init__(self):
     self.enabled = False
@@ -756,6 +923,12 @@ class DynamicLaneCentering:
     self.limited = False
     self.limit_cause = LimitCause.NONE
     self._since_lane_change = LC_SETTLE
+    self.jam = JamShift()
+    self._jam_return = False  # offset beyond LEGACY_CAMERA_CAP left over from the jam mode
+
+  @property
+  def jam_on(self) -> bool:
+    return self.jam.active and self.jam.side != 0
 
   @property
   def position(self) -> LanePosition:
@@ -794,6 +967,11 @@ class DynamicLaneCentering:
     self.guard.oncoming_cap = _get_float(params, "LaneCenteringOncomingCap", ONCOMING_CAP, 0.0, 0.6)
     self.guard.narrow_from_lane = _get_float(params, "LaneCenteringNarrowMode", 0.0, 0.0, 1.0) >= 0.5
     self.half_width = _get_float(params, "LaneCenteringCarWidth", DEFAULT_CAR_WIDTH, 1.0, 3.0) / 2
+    try:
+      self.jam.mode = JamMode(int(_get_float(params, "LaneCenteringJamMode", float(JamMode.AUTO), 0.0, 3.0)))
+    except ValueError:
+      self.jam.mode = JamMode.AUTO
+    self.jam.clearance = _get_float(params, "LaneCenteringJamClearance", DEFAULT_JAM_CLEARANCE, *JAM_CLEARANCE_RANGE)
 
   def reset(self) -> None:
     self.controller.reset()
@@ -805,6 +983,8 @@ class DynamicLaneCentering:
     self.lane_width = None
     self._no_lines_time = 0.0
     self._since_lane_change = LC_SETTLE
+    self.jam.reset()
+    self._jam_return = False
 
   def _update_width(self, model_v2) -> None:
     """Per NEW modelV2 frame: low-pass the inner lane width (both inner lines confident; held
@@ -835,6 +1015,23 @@ class DynamicLaneCentering:
       return 0.0
     return float(np.clip((self.lane_width - OFFSET_ZERO_WIDTH) / (OFFSET_FULL_WIDTH - OFFSET_ZERO_WIDTH), 0.0, 1.0))
 
+  def _camera_clip(self, offset: float) -> float:
+    """The camera offset handed to modeld: up to JAM_CAP for the jam mode (and while its offset
+    ramps back), LEGACY_CAMERA_CAP otherwise -- modeld clipped there before the mode, so the
+    wall caps above it behave as they did."""
+    cap = JAM_CAP if self._jam_return or self.jam_on else LEGACY_CAMERA_CAP
+    return float(np.clip(offset, -cap, cap))
+
+  def _jam_frame(self, model_v2, v_ego: float, cam: float, pos: LanePosition, lat_active: bool, blindspot) -> None:
+    """Per NEW model frame: the jam side and its target."""
+    side = self.jam.choose_side(pos)
+    if side == 0 or not lat_active:
+      return
+    i = 0 if side > 0 else 1
+    wall = self.guard._w[i].value
+    self.jam.update_frame(model_v2, v_ego, cam, pos, self.lane_width, self.half_width, -cam, self.offset, wall,
+                          bool(blindspot[1] if side > 0 else blindspot[0]))
+
   def _ramp_offset(self, rate: float = OFFSET_RAMP_RATE) -> None:
     step = rate * DT_CTRL
     self.offset += min(max(self.offset_target - self.offset, -step), step)
@@ -851,11 +1048,13 @@ class DynamicLaneCentering:
         self.active = False
       # the camera offset is a model input: ramp it out, never step it
       self.guard.reset()
+      self.jam.reset()
       self.limited = False
       self.limit_cause = LimitCause.NONE
       self.offset_target = 0.0
-      self._ramp_offset()
-      self.camera_offset = -self.offset if self.mode == OffsetMode.CAMERA else 0.0
+      self._ramp_offset(JAM_RAMP if self._jam_return else OFFSET_RAMP_RATE)
+      self._jam_return = self._jam_return and abs(self.offset) > LEGACY_CAMERA_CAP
+      self.camera_offset = -self._camera_clip(self.offset) if self.mode == OffsetMode.CAMERA else 0.0
       return model_curvature
 
     if model_updated:
@@ -890,6 +1089,7 @@ class DynamicLaneCentering:
           lane_change = False
         if lane_change:  # the lines are about to belong to another lane: start over there
           self.guard.reset()
+          self.jam.clear_bounds()
           self._since_lane_change = 0.0
         else:
           cam = applied_camera_offset if applied_camera_offset is not None else self.camera_offset
@@ -898,6 +1098,7 @@ class DynamicLaneCentering:
           left_margin = self.oncoming_margin if self.oncoming and not self.guard.near[1] else None
           self.guard.set_slack(plan_slack(model_v2, v_ego, cam, self.half_width, self.margin, walls, self.wall_margin,
                                           multi_lane, left_margin, not self.oncoming), -cam)
+          self._jam_frame(model_v2, v_ego, cam, pos, lat_active, blindspot)
       self._since_lane_change = min(self._since_lane_change + DT_CTRL, LC_SETTLE)
       self.guard.settling = self._since_lane_change < LC_SETTLE
       self.guard.single = pos == LanePosition.SINGLE
@@ -909,21 +1110,39 @@ class DynamicLaneCentering:
         # leaves (lines and walls with their margins) -- route 28f ran it to -0.65 m toward a barrier
         lane = self.guard.lane_window
         nominal = self.guard.mid if lane is None or lane[0] > lane[1] else float(np.clip(self.guard.mid, lane[0], lane[1]))
-      self.offset_target, cause = self.guard.apply(nominal)
-      self.limited = abs(self.offset_target - nominal) > CAMERA_STATUS_SETTLED
-      self.limit_cause = cause if self.limited else LimitCause.NONE
-      step = self.offset_target - self.offset
-      fast = self.limited and self.guard.urgent(step)
-      self._ramp_offset(GUARD_RELEASE_RATE if fast else OFFSET_RAMP_RATE)
+      self.jam.update_speed(v_ego)
+      if not self.jam.active:
+        self.jam.choose_side(pos)
+      if self.jam_on and lat_active:
+        s = self.jam.side
+        self.offset_target = s * self.jam.target
+        self.limited = self.jam.limited
+        self.limit_cause = self.jam.cause
+        self._jam_return = True
+        # toward the side at JAM_RAMP; back from it fast when a limit tightened
+        back = s * (self.offset_target - self.offset) < 0.0 and self.jam.limited
+        self._ramp_offset(GUARD_RELEASE_RATE if back else JAM_RAMP)
+      else:
+        self.offset_target, cause = self.guard.apply(nominal)
+        self.limited = abs(self.offset_target - nominal) > CAMERA_STATUS_SETTLED
+        self.limit_cause = cause if self.limited else LimitCause.NONE
+        step = self.offset_target - self.offset
+        fast = self.limited and self.guard.urgent(step)
+        self._ramp_offset(GUARD_RELEASE_RATE if fast else JAM_RAMP if self._jam_return else OFFSET_RAMP_RATE)
+      self._jam_return = self._jam_return and (self.jam_on or abs(self.offset) > LEGACY_CAMERA_CAP)
       # modeld applies the offset; the model's lane lines and path are then in the shifted
       # frame, and the lane-position classifier only uses line-to-line distances
-      self.camera_offset = -self.offset
+      self.camera_offset = -self._camera_clip(self.offset)
       if self.controller.correction != 0.0 or self.correction != 0.0:
         self.controller.reset()
       self.correction = 0.0
       self.active = abs(self.offset) > 1e-3
       St = LaneCenteringStatus
-      if not lat_active or v_ego < 5.0:
+      if self.jam_on and lat_active and not self.limited:
+        self._camera_status = St.JAM_RIGHT if self.jam.side > 0 else St.JAM_LEFT
+      elif self.jam_on and lat_active:
+        self._camera_status = St.LIMITED
+      elif not lat_active or v_ego < 5.0:
         self._camera_status = St.STANDBY
       elif self.limited:
         self._camera_status = St.LIMITED

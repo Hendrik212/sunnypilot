@@ -79,6 +79,8 @@ class LaneCenteringStatus(IntEnum):
   HOLD_LEFT = 9    # offset settled, left / right of the lane centre
   HOLD_RIGHT = 10
   LIMITED = 11     # offset cut back by the clearance guard (too close to a line / road edge)
+  JAM_LEFT = 12    # traffic-jam / emergency-corridor mode, shifting to / holding the left
+  JAM_RIGHT = 13
 
 
 class LaneCenteringController:

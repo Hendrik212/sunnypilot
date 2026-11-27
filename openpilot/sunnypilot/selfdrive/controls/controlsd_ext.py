@@ -17,7 +17,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import MAX_LATERAL_ACCEL_NO_
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
-from openpilot.sunnypilot.selfdrive.controls.lib.dynamic_lane_centering import DynamicLaneCentering
+from openpilot.sunnypilot.selfdrive.controls.lib.dynamic_lane_centering import DynamicLaneCentering, JamMode
 from openpilot.sunnypilot.selfdrive.controls.lib.radar_walls import read_wall
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_shaper import LaneChangeShaper
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
@@ -58,6 +58,9 @@ class ControlsExt(ModelStateBase):
     self.lane_centering = DynamicLaneCentering()
     self._walls = (None, None)
     self.lane_centering.get_params(params)
+    # a manual jam side (onroad panel) lasts one jam, never into the next drive
+    if self.lane_centering.jam.mode in (JamMode.RIGHT, JamMode.LEFT):
+      self._reset_jam_mode()
     self.city_delay_boost = 0.30
     self.lagd_toggle = True
     self.city_speed_kph = CITY_SPEED_KPH
@@ -120,11 +123,18 @@ class ControlsExt(ModelStateBase):
     ratio = (speed_kph - city_speed_kph) / (highway_speed_kph - city_speed_kph)
     return city_delay + ratio * (highway_delay - city_delay)
 
+  def _reset_jam_mode(self) -> None:
+    self.lane_centering.jam.reset_manual = False
+    self.lane_centering.jam.mode = JamMode.AUTO
+    self.params.put("LaneCenteringJamMode", int(JamMode.AUTO))
+
   def get_params_sp(self, sm: messaging.SubMaster) -> None:
     if time.monotonic() - self._param_update_time > PARAMS_UPDATE_PERIOD:
       self.blinker_pause_lateral.get_params()
       self.lane_change_shaper.get_params(self.params)
       self.lane_centering.get_params(self.params)
+      if self.lane_centering.jam.reset_manual:
+        self._reset_jam_mode()
       try:
         v = float(self.params.get("MaxLateralAccel", return_default=True))
       except (TypeError, ValueError):

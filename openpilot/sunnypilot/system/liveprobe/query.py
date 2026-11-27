@@ -32,6 +32,8 @@ WHITELIST: dict[str, tuple[float, float]] = {
   "LaneCenteringOncomingClearance": (0.0, 0.6),
   "LaneCenteringOncomingCap": (0.0, 0.6),
   "LaneCenteringNarrowMode": (0.0, 1.0),
+  "LaneCenteringJamMode": (0, 3),  # 0 off, 1 auto, 2 right, 3 left
+  "LaneCenteringJamClearance": (-0.3, 0.5),  # m body to the line on the shift side, - = over it
   "LaneCenteringMinClearance": (0.0, 0.5),
   "LaneCenterOffset": (0.0, 0.3),
   "LaneCenterOffsetLeft": (-1.0, 0.4),  # negative = same as LaneCenterOffset

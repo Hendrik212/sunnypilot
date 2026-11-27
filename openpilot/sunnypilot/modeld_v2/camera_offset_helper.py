@@ -13,7 +13,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 # already rate-limited in controlsd; this second limit only guards against a step (controlsd
 # restart, mode switch) and the stale fallback to 0.
 LANE_CENTRE_MAX_RATE = 0.1  # m/s
-LANE_CENTRE_MAX_OFFSET = 0.50  # m, must admit dynamic_lane_centering.WALL_CAP
+LANE_CENTRE_MAX_OFFSET = 1.0  # m, must admit dynamic_lane_centering.JAM_CAP (controlsd caps 0.50 outside the jam mode)
 LANE_CENTRE_STALE_S = 1.0
 
 
